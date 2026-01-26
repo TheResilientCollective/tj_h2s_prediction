@@ -216,12 +216,12 @@ def feature_importance_viz(
     # Upload to timestamped path
     timestamp = datetime.now().strftime("%Y-%m-%d")
     timestamped_path = f"{OUTPUT_PATH}/visualizations/{timestamp}/feature_importance.png"
-    s3_resource.putFile(plot_bytes, timestamped_path, bucket=s3_resource.S3_BUCKET)
+    s3_resource.putFile(plot_bytes.read(), timestamped_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     # Upload to latest path
     plot_bytes.seek(0)  # Reset BytesIO position
-    latest_path = f"latest/{LATEST}/visualizations/feature_importance.png"
-    s3_resource.putFile(plot_bytes, latest_path, bucket=s3_resource.S3_BUCKET)
+    latest_path = f"{LATEST}/visualizations/feature_importance.png"
+    s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
     context.log.info(f"✓ Uploaded to S3: {latest_path}")

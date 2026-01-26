@@ -159,20 +159,33 @@ class S3Resource(ResourceWithS3Configuration):
     def putFile(
         self,
         data,
-        metadata={},
+
         path="test",
         content_type="application/octet-stream",
         bucket=None,
+            metadata=None,
     ):
         """Upload binary data to S3."""
         if bucket is None:
             bucket = self.S3_BUCKET
+        if isinstance(data, str):
+            data = data.encode("utf-8")
+            data_stream = io.BytesIO(data)
+            if content_type=="application/octet-stream":
+                content_type = "text/plain"
+            length = len(data)
+        elif isinstance(data, io.BytesIO):
+            data_stream=data
+            length = -1
+        else:
+            data_stream = io.BytesIO(data)
+            length =  len(data)
         try:
             result = self.getClient().put_object(
                 bucket,
                 path,
-                data=io.BytesIO(data),
-                length=len(data),
+                data=data_stream,
+                length=length,
                 content_type=content_type,
                 metadata=metadata,
             )
@@ -195,10 +208,11 @@ class S3Resource(ResourceWithS3Configuration):
         self,
         stream,
         length=-1,
-        metadata={},
+
         path="test",
         content_type="application/octet-stream",
         bucket=None,
+            metadata=None,
     ):
         """Upload data from a stream object directly to S3/MinIO."""
         if bucket is None:

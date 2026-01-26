@@ -106,13 +106,13 @@ class H2SPredictor:
         df = df.copy()
 
         # Convert time to datetime if present
-        if 'time' in df.columns:
-            df['time'] = pd.to_datetime(df['time'])
+        if 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'])
 
             # Extract temporal features
-            df['hour'] = df['time'].dt.hour
-            df['day_of_week'] = df['time'].dt.dayofweek
-            df['month'] = df['time'].dt.month
+            df['hour'] = df['date'].dt.hour
+            df['day_of_week'] = df['date'].dt.dayofweek
+            df['month'] = df['date'].dt.month
 
             # Cyclical encoding for hour
             df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
@@ -133,9 +133,20 @@ class H2SPredictor:
         # Encode categorical variables using dict lookups (instead of LabelEncoder)
         if 'wind_direction_categorical' in df.columns and self.wind_cat_mapping:
             df['wind_direction_cat_encoded'] = df['wind_direction_categorical'].map(self.wind_cat_mapping).fillna(-1).astype(int)
+        else:
+            # Default to -1 if column missing (unknown category)
+            df['wind_direction_cat_encoded'] = -1
 
         if 'tidal_state' in df.columns and self.tidal_mapping:
             df['tidal_state_encoded'] = df['tidal_state'].map(self.tidal_mapping).fillna(-1).astype(int)
+        else:
+            # Default to -1 if column missing (unknown category)
+            df['tidal_state_encoded'] = -1
+
+        # Add missing columns with default values (0 for missing measurements)
+        missing_cols = set(self.feature_cols) - set(df.columns)
+        for col in missing_cols:
+            df[col] = 0.0
 
         return df
 
