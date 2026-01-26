@@ -1,0 +1,10 @@
+[project]
+name = "tj-h2s-prediction"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.13"
+dependencies = [
+    "dagster==1.12.12",
+    "dagster-webserver",
+    "dagster-dg-cli",
+]

@@ -1,0 +1,19 @@
+# H2S Prediction System - Python Requirements
+# Install with: pip install -r requirements.txt
+
+# Core ML libraries
+pandas>=1.5.0
+numpy>=1.23.0
+scikit-learn>=1.2.0
+xgboost>=1.7.0
+
+# Optional but recommended
+matplotlib>=3.6.0  # For visualization
+seaborn>=0.12.0    # For enhanced plots
+
+# For API deployment (optional)
+flask>=2.3.0       # REST API
+gunicorn>=20.1.0   # Production server
+
+# For scheduling (optional)
+schedule>=1.1.0    # Job scheduling
