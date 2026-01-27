@@ -234,13 +234,31 @@ def generate_model_comparison(predictions: pd.DataFrame, actuals: pd.DataFrame,
     Returns:
         BytesIO object with PNG image data
     """
-    # Merge predictions with actuals
-    merged = predictions.merge(actuals, on=time_col, how='inner')
+    # Merge predictions with actuals - use suffixes to handle column conflicts
+    merged = predictions.merge(actuals, on=time_col, how='inner', suffixes=('_pred', '_actual'))
 
     if len(merged) == 0:
         # Return empty plot if no matching data
         fig, ax = plt.subplots(figsize=(14, 10))
         ax.text(0.5, 0.5, 'No matching timestamps between predictions and actuals',
+                ha='center', va='center', fontsize=14)
+        ax.axis('off')
+        buf = BytesIO()
+        plt.savefig(buf, format='png', dpi=300, bbox_inches='tight')
+        buf.seek(0)
+        plt.close(fig)
+        return buf
+
+    # Determine which H2S column to use (handle conflicts from merge)
+    h2s_col = 'H2S_actual' if 'H2S_actual' in merged.columns else 'H2S'
+
+    # Filter to only rows with non-null H2S measurements
+    merged = merged[merged[h2s_col].notna()].copy()
+
+    if len(merged) == 0:
+        # Return message if no actual measurements after filtering
+        fig, ax = plt.subplots(figsize=(14, 10))
+        ax.text(0.5, 0.5, 'No H2S measurements available for comparison',
                 ha='center', va='center', fontsize=14)
         ax.axis('off')
         buf = BytesIO()
@@ -258,7 +276,7 @@ def generate_model_comparison(predictions: pd.DataFrame, actuals: pd.DataFrame,
         else:
             return 'orange'
 
-    merged['actual_category'] = merged['H2S'].apply(categorize_h2s)
+    merged['actual_category'] = merged[h2s_col].apply(categorize_h2s)
 
     # Calculate metrics
     class_names = ['green', 'orange', 'yellow']

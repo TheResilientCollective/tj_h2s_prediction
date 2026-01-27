@@ -1,0 +1,5 @@
+ops:
+  raw_environmental_data:
+    config:
+      use_local_data: true
+      local_data_path: "/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/latest.csv"

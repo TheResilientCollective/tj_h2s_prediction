@@ -64,34 +64,60 @@ def h2s_model_artifacts(context: dg.AssetExecutionContext):
     group_name="h2s_prediction",
     required_resource_keys={"s3"},
     kinds={"csv", "s3"},
-    description="Environmental data loaded from S3 or local (includes H2S measurements if available)",
+    description="Environmental data loaded from S3 or local test data",
+    config_schema={
+        "use_local_data": dg.Field(
+            bool,
+            default_value=False,
+            description="Use local test data from data/ directory instead of S3 (for testing only)"
+        ),
+        "local_data_path": dg.Field(
+            str,
+            default_value="/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/latest.csv",
+            description="Path to local test data file (used when use_local_data=True)"
+        ),
+    }
 )
 def raw_environmental_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
-    """Load environmental data from S3 (latest/) or fallback to local.
+    """Load environmental data from S3 or local test data.
 
-    Tries to load from:
-    1. S3: latest/tijuana/weather_forecast/latest.csv (from openmeteo.py)
-    2. Fallback: Local data/modeldata_h2s.csv (includes H2S measurements for validation)
+    Production Mode (use_local_data=False):
+    - Loads from S3: latest/tijuana/weather_forecast/latest.csv
+    - FAILS if S3 data is not available (no fallback)
+    - If S3 data lacks H2S measurements, merges from local modeldata_h2s.csv
 
-    If S3 data doesn't have H2S measurements, attempts to merge from local modeldata_h2s.csv.
+    Test Mode (use_local_data=True):
+    - Loads from local data directory
+    - Use for testing when S3 is not available
     """
     s3_resource = context.resources.s3
+    use_local = context.op_config["use_local_data"]
+    local_path = context.op_config["local_data_path"]
 
-    # Try S3 first
-    try:
-        stream = s3_resource.get_stream(path="latest/tijuana/weather_forecast/latest.csv")
-        df = pd.read_csv(stream)
-        context.log.info("✓ Loaded from S3: latest/tijuana/weather_forecast/latest.csv")
-        source = "s3"
-    except Exception as e:
-        # Fallback to local data for testing
-        context.log.warning(f"Could not load from S3: {e}")
-        context.log.info("Falling back to local data/modeldata_h2s.csv")
-
-        local_path = "/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/modeldata_h2s.csv"
-        df = pd.read_csv(local_path)
-        context.log.info(f"✓ Loaded {len(df)} rows from local file")
-        source = "local"
+    if use_local:
+        # TEST MODE: Load from local data directory
+        context.log.info(f"TEST MODE: Loading from local file: {local_path}")
+        try:
+            df = pd.read_csv(local_path)
+            context.log.info(f"✓ Loaded {len(df)} rows from local test data")
+            source = "local"
+        except Exception as e:
+            raise RuntimeError(f"Failed to load local test data from {local_path}: {e}")
+    else:
+        # PRODUCTION MODE: Load from S3 (no fallback)
+        context.log.info("PRODUCTION MODE: Loading from S3...")
+        s3_path = "latest/tijuana/weather_forecast/latest.csv"
+        try:
+            stream = s3_resource.get_stream(path=s3_path)
+            df = pd.read_csv(stream)
+            context.log.info(f"✓ Loaded from S3: {s3_path}")
+            source = "s3"
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load environmental data from S3 path '{s3_path}'. "
+                f"Error: {e}\n"
+                f"For testing, set use_local_data=True in asset config."
+            )
 
     # Standardize time column
     if 'time' in df.columns:
@@ -409,7 +435,7 @@ def confusion_matrix_viz(
 def model_comparison_viz(
     context: dg.AssetExecutionContext,
     h2s_predictions: pd.DataFrame,
-    actual_h2s_data: pd.DataFrame
+    raw_environmental_data: pd.DataFrame
 ) -> None:
     """Generate and upload model comparison plot to S3.
 
@@ -419,11 +445,6 @@ def model_comparison_viz(
     from h2s.predictor.visualizations import generate_model_comparison
 
     s3_resource = context.resources.s3
-
-    # Check if we have actual data
-    if len(actual_h2s_data) == 0:
-        context.log.warning("⚠ No actual H2S data available - skipping model comparison")
-        return
 
     # Prepare predictions DataFrame with time column
     predictions_df = h2s_predictions.copy()
@@ -435,7 +456,7 @@ def model_comparison_viz(
             return
 
     # Ensure actuals has required columns
-    actuals_df = actual_h2s_data.copy()
+    actuals_df = raw_environmental_data.copy()
     if 'time' not in actuals_df.columns:
         time_cols = [col for col in actuals_df.columns if col.lower() == 'time']
         if time_cols:
@@ -446,16 +467,23 @@ def model_comparison_viz(
             context.log.error(f"❌ Actuals DataFrame missing time column. Available columns: {list(actuals_df.columns)}")
             return
 
-    # Ensure actuals has H2S column
+    # Check for H2S measurements
     h2s_cols = [col for col in actuals_df.columns if col.upper() == 'H2S' or 'h2s' in col.lower()]
     if not h2s_cols:
-        context.log.error(f"❌ Actuals DataFrame missing H2S column. Available columns: {list(actuals_df.columns)}")
+        context.log.warning("⚠ No H2S measurements available - skipping model comparison")
         return
 
     if 'H2S' not in actuals_df.columns:
         actuals_df['H2S'] = actuals_df[h2s_cols[0]]
 
-    context.log.info("Generating model comparison visualization...")
+    # Filter to only rows with non-null H2S measurements
+    actuals_df = actuals_df[actuals_df['H2S'].notna()].copy()
+
+    if len(actuals_df) == 0:
+        context.log.warning("⚠ No non-null H2S measurements available - skipping model comparison")
+        return
+
+    context.log.info(f"Generating model comparison visualization with {len(actuals_df)} H2S measurements...")
 
     plot_bytes = generate_model_comparison(
         predictions_df,
