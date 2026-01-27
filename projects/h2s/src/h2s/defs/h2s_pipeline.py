@@ -64,14 +64,16 @@ def h2s_model_artifacts(context: dg.AssetExecutionContext):
     group_name="h2s_prediction",
     required_resource_keys={"s3"},
     kinds={"csv", "s3"},
-    description="Environmental data loaded from S3 or local",
+    description="Environmental data loaded from S3 or local (includes H2S measurements if available)",
 )
 def raw_environmental_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
     """Load environmental data from S3 (latest/) or fallback to local.
 
     Tries to load from:
     1. S3: latest/tijuana/weather_forecast/latest.csv (from openmeteo.py)
-    2. Fallback: Local data/latest.csv for testing
+    2. Fallback: Local data/modeldata_h2s.csv (includes H2S measurements for validation)
+
+    If S3 data doesn't have H2S measurements, attempts to merge from local modeldata_h2s.csv.
     """
     s3_resource = context.resources.s3
 
@@ -80,17 +82,67 @@ def raw_environmental_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
         stream = s3_resource.get_stream(path="latest/tijuana/weather_forecast/latest.csv")
         df = pd.read_csv(stream)
         context.log.info("✓ Loaded from S3: latest/tijuana/weather_forecast/latest.csv")
+        source = "s3"
     except Exception as e:
         # Fallback to local data for testing
         context.log.warning(f"Could not load from S3: {e}")
-        context.log.info("Falling back to local data/latest.csv")
+        context.log.info("Falling back to local data/modeldata_h2s.csv")
 
-        local_path = "/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/latest.csv"
+        local_path = "/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/modeldata_h2s.csv"
         df = pd.read_csv(local_path)
         context.log.info(f"✓ Loaded {len(df)} rows from local file")
+        source = "local"
 
-    # Convert time to datetime
-    df['date'] = pd.to_datetime(df['date'])
+    # Standardize time column
+    if 'time' in df.columns:
+        df['date'] = pd.to_datetime(df['time'])
+    elif 'date' in df.columns:
+        df['date'] = pd.to_datetime(df['date'])
+
+    # Check if H2S measurements are present
+    h2s_cols = [col for col in df.columns if col.upper() == 'H2S' or ('h2s' in col.lower() and col.lower() != 'h2s_measured')]
+
+    # If no H2S measurements and we loaded from S3, try to merge from local modeldata_h2s.csv
+    if not h2s_cols and source == "s3":
+        try:
+            context.log.info("No H2S measurements in S3 data - attempting to merge from local modeldata_h2s.csv")
+            local_path = "/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/modeldata_h2s.csv"
+            h2s_df = pd.read_csv(local_path)
+
+            # Standardize time column in H2S data
+            if 'time' in h2s_df.columns:
+                h2s_df['merge_time'] = pd.to_datetime(h2s_df['time'])
+            elif 'date' in h2s_df.columns:
+                h2s_df['merge_time'] = pd.to_datetime(h2s_df['date'])
+
+            df['merge_time'] = df['date']
+
+            # Select only H2S columns from local file
+            h2s_measurement_cols = [col for col in h2s_df.columns if col.upper() == 'H2S' or col.lower() == 'h2s_measured']
+            if h2s_measurement_cols:
+                merge_cols = ['merge_time'] + h2s_measurement_cols
+                h2s_subset = h2s_df[merge_cols].copy()
+
+                # Merge on time
+                df = df.merge(h2s_subset, on='merge_time', how='left')
+                df = df.drop(columns=['merge_time'])
+
+                context.log.info(f"✓ Merged H2S measurements from local file")
+                h2s_cols = h2s_measurement_cols
+
+        except Exception as e:
+            context.log.warning(f"Could not merge H2S measurements from local file: {e}")
+
+    # Log H2S column availability
+    if h2s_cols:
+        context.log.info(f"✓ H2S measurements available in column: {h2s_cols[0]}")
+        h2s_col = h2s_cols[0]
+        non_null_count = df[h2s_col].notna().sum()
+        if non_null_count > 0:
+            context.log.info(f"  H2S values: {non_null_count}/{len(df)} rows")
+            context.log.info(f"  H2S range: {df[h2s_col].min():.2f} - {df[h2s_col].max():.2f} ppb")
+        else:
+            context.log.warning(f"  ⚠ H2S column exists but has no values")
 
     context.log.info(f"Loaded {len(df)} rows")
     context.log.info(f"Date range: {df['date'].min()} to {df['date'].max()}")
@@ -189,13 +241,46 @@ def h2s_alerts(
 
 
 # ==============================================================================
+# Asset Group: Actual Data (Optional)
+# ==============================================================================
+
+@dg.asset(
+    group_name="h2s_data",
+    required_resource_keys={"s3"},
+    kinds={"csv", "s3"},
+    description="Actual H2S measurements for validation (optional)",
+)
+def actual_h2s_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
+    """Load actual H2S measurements from S3 for model validation.
+
+    This is optional - visualizations will gracefully handle if not available.
+    Tries to load from S3: tijuana/forecast/actuals/latest.csv
+    """
+    s3_resource = context.resources.s3
+
+    try:
+        stream = s3_resource.get_stream(path="tijuana/forecast/actuals/latest.csv")
+        df = pd.read_csv(stream)
+        context.log.info(f"✓ Loaded actual H2S data from S3: {len(df)} rows")
+
+        # Ensure time column is datetime
+        if 'time' in df.columns:
+            df['time'] = pd.to_datetime(df['time'])
+
+        return df
+    except Exception as e:
+        context.log.warning(f"Could not load actual H2S data: {e}")
+        context.log.info("Returning empty DataFrame - visualizations requiring actuals will be skipped")
+        return pd.DataFrame()
+
+
+# ==============================================================================
 # Asset Group: Visualization & Export
 # ==============================================================================
 
 @dg.asset(
     group_name="h2s_visualization",
     required_resource_keys={"s3"},
-    kinds={"matplotlib", "s3"},
     description="Feature importance visualization stored to S3",
 )
 def feature_importance_viz(
@@ -219,8 +304,222 @@ def feature_importance_viz(
     s3_resource.putFile(plot_bytes.read(), timestamped_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     # Upload to latest path
-    plot_bytes.seek(0)  # Reset BytesIO position
+    plot_bytes.seek(0)
     latest_path = f"{LATEST}/visualizations/feature_importance.png"
+    s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
+
+    context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
+    context.log.info(f"✓ Uploaded to S3: {latest_path}")
+
+
+@dg.asset(
+    group_name="h2s_visualization",
+    required_resource_keys={"s3"},
+    description="Confusion matrix comparing predictions vs actuals (requires actual H2S data in raw_environmental_data)",
+)
+def confusion_matrix_viz(
+    context: dg.AssetExecutionContext,
+    h2s_predictions: pd.DataFrame,
+    raw_environmental_data: pd.DataFrame
+) -> None:
+    """Generate and upload confusion matrix plot to S3.
+
+    Requires actual H2S measurements in raw_environmental_data.
+    Skips if H2S measurements are not available in the data.
+    """
+    from h2s.predictor.visualizations import generate_confusion_matrix_with_metrics
+
+    s3_resource = context.resources.s3
+
+    # Check if raw data has H2S measurements
+    h2s_cols = [col for col in raw_environmental_data.columns if col.upper() == 'H2S' or 'h2s' in col.lower()]
+
+    if not h2s_cols:
+        context.log.warning("⚠ No H2S column found in raw_environmental_data - skipping confusion matrix")
+        context.log.info(f"Available columns: {list(raw_environmental_data.columns)}")
+        context.log.info("To generate confusion matrix, ensure raw environmental data includes an 'H2S' or 'h2s' column with actual measurements")
+        context.add_output_metadata({
+            "status": "skipped",
+            "reason": "No H2S measurements in raw_environmental_data",
+            "available_columns": list(raw_environmental_data.columns)
+        })
+        return
+
+    # Prepare actuals data
+    actuals_df = raw_environmental_data.copy()
+
+    # Ensure actuals has 'time' column (case-insensitive check)
+    if 'time' not in actuals_df.columns:
+        # Try to find time-like column (case-insensitive)
+        time_cols = [col for col in actuals_df.columns if col.lower() == 'time']
+        if time_cols:
+            actuals_df['time'] = actuals_df[time_cols[0]]
+        elif 'date' in actuals_df.columns:
+            actuals_df['time'] = actuals_df['date']
+        else:
+            context.log.error(f"❌ Raw data missing time column. Available columns: {list(actuals_df.columns)}")
+            return
+
+    # Rename H2S column if needed
+    if 'H2S' not in actuals_df.columns:
+        context.log.info(f"Renaming column '{h2s_cols[0]}' to 'H2S'")
+        actuals_df['H2S'] = actuals_df[h2s_cols[0]]
+
+    # Prepare predictions DataFrame with time column
+    predictions_df = h2s_predictions.copy()
+
+    # Ensure predictions has 'time' column
+    if 'time' not in predictions_df.columns:
+        if 'date' in predictions_df.columns:
+            predictions_df['time'] = predictions_df['date']
+        else:
+            context.log.error("❌ Predictions DataFrame missing both 'time' and 'date' columns")
+            return
+
+    context.log.info("Generating confusion matrix visualization...")
+    context.log.info(f"  Found H2S measurements: {len(actuals_df)} rows")
+    context.log.info(f"  Predictions: {len(predictions_df)} rows")
+    context.log.info(f"  H2S value range: {actuals_df['H2S'].min():.2f} - {actuals_df['H2S'].max():.2f} ppb")
+
+    plot_bytes = generate_confusion_matrix_with_metrics(
+        predictions_df,
+        actuals_df,
+        time_col='time'
+    )
+
+    # Upload to timestamped path
+    timestamp = datetime.now().strftime("%Y-%m-%d")
+    timestamped_path = f"{OUTPUT_PATH}/visualizations/{timestamp}/confusion_matrix.png"
+    s3_resource.putFile(plot_bytes.read(), timestamped_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
+
+    # Upload to latest path
+    plot_bytes.seek(0)
+    latest_path = f"{LATEST}/visualizations/confusion_matrix.png"
+    s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
+
+    context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
+    context.log.info(f"✓ Uploaded to S3: {latest_path}")
+
+
+@dg.asset(
+    group_name="h2s_visualization",
+    required_resource_keys={"s3"},
+    description="Model performance comparison plot (requires actual H2S data)",
+)
+def model_comparison_viz(
+    context: dg.AssetExecutionContext,
+    h2s_predictions: pd.DataFrame,
+    actual_h2s_data: pd.DataFrame
+) -> None:
+    """Generate and upload model comparison plot to S3.
+
+    Shows balanced accuracy, recall, precision, and confusion matrix.
+    Requires actual H2S measurements to compare against predictions.
+    """
+    from h2s.predictor.visualizations import generate_model_comparison
+
+    s3_resource = context.resources.s3
+
+    # Check if we have actual data
+    if len(actual_h2s_data) == 0:
+        context.log.warning("⚠ No actual H2S data available - skipping model comparison")
+        return
+
+    # Prepare predictions DataFrame with time column
+    predictions_df = h2s_predictions.copy()
+    if 'time' not in predictions_df.columns:
+        if 'date' in predictions_df.columns:
+            predictions_df['time'] = predictions_df['date']
+        else:
+            context.log.error("❌ Predictions DataFrame missing both 'time' and 'date' columns")
+            return
+
+    # Ensure actuals has required columns
+    actuals_df = actual_h2s_data.copy()
+    if 'time' not in actuals_df.columns:
+        time_cols = [col for col in actuals_df.columns if col.lower() == 'time']
+        if time_cols:
+            actuals_df['time'] = actuals_df[time_cols[0]]
+        elif 'date' in actuals_df.columns:
+            actuals_df['time'] = actuals_df['date']
+        else:
+            context.log.error(f"❌ Actuals DataFrame missing time column. Available columns: {list(actuals_df.columns)}")
+            return
+
+    # Ensure actuals has H2S column
+    h2s_cols = [col for col in actuals_df.columns if col.upper() == 'H2S' or 'h2s' in col.lower()]
+    if not h2s_cols:
+        context.log.error(f"❌ Actuals DataFrame missing H2S column. Available columns: {list(actuals_df.columns)}")
+        return
+
+    if 'H2S' not in actuals_df.columns:
+        actuals_df['H2S'] = actuals_df[h2s_cols[0]]
+
+    context.log.info("Generating model comparison visualization...")
+
+    plot_bytes = generate_model_comparison(
+        predictions_df,
+        actuals_df,
+        model_name="XGBoost Weighted",
+        time_col='time'
+    )
+
+    # Upload to timestamped path
+    timestamp = datetime.now().strftime("%Y-%m-%d")
+    timestamped_path = f"{OUTPUT_PATH}/visualizations/{timestamp}/model_comparison.png"
+    s3_resource.putFile(plot_bytes.read(), timestamped_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
+
+    # Upload to latest path
+    plot_bytes.seek(0)
+    latest_path = f"{LATEST}/visualizations/model_comparison.png"
+    s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
+
+    context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
+    context.log.info(f"✓ Uploaded to S3: {latest_path}")
+
+
+@dg.asset(
+    group_name="h2s_visualization",
+    required_resource_keys={"s3"},
+    description="Prediction timeline plot showing H2S predictions with environmental variables",
+)
+def prediction_timeline_viz(
+    context: dg.AssetExecutionContext,
+    h2s_predictions: pd.DataFrame,
+    raw_environmental_data: pd.DataFrame
+) -> None:
+    """Generate and upload prediction timeline plot to S3.
+
+    Shows predictions over time with environmental variables.
+    Includes actual H2S values if present in raw_environmental_data.
+    """
+    from h2s.predictor.visualizations import generate_prediction_timeline
+
+    s3_resource = context.resources.s3
+
+    # Prepare predictions DataFrame with time column
+    predictions_df = h2s_predictions.copy()
+    if 'date' in predictions_df.columns and 'time' not in predictions_df.columns:
+        predictions_df['time'] = predictions_df['date']
+
+    # Check if raw data has H2S measurements
+    h2s_cols = [col for col in raw_environmental_data.columns if col.upper() == 'H2S' or 'h2s' in col.lower()]
+
+    if h2s_cols:
+        context.log.info("Generating prediction timeline (with H2S actuals)...")
+    else:
+        context.log.info("Generating prediction timeline (predictions + environmental variables)...")
+
+    plot_bytes = generate_prediction_timeline(predictions_df, raw_environmental_data)
+
+    # Upload to timestamped path
+    timestamp = datetime.now().strftime("%Y-%m-%d")
+    timestamped_path = f"{OUTPUT_PATH}/visualizations/{timestamp}/prediction_timeline.png"
+    s3_resource.putFile(plot_bytes.read(), timestamped_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
+
+    # Upload to latest path
+    plot_bytes.seek(0)
+    latest_path = f"{LATEST}/visualizations/prediction_timeline.png"
     s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     context.log.info(f"✓ Uploaded to S3: {timestamped_path}")

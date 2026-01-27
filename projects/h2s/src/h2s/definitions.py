@@ -29,10 +29,14 @@ def defs():
     from h2s.defs.h2s_pipeline import (
         h2s_model_artifacts,
         raw_environmental_data,
+        actual_h2s_data,
         preprocessed_features,
         h2s_predictions,
         h2s_alerts,
         feature_importance_viz,
+        confusion_matrix_viz,
+        model_comparison_viz,
+        prediction_timeline_viz,
         predictions_export,
     )
 
@@ -41,10 +45,14 @@ def defs():
         assets=[
             h2s_model_artifacts,
             raw_environmental_data,
+            actual_h2s_data,
             preprocessed_features,
             h2s_predictions,
             h2s_alerts,
             feature_importance_viz,
+            confusion_matrix_viz,
+            model_comparison_viz,
+            prediction_timeline_viz,
             predictions_export,
         ],
         resources=resources[deployment_name]
