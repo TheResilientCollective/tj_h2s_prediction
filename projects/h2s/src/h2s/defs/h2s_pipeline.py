@@ -217,7 +217,7 @@ def h2s_predictions(
 ) -> pd.DataFrame:
     """Generate H2S predictions with probabilities.
 
-    Classifies each sample as green (<5 ppb), yellow (5-15 ppb), or orange (>=15 ppb).
+    Classifies each sample as green (<5 ppb), yellow (5-30 ppb), or orange (>=30 ppb).
     """
     context.log.info("Generating predictions...")
 

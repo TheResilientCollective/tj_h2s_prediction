@@ -6,7 +6,7 @@ This system uses machine learning prediction models to forecast hydrogen sulfide
 
 ### ✅ Current Implementation (v1.0)
 * Single pre-trained XGBoost model (NESTOR-BES site only)
-* 3-category prediction: green (<5 ppb), yellow (5-15 ppb), orange (≥15 ppb)
+* 3-category prediction: green (<5 ppb), yellow (5-30 ppb), orange (≥30 ppb)
 * Hourly forecast processing from S3
 * S3 storage for predictions and visualizations
 * 4 visualization types: feature importance, confusion matrix, model comparison, timeline
@@ -122,8 +122,8 @@ Retrieve data using the MinIO resource (named `s3`) and `store_assets` methods.
 
 ### H2S Categories (Current Implementation)
 * **Green:** H2S < 5 ppb (safe)
-* **Yellow:** 5 ≤ H2S < 15 ppb (caution)
-* **Orange:** H2S ≥ 15 ppb (alert)
+* **Yellow:** 5 ≤ H2S < 30 ppb (caution)
+* **Orange:** H2S ≥ 30 ppb (alert)
 
 ### Future Model Enhancements
 Expand predictions to test if we can improve performance:
@@ -242,7 +242,7 @@ For each monthly model:
 
 ### Real-Time Alerts
 **Trigger conditions:**
-* Orange level predictions (H2S ≥15 ppb)
+* Orange level predictions (H2S ≥30 ppb)
 * Critical: >30 ppb sustained for 2+ consecutive hours
 * Yellow alerts if confidence >80%
 

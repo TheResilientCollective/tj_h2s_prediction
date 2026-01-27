@@ -91,7 +91,7 @@ def generate_confusion_matrix(predictions: pd.DataFrame, actuals: pd.DataFrame) 
     def categorize_h2s(value):
         if value < 5:
             return 'green'
-        elif value < 15:
+        elif value < 30:
             return 'yellow'
         else:
             return 'orange'
@@ -170,7 +170,7 @@ def generate_confusion_matrix_with_metrics(predictions: pd.DataFrame, actuals: p
     def categorize_h2s(value):
         if value < 5:
             return 'green'
-        elif value < 15:
+        elif value < 30:
             return 'yellow'
         else:
             return 'orange'
@@ -271,7 +271,7 @@ def generate_model_comparison(predictions: pd.DataFrame, actuals: pd.DataFrame,
     def categorize_h2s(value):
         if value < 5:
             return 'green'
-        elif value < 15:
+        elif value < 30:
             return 'yellow'
         else:
             return 'orange'

@@ -25,7 +25,7 @@ deployment_name = os.environ.get("DAGSTER_DEPLOYMENT", "local")
 
 @definitions
 def defs():
-    # Import assets from h2s_pipeline
+    # Import prediction pipeline assets
     from h2s.defs.h2s_pipeline import (
         h2s_model_artifacts,
         raw_environmental_data,
@@ -40,9 +40,39 @@ def defs():
         predictions_export,
     )
 
-    # Create definitions with assets and resources
-    asset_defs = Definitions(
+    # Import training pipeline assets
+    from h2s.defs.h2s_training_pipeline import (
+        # Phase 1: Data Extraction
+        monthly_training_data,
+        relabeled_training_data,
+        data_quality_report,
+        training_data,
+        validation_data,
+        # Phase 2: Training
+        trained_model_cv,
+        model_training_metrics,
+        feature_importance_analysis,
+        # Phase 3: Validation
+        validation_predictions,
+        validation_report,
+        model_comparison_report,
+        # Phase 4: Deployment
+        deployment_approval,
+        archived_previous_model,
+        production_model_deployment,
+    )
+
+    # Import schedules and jobs
+    from h2s.defs.h2s_schedules import (
+        monthly_retraining_job,
+        deploy_approved_model_job,
+        monthly_retraining_schedule,
+    )
+
+    # Create definitions with assets, jobs, schedules, and resources
+    all_defs = Definitions(
         assets=[
+            # Prediction Pipeline Assets (11 assets)
             h2s_model_artifacts,
             raw_environmental_data,
             actual_h2s_data,
@@ -54,11 +84,37 @@ def defs():
             model_comparison_viz,
             prediction_timeline_viz,
             predictions_export,
+            # Training Pipeline Assets (14 assets)
+            # Phase 1: Data Extraction
+            monthly_training_data,
+            relabeled_training_data,
+            data_quality_report,
+            training_data,
+            validation_data,
+            # Phase 2: Training
+            trained_model_cv,
+            model_training_metrics,
+            feature_importance_analysis,
+            # Phase 3: Validation
+            validation_predictions,
+            validation_report,
+            model_comparison_report,
+            # Phase 4: Deployment
+            deployment_approval,
+            archived_previous_model,
+            production_model_deployment,
+        ],
+        jobs=[
+            monthly_retraining_job,
+            deploy_approved_model_job,
+        ],
+        schedules=[
+            monthly_retraining_schedule,
         ],
         resources=resources[deployment_name]
     )
 
-    # Load any additional component definitions
+    # Load any additional component definitions from defs/ folder
     component_defs = load_from_defs_folder(path_within_project=Path(__file__).parent / "defs")
 
-    return Definitions.merge(asset_defs, component_defs)
+    return Definitions.merge(all_defs, component_defs)

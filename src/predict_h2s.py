@@ -32,8 +32,8 @@ class H2SPredictor:
     
     Predicts H2S levels in three categories:
     - Green: H2S < 5 ppb (safe)
-    - Yellow: 5 ≤ H2S < 15 ppb (caution)
-    - Orange: H2S ≥ 15 ppb (alert)
+    - Yellow: 5 ≤ H2S < 30 ppb (caution)
+    - Orange: H2S ≥ 30 ppb (alert)
     """
     
     def __init__(self, model_path, preprocessing_path):

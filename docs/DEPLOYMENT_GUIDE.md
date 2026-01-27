@@ -161,8 +161,8 @@ time,site_name,...,predicted_category,probability_green,probability_orange,proba
 
 **predicted_category:**
 - `green`: H2S predicted < 5 ppb (safe)
-- `yellow`: H2S predicted 5-15 ppb (caution, monitor)
-- `orange`: H2S predicted ≥ 15 ppb (alert, take action)
+- `yellow`: H2S predicted 5-30 ppb (caution, monitor)
+- `orange`: H2S predicted ≥ 30 ppb (alert, take action)
 
 **Probabilities:**
 - Range: 0.0 to 1.0
@@ -388,7 +388,7 @@ df = predictions.merge(actual, on='time')
 
 # Calculate actual categories
 df['actual_category'] = df['H2S'].apply(
-    lambda x: 'green' if x < 5 else ('yellow' if x < 15 else 'orange')
+    lambda x: 'green' if x < 5 else ('yellow' if x < 30 else 'orange')
 )
 
 # Metrics
@@ -508,7 +508,7 @@ python predict_h2s.py \
 ### What the Model Can Do
 
 ✅ **Strengths:**
-- Detect 61.3% of critical orange events (H2S ≥ 15 ppb)
+- Detect 61.3% of critical orange events (H2S ≥ 30 ppb)
 - Provide 1-3 hour advance warning
 - Low false alarm rate (5.4%)
 - Process predictions in seconds

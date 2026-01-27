@@ -11,8 +11,8 @@ This is an H2S (Hydrogen Sulfide) prediction system for the NESTOR - BES wastewa
 
 The system uses an XGBoost classification model to predict H2S levels in three categories:
 - **Green:** H2S < 5 ppb (safe)
-- **Yellow:** 5 ≤ H2S < 15 ppb (caution)
-- **Orange:** H2S ≥ 15 ppb (alert)
+- **Yellow:** 5 ≤ H2S < 30 ppb (caution)
+- **Orange:** H2S ≥ 30 ppb (alert)
 
 **Model Performance:** 61.3% orange detection rate, 5.4% false alarm rate.
 
