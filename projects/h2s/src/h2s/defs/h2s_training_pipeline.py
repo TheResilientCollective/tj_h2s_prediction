@@ -47,11 +47,18 @@ from h2s.training.model_trainer import (
     train_model_with_cv, get_feature_importance, calculate_cv_summary
 )
 from h2s.training.validation import calculate_metrics, compare_models, format_metrics_report
+from h2s.utils import store_assets
+from h2s.constants import MODEL_PATH, TRAINING_PATH, ARCHIVE_PATH
 
-# S3 Path Constants
-MODEL_PATH = 'tijuana/forecast/models'
-TRAINING_PATH = 'tijuana/forecast/models/training'
-ARCHIVE_PATH = 'tijuana/forecast/models/archive'
+
+# ==============================================================================
+# Partition Definition: Monthly Training Runs
+# ==============================================================================
+
+monthly_training_partitions = dg.MonthlyPartitionsDefinition(
+    start_date="2025-09-01",
+    end_offset=0,  # Run up to current month
+)
 
 
 # ==============================================================================
@@ -61,7 +68,8 @@ ARCHIVE_PATH = 'tijuana/forecast/models/archive'
 @dg.asset(
     group_name="h2s_training_data",
     kinds={"csv"},
-    description="Historical H2S training data from modeldata_h2s.csv",
+    description="Historical H2S training data from modeldata_h2s.csv - Partitioned by month",
+    partitions_def=monthly_training_partitions,
     config_schema={
         "use_local_data": dg.Field(
             bool,
@@ -77,11 +85,6 @@ ARCHIVE_PATH = 'tijuana/forecast/models/archive'
             str,
             default_value="NESTOR - BES",
             description="Site to filter training data (NESTOR - BES, IB CIVIC CTR, SAN YSIDRO)"
-        ),
-        "month_offset": dg.Field(
-            int,
-            default_value=0,
-            description="Months back to filter (0=all data, 1=last month, 2=2 months ago, etc.)"
         )
     }
 )
@@ -133,18 +136,24 @@ def monthly_training_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
         df = df[df['site_name'] == site_filter].copy()
         context.log.info(f"Filtered to {site_filter}: {len(df)} rows")
 
-    # Filter by month offset if specified
-    month_offset = context.op_config["month_offset"]
-    if month_offset > 0:
-        from dateutil.relativedelta import relativedelta
-        cutoff_date = datetime.now() - relativedelta(months=month_offset)
-        start_date = cutoff_date.replace(day=1)
-        end_date = (start_date + relativedelta(months=1)) - relativedelta(days=1)
+    # Filter by partition month - CUMULATIVE (all data up to end of partition month)
+    # e.g., partition "2024-01-01" includes all data from beginning → 2024-01-31
+    partition_key = context.partition_key
+    if partition_key:
+        # Parse partition key: "2024-01-01" -> first day of month
+        partition_start = pd.to_datetime(partition_key).tz_localize('UTC')
 
-        df = df[(df['time'] >= start_date) & (df['time'] <= end_date)].copy()
+        # Create end date for the month (last day)
+        if partition_start.month == 12:
+            end_date = pd.Timestamp(partition_start.year + 1, 1, 1, tz='UTC') - pd.Timedelta(days=1)
+        else:
+            end_date = pd.Timestamp(partition_start.year, partition_start.month + 1, 1, tz='UTC') - pd.Timedelta(days=1)
+
+        # Cumulative filter: all data from beginning up to end of partition month
+        df = df[df['time'] <= end_date].copy()
         context.log.info(
-            f"Filtered to month offset {month_offset} "
-            f"({start_date.date()} to {end_date.date()}): {len(df)} rows"
+            f"Filtered to partition {partition_key} (CUMULATIVE) "
+            f"(all data up to {end_date.date()}): {len(df)} rows"
         )
 
     # Validate required columns
@@ -179,6 +188,7 @@ def monthly_training_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
     group_name="h2s_training_data",
     kinds={"python"},
     description="Apply new H2S thresholds (Yellow: 5-30 ppb, Orange: ≥30 ppb)",
+    partitions_def=monthly_training_partitions,
 )
 def relabeled_training_data(
     context: dg.AssetExecutionContext,
@@ -237,6 +247,7 @@ def relabeled_training_data(
     group_name="h2s_training_data",
     kinds={"validation"},
     description="Data quality validation report",
+    partitions_def=monthly_training_partitions,
 )
 def data_quality_report(
     context: dg.AssetExecutionContext,
@@ -314,6 +325,7 @@ def data_quality_report(
     group_name="h2s_training_data",
     kinds={"python"},
     description="Time-based training/validation split (80/20)",
+    partitions_def=monthly_training_partitions,
     config_schema={
         "validation_split": dg.Field(
             float,
@@ -359,6 +371,7 @@ def training_data(
 @dg.asset(
     group_name="h2s_training_data",
     description="Validation data (20% time-based split)",
+    partitions_def=monthly_training_partitions,
     config_schema={
         "validation_split": dg.Field(
             float,
@@ -624,11 +637,24 @@ def model_training_metrics(
         content_type='application/json'
     )
 
+    # Create metadata for training metrics
+    training_metadata = store_assets.objectMetadata(
+        name="H2S Model Training Metrics",
+        description=f"Cross-validation metrics and feature importance from {timestamp} training run",
+        variableMeasured=["Balanced Accuracy", "Precision", "Recall", "F1 Score", "Feature Importance"]
+    )
+    training_metadata.distribution = [
+        {"format": "json", "url": f"{base_path}/cv_metrics.json"},
+        {"format": "json", "url": f"{base_path}/training_metadata.json"},
+        {"format": "json", "url": f"{base_path}/feature_importance.json"},
+    ]
+    store_assets.metadata_to_s3(training_metadata, f"{base_path}/training_metrics", s3_resource)
+
     context.log.info(f"✓ Exported training artifacts to {base_path}")
 
     context.add_output_metadata({
         "s3_path": base_path,
-        "artifacts_exported": 3,
+        "artifacts_exported": 4,  # 3 data files + 1 metadata
     })
 
 
@@ -659,12 +685,24 @@ def feature_importance_analysis(
 
     # Upload to S3
     s3_path = f"{TRAINING_PATH}/{timestamp}/feature_importance.png"
+    plot_data = plot_bytes.read()
     s3_resource.putFile(
-        plot_bytes.read(),
+        plot_data,
         s3_path,
         bucket=s3_resource.S3_BUCKET,
         content_type='image/png'
     )
+
+    # Create metadata for visualization
+    viz_metadata = store_assets.objectMetadata(
+        name="H2S Feature Importance Visualization",
+        description=f"Feature importance plot from {timestamp} model training",
+        variableMeasured=["Feature Importance Scores"]
+    )
+    viz_metadata.distribution = [
+        {"format": "png", "url": s3_path},
+    ]
+    store_assets.metadata_to_s3(viz_metadata, f"{TRAINING_PATH}/{timestamp}/feature_importance", s3_resource)
 
     context.log.info(f"✓ Uploaded feature importance to {s3_path}")
 

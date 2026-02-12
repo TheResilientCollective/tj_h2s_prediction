@@ -1,0 +1,16 @@
+[project]
+name = "h2s-dashboard"
+version = "0.1.0"
+description = "H2S monitoring dashboard for Tijuana River region"
+requires-python = ">=3.11"
+dependencies = [
+    "panel>=1.4.0",
+    "holoviews>=1.19.0",
+    "hvplot>=0.10.0",
+    "bokeh>=3.4.0",
+    "folium>=0.17.0",
+    "matplotlib>=3.7.0",
+    "pyarrow>=14.0.0",
+    "pandas>=2.0.0",
+    "numpy>=1.23.0",
+]

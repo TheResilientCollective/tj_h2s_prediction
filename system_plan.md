@@ -15,9 +15,21 @@ This system uses machine learning prediction models to forecast hydrogen sulfide
 * Model performance: 61.3% orange detection rate, 5.4% false alarm rate
 
 ### 🔄 In Progress
-* Monthly model retraining workflow
 * Automated alerting system
 * Performance monitoring dashboard
+
+### ✅ Recently Completed
+* **Monthly model retraining workflow with partitioning** (Jan 2026)
+  * Implemented MonthlyPartitionsDefinition starting from 2025-09-01
+  * Added partitions to all 5 assets in h2s_training_data group:
+    - monthly_training_data (cumulative data filtering)
+    - relabeled_training_data (new thresholds: Yellow 5-30 ppb, Orange ≥30 ppb)
+    - data_quality_report (validation checks)
+    - training_data (80/20 time-based split)
+    - validation_data (20% held-out set)
+  * Enables backfilling historical training runs
+  * Cumulative partitions: each month trains on all data from start → end of that month
+  * S3 path constants centralized in h2s/constants.py (MODEL_PATH, TRAINING_PATH, ARCHIVE_PATH)
 
 ### 📋 Future Roadmap
 * Multi-site support (expand beyond NESTOR-BES)
@@ -165,13 +177,24 @@ Expand predictions to test if we can improve performance:
 * Significant data drift detected
 * Manual trigger for emergency updates
 
-**Process:**
-1. Extract training data from previous month
-2. Train model with cross-validation
-3. Generate validation metrics and visualizations
-4. Store in archive with timestamp
-5. Manual review and approval before production deployment
-6. Deploy to production with A/B testing
+**Process (with Partitioning):**
+1. **Data Extraction:** Load cumulative training data using MonthlyPartitionsDefinition
+   - Each partition includes all data from start → end of that month
+   - Enables backfilling historical training runs
+   - Example: `dg launch --assets monthly_training_data --partition 2025-09-01`
+2. **Relabeling:** Apply current H2S thresholds (Yellow: 5-30 ppb, Orange: ≥30 ppb)
+3. **Quality Validation:** Check data completeness, missing values, class balance
+4. **Train/Val Split:** Time-based 80/20 split on cumulative data
+5. **Model Training:** XGBoost with 5-fold time-series cross-validation
+6. **Validation:** Compare new model vs current production model on held-out set
+7. **Quality Gates:** Automated checks (balanced accuracy, orange recall/precision)
+8. **Manual Approval:** Human review before deployment
+9. **Archive & Deploy:** Backup current model, deploy new model to production
+
+**Partition Backfilling:**
+* Retrain historical models: `dg launch --assets training_data --partition-range 2025-09-01...2025-12-01`
+* Each partition trains on progressively more data (cumulative approach)
+* Stored in S3 at `tijuana/forecast/models/training/{YYYY_MM}/`
 
 ---
 
@@ -454,8 +477,8 @@ For each monthly model:
 * **Actual H2S levels:** Line chart with measured values
 * **Prediction indicators:**
   * Green: No marker (baseline)
-  * Yellow: Dot at 10 ppb threshold
-  * Orange: Dot at 15 ppb threshold
+  * Yellow: Dot at 15 ppb threshold
+  * Orange: Dot at 30 ppb threshold
 * **Confidence bands:** Shaded area showing prediction uncertainty
 * **Environmental overlay:** Toggle to show wind, temp, flow on same chart
 

@@ -112,7 +112,7 @@ class H2SPredictor:
             # Extract temporal features
             df['hour'] = df['date'].dt.hour
             df['day_of_week'] = df['date'].dt.dayofweek
-            df['month'] = df['date'].dt.month
+           # df['month'] = df['date'].dt.month
 
             # Cyclical encoding for hour
             df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)

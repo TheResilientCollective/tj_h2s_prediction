@@ -12,13 +12,14 @@ import dagster as dg
 import pandas as pd
 
 from h2s.utils import store_assets
+from h2s.constants import (
+    MODEL_PATH,
+    PREDICTIONS_PATH,
+    OUTPUT_PATH,
+    LATEST_FORECAST_DATA
+)
 
 STORE_ASSETS_AVAILABLE = True
-
-# Define S3 paths following tijuana/forecast conventions
-MODEL_PATH = 'tijuana/forecast/models'
-OUTPUT_PATH = 'tijuana/forecast/output'
-LATEST = 'tijuana/forecast_data'
 
 
 # ==============================================================================
@@ -331,7 +332,7 @@ def feature_importance_viz(
 
     # Upload to latest path
     plot_bytes.seek(0)
-    latest_path = f"{LATEST}/visualizations/feature_importance.png"
+    latest_path = f"latest/{LATEST_FORECAST_DATA}/visualizations/feature_importance.png"
     s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
@@ -420,7 +421,7 @@ def confusion_matrix_viz(
 
     # Upload to latest path
     plot_bytes.seek(0)
-    latest_path = f"{LATEST}/visualizations/confusion_matrix.png"
+    latest_path = f"latest/{LATEST_FORECAST_DATA}/visualizations/confusion_matrix.png"
     s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
@@ -499,7 +500,7 @@ def model_comparison_viz(
 
     # Upload to latest path
     plot_bytes.seek(0)
-    latest_path = f"{LATEST}/visualizations/model_comparison.png"
+    latest_path = f"latest/{LATEST_FORECAST_DATA}/visualizations/model_comparison.png"
     s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
@@ -547,7 +548,7 @@ def prediction_timeline_viz(
 
     # Upload to latest path
     plot_bytes.seek(0)
-    latest_path = f"{LATEST}/visualizations/prediction_timeline.png"
+    latest_path = f"latest/{LATEST_FORECAST_DATA}/visualizations/prediction_timeline.png"
     s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
@@ -567,56 +568,34 @@ def predictions_export(
     """Export predictions to S3 with versioning.
 
     Stores predictions in both timestamped and latest paths.
-    Uses store_assets utility if available, otherwise manual upload.
+    S3 Path: tijuana/forecast/predictions/
     """
     s3_resource = context.resources.s3
 
-    if STORE_ASSETS_AVAILABLE:
-        context.log.info("Using store_assets utility for export...")
+    context.log.info("Using store_assets utility for export...")
 
-        metadata = store_assets.objectMetadata(
-            name="H2S Predictions - NESTOR BES",
-            description="H2S category predictions with probabilities for NESTOR - BES site",
-            variableMeasured=["H2S Category", "Probability Scores", "Alert Status"],
-        )
+    metadata = store_assets.objectMetadata(
+        name="H2S Predictions - NESTOR BES",
+        description="H2S category predictions with probabilities for NESTOR - BES site",
+        variableMeasured=["H2S Category", "Probability Scores", "Alert Status"],
+    )
 
-        store_assets.store_dataframe_to_s3(
-            df=h2s_predictions,
-            path=OUTPUT_PATH,
-            dataset_identifier="h2s_predictions",
-            s3_resource=s3_resource,
-            metadata=metadata,
-            latestdatasetpath=f"latest/{LATEST}",
-            enable_latest_path=True,
-            formats=['csv', 'json']
-        )
+    store_assets.store_dataframe_to_s3(
+        df=h2s_predictions,
+        path=PREDICTIONS_PATH,
+        dataset_identifier="h2s_predictions",
+        s3_resource=s3_resource,
+        metadata=metadata,
+        latestdatasetpath=f"latest/{LATEST_FORECAST_DATA}",
+        enable_latest_path=True,
+        formats=['csv', 'json']
+    )
 
-        context.log.info(f"✓ Exported using store_assets to {OUTPUT_PATH}")
-
-    else:
-        # Manual export if store_assets not available
-        context.log.info("store_assets not available, using manual export...")
-
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H")
-
-        # Export CSV
-        csv_buffer = BytesIO()
-        h2s_predictions.to_csv(csv_buffer, index=False)
-        csv_buffer.seek(0)
-
-        csv_path = f"{OUTPUT_PATH}/{timestamp}/h2s_predictions.csv"
-        s3_resource.putFile(csv_buffer, csv_path, bucket=s3_resource.S3_BUCKET)
-
-        # Export to latest
-        csv_buffer.seek(0)
-        latest_csv_path = f"latest/{LATEST}/h2s_predictions.csv"
-        s3_resource.putFile(csv_buffer, latest_csv_path, bucket=s3_resource.S3_BUCKET)
-
-        context.log.info(f"✓ Exported CSV to {csv_path}")
-        context.log.info(f"✓ Exported CSV to {latest_csv_path}")
+    context.log.info(f"✓ Exported predictions to {PREDICTIONS_PATH}")
+    context.log.info(f"✓ Latest path: latest/{LATEST_FORECAST_DATA}")
 
     context.add_output_metadata({
         "row_count": len(h2s_predictions),
         "export_timestamp": datetime.now().isoformat(),
-        "s3_path": OUTPUT_PATH,
+        "s3_path": PREDICTIONS_PATH,
     })
