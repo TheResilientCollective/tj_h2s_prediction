@@ -40,6 +40,50 @@ def calculate_class_weights(y: pd.Series, label_map: Dict[str, int]) -> Dict[int
     return weights
 
 
+def apply_smote(X: pd.DataFrame, y: pd.Series, random_state: int = 42, logger=None) -> Tuple[pd.DataFrame, pd.Series]:
+    """Apply SMOTE to oversample minority classes.
+
+    Only oversamples yellow/orange (hazard) classes to improve recall on alerts.
+    Uses BorderlineSMOTE to focus on decision boundary samples.
+
+    Args:
+        X: Feature DataFrame
+        y: Encoded integer labels
+        random_state: Random seed
+        logger: Optional logger
+
+    Returns:
+        Resampled (X, y) with minority classes oversampled
+    """
+    from imblearn.over_sampling import BorderlineSMOTE, SMOTE
+
+    class_counts = y.value_counts()
+    min_samples = int(class_counts.min())
+    if logger:
+        logger.info(f"  Before SMOTE: {dict(class_counts)}")
+
+    # BorderlineSMOTE needs k_neighbors + 1 samples in the minority class.
+    # Fall back to plain SMOTE when the minority class is very small.
+    k = min(5, min_samples - 1)
+    if k < 1:
+        if logger:
+            logger.warning(f"  Skipping SMOTE: minority class has only {min_samples} sample(s)")
+        return X, y
+
+    try:
+        smote = BorderlineSMOTE(random_state=random_state, k_neighbors=k)
+        X_res, y_res = smote.fit_resample(X, y)
+    except ValueError:
+        smote = SMOTE(random_state=random_state, k_neighbors=k)
+        X_res, y_res = smote.fit_resample(X, y)
+
+    if logger:
+        resampled_counts = pd.Series(y_res).value_counts()
+        logger.info(f"  After SMOTE: {dict(resampled_counts)}")
+
+    return pd.DataFrame(X_res, columns=X.columns), pd.Series(y_res)
+
+
 def train_model_with_cv(
     X_train: pd.DataFrame,
     y_train: pd.Series,
@@ -49,6 +93,7 @@ def train_model_with_cv(
     max_depth: int = 6,
     learning_rate: float = 0.1,
     use_class_weights: bool = True,
+    use_smote: bool = False,
     random_state: int = 42,
     logger = None  # Optional logger for debugging
 ) -> Tuple[xgb.XGBClassifier, List[Dict]]:
@@ -63,6 +108,7 @@ def train_model_with_cv(
         max_depth: Maximum tree depth (default: 6)
         learning_rate: Learning rate (default: 0.1)
         use_class_weights: Whether to balance class weights (default: True)
+        use_smote: Whether to apply SMOTE oversampling on each fold's training data (default: False)
         random_state: Random seed for reproducibility (default: 42)
 
     Returns:
@@ -95,6 +141,12 @@ def train_model_with_cv(
         X_val_fold = X_train.iloc[val_idx]
         y_train_fold = y_encoded.iloc[train_idx]
         y_val_fold = y_encoded.iloc[val_idx]
+
+        # Apply SMOTE to fold training data only (not validation)
+        if use_smote:
+            if logger:
+                logger.info(f"Fold {fold+1}: Applying SMOTE...")
+            X_train_fold, y_train_fold = apply_smote(X_train_fold, y_train_fold, random_state=random_state, logger=logger)
 
         # Train fold model
         fold_model = xgb.XGBClassifier(
@@ -150,6 +202,21 @@ def train_model_with_cv(
 
         cv_metrics.append(fold_metrics)
 
+    # Apply SMOTE to full training set for final model
+    X_train_final = X_train
+    y_encoded_final = y_encoded
+    sample_weights_final = sample_weights
+    if use_smote:
+        if logger:
+            logger.info("Applying SMOTE to full training set for final model...")
+        X_train_final, y_encoded_final = apply_smote(X_train, y_encoded, random_state=random_state, logger=logger)
+        if use_class_weights:
+            class_weights_final = calculate_class_weights(
+                y_encoded_final.map({v: k for k, v in label_map.items()}),
+                label_map
+            )
+            sample_weights_final = y_encoded_final.map(class_weights_final).values
+
     # Train final model on full training set
     final_model = xgb.XGBClassifier(
         n_estimators=n_estimators,
@@ -163,9 +230,9 @@ def train_model_with_cv(
     )
 
     if use_class_weights:
-        final_model.fit(X_train, y_encoded, sample_weight=sample_weights)
+        final_model.fit(X_train_final, y_encoded_final, sample_weight=sample_weights_final)
     else:
-        final_model.fit(X_train, y_encoded)
+        final_model.fit(X_train_final, y_encoded_final)
 
     return final_model, cv_metrics
 

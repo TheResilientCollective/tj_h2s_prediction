@@ -64,9 +64,11 @@ def defs():
 
     # Import schedules and jobs
     from h2s.defs.h2s_schedules import (
-        monthly_retraining_job,
+        monthly_data_extraction_job,
+        monthly_model_training_job,
         deploy_approved_model_job,
-        monthly_retraining_schedule,
+        monthly_data_schedule,
+        monthly_model_training_schedule,
     )
 
     # Create definitions with assets, jobs, schedules, and resources
@@ -105,11 +107,13 @@ def defs():
             production_model_deployment,
         ],
         jobs=[
-            monthly_retraining_job,
+            monthly_data_extraction_job,
+            monthly_model_training_job,
             deploy_approved_model_job,
         ],
         schedules=[
-            monthly_retraining_schedule,
+            monthly_data_schedule,
+            monthly_model_training_schedule,
         ],
         resources=resources[deployment_name]
     )

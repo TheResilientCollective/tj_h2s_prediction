@@ -60,6 +60,18 @@ monthly_training_partitions = dg.MonthlyPartitionsDefinition(
     end_offset=0,  # Run up to current month
 )
 
+# Model variants — add new entries here to support additional models / ensemble members
+model_variant_partitions = dg.StaticPartitionsDefinition([
+    "xgboost_base",   # Standard XGBoost with class weights
+    "xgboost_smote",  # XGBoost with SMOTE oversampling on hazard classes
+])
+
+# Combined partition: every (month, variant) pair gets its own run and S3 path
+model_run_partitions = dg.MultiPartitionsDefinition({
+    "month": monthly_training_partitions,
+    "variant": model_variant_partitions,
+})
+
 
 # ==============================================================================
 # PHASE 1: Data Extraction & Preparation
@@ -78,7 +90,7 @@ monthly_training_partitions = dg.MonthlyPartitionsDefinition(
         ),
         "local_data_path": dg.Field(
             str,
-            default_value="/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/modeldata_h2s.csv",
+            default_value="/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/modeldata_h2s_nofill.csv",
             description="Path to local training data file"
         ),
         "site_filter": dg.Field(
@@ -421,7 +433,13 @@ def validation_data(
 @dg.asset(
     group_name="h2s_model_training",
     kinds={"xgboost", "ml"},
-    description="Train XGBoost model with 5-fold time-series cross-validation",
+    description="Train XGBoost model with 5-fold time-series cross-validation. Partition variant controls preprocessing (xgboost_base=class weights only, xgboost_smote=SMOTE oversampling).",
+    partitions_def=model_run_partitions,
+    ins={
+        "training_data": dg.AssetIn(
+            partition_mapping=dg.MultiToSingleDimensionPartitionMapping("month")
+        ),
+    },
     config_schema={
         "n_folds": dg.Field(int, default_value=5, description="Number of CV folds"),
         "n_estimators": dg.Field(int, default_value=100, description="Number of boosting rounds"),
@@ -452,6 +470,16 @@ def trained_model_cv(
     context.log.info("=" * 60)
     context.log.info("STARTING trained_model_cv asset")
     context.log.info("=" * 60)
+
+    # Derive variant from partition key
+    multi_key = context.partition_key
+    month_key = multi_key.keys_by_dimension["month"]
+    variant = multi_key.keys_by_dimension["variant"]
+    month_str = pd.to_datetime(month_key).strftime("%Y_%m")
+    use_smote = variant == "xgboost_smote"
+
+    context.log.info(f"Partition: month={month_key}, variant={variant}")
+    context.log.info(f"SMOTE enabled: {use_smote}")
 
     # Extract training data
     train_df = training_data.copy()
@@ -525,6 +553,7 @@ def trained_model_cv(
         max_depth=context.op_config['max_depth'],
         learning_rate=context.op_config['learning_rate'],
         use_class_weights=context.op_config['use_class_weights'],
+        use_smote=use_smote,
         random_state=42,
         logger=context.log  # Pass logger for debugging
     )
@@ -550,6 +579,8 @@ def trained_model_cv(
     class_dist = y_train.value_counts().to_dict()
     training_metadata = {
         'trained_at': datetime.now().isoformat(),
+        'variant': variant,
+        'month': month_key,
         'n_samples': len(train_df),
         'n_features': len(available_features),
         'class_distribution': class_dist,
@@ -559,6 +590,7 @@ def trained_model_cv(
             'max_depth': context.op_config['max_depth'],
             'learning_rate': context.op_config['learning_rate'],
             'use_class_weights': context.op_config['use_class_weights'],
+            'use_smote': use_smote,
         },
         'cv_mean_balanced_accuracy': cv_summary['balanced_accuracy_mean'],
         'cv_mean_orange_recall': cv_summary.get('recall_orange_mean', 0.0),  # May be 0 if no orange class
@@ -586,7 +618,9 @@ def trained_model_cv(
         'model': model,
         'cv_metrics': cv_metrics,
         'feature_importance': feature_importance,
-        'training_metadata': training_metadata
+        'training_metadata': training_metadata,
+        'variant': variant,
+        'month_str': month_str,
     }
 
 
@@ -595,6 +629,7 @@ def trained_model_cv(
     required_resource_keys={"s3"},
     kinds={"s3", "json"},
     description="Export training metrics to S3",
+    partitions_def=model_run_partitions,
 )
 def model_training_metrics(
     context: dg.AssetExecutionContext,
@@ -602,11 +637,12 @@ def model_training_metrics(
 ) -> None:
     """Export training metrics and CV results to S3.
 
-    S3 Path: tijuana/forecast/models/training/{YYYY_MM}/
+    S3 Path: tijuana/forecast/models/training/{YYYY_MM}/{variant}/
     """
     s3_resource = context.resources.s3
-    timestamp = datetime.now().strftime("%Y_%m")
-    base_path = f"{TRAINING_PATH}/{timestamp}"
+    month_str = trained_model_cv['month_str']
+    variant = trained_model_cv['variant']
+    base_path = f"{TRAINING_PATH}/{month_str}/{variant}"
 
     context.log.info(f"Exporting training metrics to S3: {base_path}")
 
@@ -640,7 +676,7 @@ def model_training_metrics(
     # Create metadata for training metrics
     training_metadata = store_assets.objectMetadata(
         name="H2S Model Training Metrics",
-        description=f"Cross-validation metrics and feature importance from {timestamp} training run",
+        description=f"Cross-validation metrics and feature importance from {month_str}/{variant} training run",
         variableMeasured=["Balanced Accuracy", "Precision", "Recall", "F1 Score", "Feature Importance"]
     )
     training_metadata.distribution = [
@@ -663,6 +699,7 @@ def model_training_metrics(
     required_resource_keys={"s3"},
     kinds={"visualization", "s3"},
     description="Generate and export feature importance visualization",
+    partitions_def=model_run_partitions,
 )
 def feature_importance_analysis(
     context: dg.AssetExecutionContext,
@@ -673,9 +710,10 @@ def feature_importance_analysis(
     from h2s.predictor.visualizations import generate_feature_importance
 
     s3_resource = context.resources.s3
-    timestamp = datetime.now().strftime("%Y_%m")
+    month_str = trained_model_cv['month_str']
+    variant = trained_model_cv['variant']
 
-    context.log.info("Generating feature importance visualization...")
+    context.log.info(f"Generating feature importance visualization for {variant}...")
 
     # Generate plot
     new_model = trained_model_cv['model']
@@ -684,7 +722,7 @@ def feature_importance_analysis(
     plot_bytes = generate_feature_importance(new_model, prep_info, top_n=15)
 
     # Upload to S3
-    s3_path = f"{TRAINING_PATH}/{timestamp}/feature_importance.png"
+    s3_path = f"{TRAINING_PATH}/{month_str}/{variant}/feature_importance.png"
     plot_data = plot_bytes.read()
     s3_resource.putFile(
         plot_data,
@@ -696,13 +734,13 @@ def feature_importance_analysis(
     # Create metadata for visualization
     viz_metadata = store_assets.objectMetadata(
         name="H2S Feature Importance Visualization",
-        description=f"Feature importance plot from {timestamp} model training",
+        description=f"Feature importance plot from {month_str}/{variant} model training",
         variableMeasured=["Feature Importance Scores"]
     )
     viz_metadata.distribution = [
         {"format": "png", "url": s3_path},
     ]
-    store_assets.metadata_to_s3(viz_metadata, f"{TRAINING_PATH}/{timestamp}/feature_importance", s3_resource)
+    store_assets.metadata_to_s3(viz_metadata, f"{TRAINING_PATH}/{month_str}/{variant}/feature_importance", s3_resource)
 
     context.log.info(f"✓ Uploaded feature importance to {s3_path}")
 
@@ -722,6 +760,12 @@ def feature_importance_analysis(
     group_name="h2s_model_validation",
     kinds={"ml", "validation"},
     description="Generate predictions on validation set using newly trained model",
+    partitions_def=model_run_partitions,
+    ins={
+        "validation_data": dg.AssetIn(
+            partition_mapping=dg.MultiToSingleDimensionPartitionMapping("month")
+        ),
+    },
 )
 def validation_predictions(
     context: dg.AssetExecutionContext,
@@ -800,6 +844,12 @@ def validation_predictions(
     required_resource_keys={"s3"},
     kinds={"ml", "validation"},
     description="Compare new model vs current production model with quality gates",
+    partitions_def=model_run_partitions,
+    ins={
+        "validation_data": dg.AssetIn(
+            partition_mapping=dg.MultiToSingleDimensionPartitionMapping("month")
+        ),
+    },
 )
 def validation_report(
     context: dg.AssetExecutionContext,
@@ -822,7 +872,9 @@ def validation_report(
     context.log.info("=" * 60)
 
     s3_resource = context.resources.s3
-    timestamp = datetime.now().strftime("%Y_%m")
+    multi_key = context.partition_key
+    month_str = pd.to_datetime(multi_key.keys_by_dimension["month"]).strftime("%Y_%m")
+    variant = multi_key.keys_by_dimension["variant"]
 
     val_df = validation_data.copy()
 
@@ -914,7 +966,8 @@ def validation_report(
     # === EXPORT TO S3 ===
     validation_report_json = {
         'timestamp': datetime.now().isoformat(),
-        'validation_period': timestamp,
+        'validation_period': month_str,
+        'variant': variant,
         'validation_samples': len(val_df),
         'approval_recommended': approval_recommended,
         'comparison_details': comparison_details,
@@ -922,7 +975,7 @@ def validation_report(
         'current_model_metrics': current_metrics,
     }
 
-    s3_path = f"{TRAINING_PATH}/{timestamp}/validation_report.json"
+    s3_path = f"{TRAINING_PATH}/{month_str}/{variant}/validation_report.json"
     s3_resource.putFile(
         json.dumps(validation_report_json, indent=2).encode('utf-8'),
         s3_path,
@@ -949,6 +1002,7 @@ def validation_report(
     required_resource_keys={"s3"},
     kinds={"ml", "visualization"},
     description="Generate visual comparison of new vs current model performance",
+    partitions_def=model_run_partitions,
 )
 def model_comparison_report(
     context: dg.AssetExecutionContext,
@@ -968,7 +1022,8 @@ def model_comparison_report(
     context.log.info("=" * 60)
 
     s3_resource = context.resources.s3
-    timestamp = datetime.now().strftime("%Y_%m")
+    month_str = validation_report['validation_period']
+    variant = validation_report['variant']
 
     new_metrics = validation_report['new_model_metrics']
     current_metrics = validation_report['current_model_metrics']
@@ -1078,7 +1133,7 @@ def model_comparison_report(
     plt.close()
 
     # Upload to S3
-    s3_path = f"{TRAINING_PATH}/{timestamp}/model_comparison.png"
+    s3_path = f"{TRAINING_PATH}/{month_str}/{variant}/model_comparison.png"
     s3_resource.putFile(
         plot_bytes.read(),
         s3_path,
@@ -1104,6 +1159,7 @@ def model_comparison_report(
     group_name="h2s_model_deployment",
     kinds={"ml", "deployment"},
     description="Manual approval gate for model deployment (BLOCKS auto-deployment)",
+    partitions_def=model_run_partitions,
     config_schema={
         "approve_deployment": dg.Field(
             bool,
@@ -1210,6 +1266,7 @@ def deployment_approval(
     required_resource_keys={"s3"},
     kinds={"ml", "deployment", "archival"},
     description="Archive current production model before deployment",
+    partitions_def=model_run_partitions,
 )
 def archived_previous_model(
     context: dg.AssetExecutionContext,
@@ -1233,8 +1290,10 @@ def archived_previous_model(
     context.log.info("=" * 60)
 
     s3_resource = context.resources.s3
-    timestamp = datetime.now().strftime("%Y_%m")
-    archive_dir = f"{ARCHIVE_PATH}/{timestamp}"
+    multi_key = context.partition_key
+    month_str = pd.to_datetime(multi_key.keys_by_dimension["month"]).strftime("%Y_%m")
+    variant = multi_key.keys_by_dimension["variant"]
+    archive_dir = f"{ARCHIVE_PATH}/{month_str}/{variant}"
 
     # Current production model paths
     current_model_path = f"{MODEL_PATH}/nestor_xgboost_weighted_model.json"
@@ -1312,6 +1371,7 @@ def archived_previous_model(
     required_resource_keys={"s3"},
     kinds={"ml", "deployment"},
     description="Deploy new trained model to production S3 paths",
+    partitions_def=model_run_partitions,
 )
 def production_model_deployment(
     context: dg.AssetExecutionContext,

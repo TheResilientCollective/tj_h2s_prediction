@@ -1,3 +1,4 @@
+
 # H2S Prediction System for Tijuana River Valley
 presently, limited to single site: NESTOR - BES
 
@@ -131,21 +132,21 @@ alerts = predictions[predictions['alert'] == True]
 - ❌ Work without sensor data
 - ❌ Detect instant spikes
 
-**Use for:** Early warning, planning, trend analysis  
+**Use for:** Early warning, planning, trend analysis
 **Don't use for:** Emergency response, regulatory compliance alone
 
 ## 🔧 Troubleshooting
 
-**Problem:** "Model file not found"  
+**Problem:** "Model file not found"
 **Solution:** Ensure .json and .pkl files are in same directory
 
-**Problem:** "Column not found"  
+**Problem:** "Column not found"
 **Solution:** Check your CSV has all required columns (see DEPLOYMENT_GUIDE.md)
 
-**Problem:** "Too many false alarms"  
+**Problem:** "Too many false alarms"
 **Solution:** Increase thresholds (--orange-threshold 0.40)
 
-**Problem:** "Missing too many events"  
+**Problem:** "Missing too many events"
 **Solution:** Decrease thresholds (--orange-threshold 0.25)
 
 ## 📞 Support

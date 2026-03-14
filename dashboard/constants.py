@@ -3,7 +3,7 @@
 # Data URLs (public S3 bucket, no auth needed)
 H2S_DATA_URL = (
     "https://oss.resilientservice.mooo.com/resilentpublic/"
-    "latest/tijuana/forecast_data/modeldata_h2s.parquet"
+    "latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet"
 )
 LOCATIONS_URL = (
     "https://oss.resilientservice.mooo.com/resilentpublic/"
@@ -11,7 +11,7 @@ LOCATIONS_URL = (
 )
 COMPLAINTS_URL = (
     "https://oss.resilientservice.mooo.com/resilentpublic/"
-    "tijuana/sd_complaints/output/latest/complaints.csv"
+    "latest/tijuana/sd_complaints/complaints.csv"
 )
 
 # H2S thresholds (ppb) per CAAQS standard
