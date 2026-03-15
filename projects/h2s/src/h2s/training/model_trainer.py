@@ -237,6 +237,78 @@ def train_model_with_cv(
     return final_model, cv_metrics
 
 
+def train_random_forest_with_cv(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    label_map: Dict[str, int],
+    n_folds: int = 5,
+    n_estimators: int = 300,
+    max_depth: int = None,
+    use_class_weights: bool = True,
+    use_smote: bool = False,
+    random_state: int = 42,
+    logger=None,
+) -> Tuple["sklearn.ensemble.RandomForestClassifier", List[Dict]]:  # noqa: F821
+    """Train a Random Forest classifier with time-series cross-validation.
+
+    Same interface as train_model_with_cv so callers can swap models transparently.
+    """
+    from sklearn.ensemble import RandomForestClassifier
+
+    y_encoded = y_train.map(label_map)
+
+    class_weight_arg = "balanced" if use_class_weights else None
+
+    tscv = TimeSeriesSplit(n_splits=n_folds)
+    cv_metrics = []
+
+    for fold, (train_idx, val_idx) in enumerate(tscv.split(X_train)):
+        X_fold = X_train.iloc[train_idx]
+        X_val  = X_train.iloc[val_idx]
+        y_fold = y_encoded.iloc[train_idx]
+        y_val  = y_encoded.iloc[val_idx]
+
+        if use_smote:
+            X_fold, y_fold = apply_smote(X_fold, y_fold, random_state=random_state, logger=logger)
+
+        fold_model = RandomForestClassifier(
+            n_estimators=n_estimators,
+            max_depth=max_depth,
+            class_weight=class_weight_arg,
+            random_state=random_state,
+            n_jobs=-1,
+        )
+        fold_model.fit(X_fold, y_fold)
+
+        y_pred = fold_model.predict(X_val)
+        try:
+            fold_metrics = calculate_metrics(y_val.values, y_pred)
+        except ValueError as e:
+            if logger:
+                logger.error(f"Fold {fold+1} metrics error: {e}")
+            raise
+        fold_metrics['fold'] = fold + 1
+        fold_metrics['train_size'] = len(train_idx)
+        fold_metrics['val_size']   = len(val_idx)
+        cv_metrics.append(fold_metrics)
+
+    # Final model on full training set
+    X_final, y_final = X_train, y_encoded
+    if use_smote:
+        X_final, y_final = apply_smote(X_train, y_encoded, random_state=random_state, logger=logger)
+
+    final_model = RandomForestClassifier(
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        class_weight=class_weight_arg,
+        random_state=random_state,
+        n_jobs=-1,
+    )
+    final_model.fit(X_final, y_final)
+
+    return final_model, cv_metrics
+
+
 def get_feature_importance(model: xgb.XGBClassifier,
                            feature_names: List[str],
                            importance_type: str = 'gain') -> Dict[str, float]:

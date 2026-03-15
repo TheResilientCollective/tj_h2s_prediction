@@ -1,0 +1,25 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="dahsboard" type="UvRunConfigurationType" factoryName="UvRunConfigurationType">
+    <option name="args">
+      <list>
+        <option value="serve" />
+        <option value="dashboard/app.py" />
+        <option value="--port" />
+        <option value="5006" />
+        <option value="--show" />
+        <option value="--autoreload" />
+      </list>
+    </option>
+    <option name="checkSync" value="true" />
+    <option name="env">
+      <map />
+    </option>
+    <option name="runType" value="MODULE" />
+    <option name="scriptOrModule" value="panel" />
+    <option name="uvArgs">
+      <list />
+    </option>
+    <option name="uvSdkKey" value="uv (dashboard)" />
+    <method v="2" />
+  </configuration>
+</component>

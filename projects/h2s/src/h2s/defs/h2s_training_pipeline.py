@@ -44,7 +44,8 @@ import seaborn as sns
 from h2s.predictor.visualizations import generate_feature_importance
 from h2s.training.relabeling import categorize_h2s, apply_categorization, get_threshold_info
 from h2s.training.model_trainer import (
-    train_model_with_cv, get_feature_importance, calculate_cv_summary
+    train_model_with_cv, train_random_forest_with_cv,
+    get_feature_importance, calculate_cv_summary
 )
 from h2s.training.validation import calculate_metrics, compare_models, format_metrics_report
 from h2s.utils import store_assets
@@ -62,8 +63,9 @@ monthly_training_partitions = dg.MonthlyPartitionsDefinition(
 
 # Model variants — add new entries here to support additional models / ensemble members
 model_variant_partitions = dg.StaticPartitionsDefinition([
-    "xgboost_base",   # Standard XGBoost with class weights
-    "xgboost_smote",  # XGBoost with SMOTE oversampling on hazard classes
+    "xgboost_base",    # Standard XGBoost with class weights
+    "xgboost_smote",   # XGBoost with SMOTE oversampling on hazard classes
+    "random_forest",   # Random Forest with balanced class weights
 ])
 
 # Combined partition: every (month, variant) pair gets its own run and S3 path
@@ -90,8 +92,8 @@ model_run_partitions = dg.MultiPartitionsDefinition({
         ),
         "local_data_path": dg.Field(
             str,
-            default_value="/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/modeldata_h2s_nofill.csv",
-            description="Path to local training data file"
+            default_value="/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/modeldata_h2s_nofill.parquet",
+            description="Path to local training data file (.parquet or .csv)"
         ),
         "site_filter": dg.Field(
             str,
@@ -131,7 +133,13 @@ def monthly_training_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
                 f"Ensure modeldata_h2s.csv exists in /data/ directory."
             )
 
-        df = pd.read_csv(local_path)
+        if local_path.endswith('.parquet'):
+            df = pd.read_parquet(local_path)
+        else:
+            df = pd.read_csv(local_path)
+            # Legacy CSV used 'D' as the time column
+            if 'D' in df.columns and 'time' not in df.columns:
+                df['time'] = pd.to_datetime(df['D'])
     else:
         # Future: Load from S3
         raise NotImplementedError(
@@ -140,8 +148,8 @@ def monthly_training_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
 
     context.log.info(f"Loaded {len(df)} rows")
 
-    # Parse time column (CSV uses 'D' for date/time)
-    df['time'] = pd.to_datetime(df['D'])
+    # Normalize time column — strip timezone so partition comparisons work uniformly
+    df['time'] = pd.to_datetime(df['time']).dt.tz_localize(None)
 
     # Filter by site
     if site_filter:
@@ -477,9 +485,10 @@ def trained_model_cv(
     variant = multi_key.keys_by_dimension["variant"]
     month_str = pd.to_datetime(month_key).strftime("%Y_%m")
     use_smote = variant == "xgboost_smote"
+    use_rf    = variant == "random_forest"
 
     context.log.info(f"Partition: month={month_key}, variant={variant}")
-    context.log.info(f"SMOTE enabled: {use_smote}")
+    context.log.info(f"SMOTE enabled: {use_smote}, Random Forest: {use_rf}")
 
     # Extract training data
     train_df = training_data.copy()
@@ -487,17 +496,23 @@ def trained_model_cv(
     context.log.info(f"Raw training data shape: {train_df.shape}")
     context.log.info(f"Available columns: {list(train_df.columns)}")
 
-    # Define basic numerical features (no preprocessing needed)
-    # User will add numerical encoding to the workflow later
+    # Full feature set — uses all pre-computed columns available in modeldata_h2s_nofill.parquet.
+    # Falls back gracefully to whatever subset is present in train_df.
     basic_features = [
-        'temperature_2m',
-        'relative_humidity_2m',
-        'precipitation',
-        'surface_pressure',
-        'cloud_cover',
-        'wind_speed_10m',
-        'wind_direction_10m',
-        'wind_gusts_10m'
+        # Core weather
+        'temperature_2m', 'relative_humidity_2m', 'dewpoint_2m',
+        'precipitation', 'surface_pressure', 'cloud_cover',
+        # Wind
+        'wind_speed_10m', 'wind_direction_10m', 'wind_gusts_10m',
+        'wind_direction_sin', 'wind_direction_cos',
+        'wind_speed_10m_avg_2h', 'wind_speed_10m_avg_3h', 'wind_speed_10m_avg_4h',
+        'wind_gusts_10m_max_2h', 'wind_gusts_10m_max_3h', 'wind_gusts_10m_max_4h',
+        # Tidal / flow
+        'Flow (m^3/s)--Border', 'tide_height', 'tidal_state_encoded',
+        # Encoded categoricals
+        'wind_direction_categorical_encoded',
+        # Interaction features
+        'wind_temp_interaction', 'humidity_temp_interaction',
     ]
 
     # Check which features are available
@@ -543,20 +558,34 @@ def trained_model_cv(
         context.log.warning(f"   This may be due to new H2S thresholds (Orange ≥30 ppb)")
         context.log.warning(f"   Model will only be able to predict: {unique_classes}")
 
-    # Train with cross-validation
-    model, cv_metrics = train_model_with_cv(
-        X_train=X_train,
-        y_train=y_train,
-        label_map=label_map,
-        n_folds=context.op_config['n_folds'],
-        n_estimators=context.op_config['n_estimators'],
-        max_depth=context.op_config['max_depth'],
-        learning_rate=context.op_config['learning_rate'],
-        use_class_weights=context.op_config['use_class_weights'],
-        use_smote=use_smote,
-        random_state=42,
-        logger=context.log  # Pass logger for debugging
-    )
+    # Train with cross-validation — dispatch to RF or XGBoost based on variant
+    if use_rf:
+        model, cv_metrics = train_random_forest_with_cv(
+            X_train=X_train,
+            y_train=y_train,
+            label_map=label_map,
+            n_folds=context.op_config['n_folds'],
+            n_estimators=context.op_config['n_estimators'],
+            max_depth=context.op_config['max_depth'] or None,
+            use_class_weights=context.op_config['use_class_weights'],
+            use_smote=use_smote,
+            random_state=42,
+            logger=context.log,
+        )
+    else:
+        model, cv_metrics = train_model_with_cv(
+            X_train=X_train,
+            y_train=y_train,
+            label_map=label_map,
+            n_folds=context.op_config['n_folds'],
+            n_estimators=context.op_config['n_estimators'],
+            max_depth=context.op_config['max_depth'],
+            learning_rate=context.op_config['learning_rate'],
+            use_class_weights=context.op_config['use_class_weights'],
+            use_smote=use_smote,
+            random_state=42,
+            logger=context.log,
+        )
 
     # Log CV results
     cv_summary = calculate_cv_summary(cv_metrics)
