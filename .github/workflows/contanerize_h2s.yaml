@@ -34,7 +34,7 @@ jobs:
     steps:
       - name: Set variables
         run: |
-            REGISTRY_IMAGE=resilientucsd/dagster-resilient-workflows
+            REGISTRY_IMAGE=resilientucsd/dagster-resilient-h2s
             echo "REGISTRY_IMAGE=$REGISTRY_IMAGE" >> $GITHUB_ENV
         working-directory:  /
       - name: Checkout Repo
