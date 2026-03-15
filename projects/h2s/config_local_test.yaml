@@ -1,5 +1,8 @@
+# Template config for local test mode.
+# Used by materialize_local_test.sh — the script substitutes the correct absolute path at runtime.
+# Do not use this file directly; the hardcoded path will not work on other machines.
 ops:
   raw_environmental_data:
     config:
       use_local_data: true
-      local_data_path: "/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/latest.csv"
+      local_data_path: "/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/modeldata_h2s_nofill.parquet"
