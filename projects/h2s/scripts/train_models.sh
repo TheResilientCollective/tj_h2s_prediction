@@ -35,7 +35,7 @@ echo ""
 
 for V in "${VARIANTS[@]}"; do
   echo "--- Training variant: $V ---"
-  uv run dg launch \
+  uv run dg launch -m h2s.definitions \
     --job monthly_model_training_job \
     --partition "month=$MONTH|variant=$V"
   echo ""

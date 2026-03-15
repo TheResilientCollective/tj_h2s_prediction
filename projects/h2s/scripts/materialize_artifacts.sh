@@ -6,5 +6,5 @@ cd "$(dirname "$0")/.."
 set -a; source .env; set +a
 
 echo "Loading model artifacts from S3..."
-uv run dg launch --assets h2s_model_artifacts
+uv run dg launch -m h2s.definitions --assets "h2s/h2s_model_artifacts"
 echo "✓ Done"

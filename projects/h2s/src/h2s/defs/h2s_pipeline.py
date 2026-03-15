@@ -21,12 +21,15 @@ from h2s.constants import (
 
 STORE_ASSETS_AVAILABLE = True
 
+_KEY = lambda name: dg.AssetKey(["h2s", name])
+
 
 # ==============================================================================
 # Asset Group: Model Management
 # ==============================================================================
 
 @dg.asset(
+    key_prefix="h2s",
     group_name="h2s_model",
     required_resource_keys={"s3"},
     kinds={"xgboost", "s3"},
@@ -62,6 +65,7 @@ def h2s_model_artifacts(context: dg.AssetExecutionContext):
 # ==============================================================================
 
 @dg.asset(
+    key_prefix="h2s",
     group_name="h2s_prediction",
     required_resource_keys={"s3"},
     kinds={"csv", "s3"},
@@ -186,9 +190,14 @@ def raw_environmental_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
 # ==============================================================================
 
 @dg.asset(
+    key_prefix="h2s",
     group_name="h2s_prediction",
     kinds={"python"},
     description="Preprocessed features ready for model prediction",
+    ins={
+        "h2s_model_artifacts": dg.AssetIn(key=_KEY("h2s_model_artifacts")),
+        "raw_environmental_data": dg.AssetIn(key=_KEY("raw_environmental_data")),
+    },
 )
 def preprocessed_features(
     context: dg.AssetExecutionContext,
@@ -210,9 +219,14 @@ def preprocessed_features(
 
 
 @dg.asset(
+    key_prefix="h2s",
     group_name="h2s_prediction",
     kinds={"xgboost", "ml"},
     description="H2S category predictions with probabilities",
+    ins={
+        "h2s_model_artifacts": dg.AssetIn(key=_KEY("h2s_model_artifacts")),
+        "preprocessed_features": dg.AssetIn(key=_KEY("preprocessed_features")),
+    },
 )
 def h2s_predictions(
     context: dg.AssetExecutionContext,
@@ -249,9 +263,13 @@ def h2s_predictions(
 
 
 @dg.asset(
+    key_prefix="h2s",
     group_name="h2s_prediction",
     kinds={"python"},
     description="Filtered predictions showing only alerts (orange/yellow)",
+    ins={
+        "h2s_predictions": dg.AssetIn(key=_KEY("h2s_predictions")),
+    },
 )
 def h2s_alerts(
     context: dg.AssetExecutionContext,
@@ -275,6 +293,7 @@ def h2s_alerts(
 # ==============================================================================
 
 @dg.asset(
+    key_prefix="h2s",
     group_name="h2s_data",
     required_resource_keys={"s3"},
     kinds={"csv", "s3"},
@@ -309,9 +328,13 @@ def actual_h2s_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
 # ==============================================================================
 
 @dg.asset(
+    key_prefix="h2s",
     group_name="h2s_visualization",
     required_resource_keys={"s3"},
     description="Feature importance visualization stored to S3",
+    ins={
+        "h2s_model_artifacts": dg.AssetIn(key=_KEY("h2s_model_artifacts")),
+    },
 )
 def feature_importance_viz(
     context: dg.AssetExecutionContext,
@@ -343,9 +366,14 @@ def feature_importance_viz(
 
 
 @dg.asset(
+    key_prefix="h2s",
     group_name="h2s_visualization",
     required_resource_keys={"s3"},
     description="Confusion matrix comparing predictions vs actuals (requires actual H2S data in raw_environmental_data)",
+    ins={
+        "h2s_predictions": dg.AssetIn(key=_KEY("h2s_predictions")),
+        "raw_environmental_data": dg.AssetIn(key=_KEY("raw_environmental_data")),
+    },
 )
 def confusion_matrix_viz(
     context: dg.AssetExecutionContext,
@@ -432,9 +460,14 @@ def confusion_matrix_viz(
 
 
 @dg.asset(
+    key_prefix="h2s",
     group_name="h2s_visualization",
     required_resource_keys={"s3"},
     description="Model performance comparison plot (requires actual H2S data)",
+    ins={
+        "h2s_predictions": dg.AssetIn(key=_KEY("h2s_predictions")),
+        "raw_environmental_data": dg.AssetIn(key=_KEY("raw_environmental_data")),
+    },
 )
 def model_comparison_viz(
     context: dg.AssetExecutionContext,
@@ -511,9 +544,14 @@ def model_comparison_viz(
 
 
 @dg.asset(
+    key_prefix="h2s",
     group_name="h2s_visualization",
     required_resource_keys={"s3"},
     description="Prediction timeline plot showing H2S predictions with environmental variables",
+    ins={
+        "h2s_predictions": dg.AssetIn(key=_KEY("h2s_predictions")),
+        "raw_environmental_data": dg.AssetIn(key=_KEY("raw_environmental_data")),
+    },
 )
 def prediction_timeline_viz(
     context: dg.AssetExecutionContext,
@@ -559,10 +597,14 @@ def prediction_timeline_viz(
 
 
 @dg.asset(
+    key_prefix="h2s",
     group_name="h2s_export",
     required_resource_keys={"s3"},
     kinds={"s3", "export"},
     description="Predictions exported to S3 as CSV and JSON",
+    ins={
+        "h2s_predictions": dg.AssetIn(key=_KEY("h2s_predictions")),
+    },
 )
 def predictions_export(
     context: dg.AssetExecutionContext,

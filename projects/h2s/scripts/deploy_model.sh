@@ -38,7 +38,7 @@ if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
 fi
 echo ""
 
-uv run dg launch \
+uv run dg launch -m h2s.definitions \
   --job deploy_approved_model_job \
   --partition "month=$MONTH|variant=$VARIANT"
 

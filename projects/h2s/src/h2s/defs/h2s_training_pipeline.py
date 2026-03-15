@@ -729,6 +729,9 @@ def model_training_metrics(
     kinds={"visualization", "s3"},
     description="Generate and export feature importance visualization",
     partitions_def=model_run_partitions,
+    ins={
+        "h2s_model_artifacts": dg.AssetIn(key=dg.AssetKey(["h2s", "h2s_model_artifacts"])),
+    },
 )
 def feature_importance_analysis(
     context: dg.AssetExecutionContext,
@@ -794,6 +797,7 @@ def feature_importance_analysis(
         "validation_data": dg.AssetIn(
             partition_mapping=dg.MultiToSingleDimensionPartitionMapping("month")
         ),
+        "h2s_model_artifacts": dg.AssetIn(key=dg.AssetKey(["h2s", "h2s_model_artifacts"])),
     },
 )
 def validation_predictions(
@@ -878,6 +882,7 @@ def validation_predictions(
         "validation_data": dg.AssetIn(
             partition_mapping=dg.MultiToSingleDimensionPartitionMapping("month")
         ),
+        "h2s_model_artifacts": dg.AssetIn(key=dg.AssetKey(["h2s", "h2s_model_artifacts"])),
     },
 )
 def validation_report(
@@ -1296,6 +1301,9 @@ def deployment_approval(
     kinds={"ml", "deployment", "archival"},
     description="Archive current production model before deployment",
     partitions_def=model_run_partitions,
+    ins={
+        "h2s_model_artifacts": dg.AssetIn(key=dg.AssetKey(["h2s", "h2s_model_artifacts"])),
+    },
 )
 def archived_previous_model(
     context: dg.AssetExecutionContext,
@@ -1401,6 +1409,9 @@ def archived_previous_model(
     kinds={"ml", "deployment"},
     description="Deploy new trained model to production S3 paths",
     partitions_def=model_run_partitions,
+    ins={
+        "h2s_model_artifacts": dg.AssetIn(key=dg.AssetKey(["h2s", "h2s_model_artifacts"])),
+    },
 )
 def production_model_deployment(
     context: dg.AssetExecutionContext,
