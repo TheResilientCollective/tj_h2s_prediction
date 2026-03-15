@@ -82,18 +82,24 @@ model_run_partitions = dg.MultiPartitionsDefinition({
 @dg.asset(
     group_name="h2s_training_data",
     kinds={"csv"},
+    required_resource_keys={"s3"},
     description="Historical H2S training data from modeldata_h2s.csv - Partitioned by month",
     partitions_def=monthly_training_partitions,
     config_schema={
         "use_local_data": dg.Field(
             bool,
-            default_value=True,
-            description="Load from local /data/modeldata_h2s.csv (True) or S3 (False)"
+            default_value=False,
+            description="Load from local file (True) or S3 (False, default)"
         ),
         "local_data_path": dg.Field(
             str,
             default_value="/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/modeldata_h2s_nofill.parquet",
-            description="Path to local training data file (.parquet or .csv)"
+            description="Path to local training data file (.parquet or .csv) — only used when use_local_data=True"
+        ),
+        "s3_data_path": dg.Field(
+            str,
+            default_value="tijuana/forecast/models/training/modeldata_h2s.parquet",
+            description="S3 path to training data parquet file"
         ),
         "site_filter": dg.Field(
             str,
@@ -141,10 +147,24 @@ def monthly_training_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
             if 'D' in df.columns and 'time' not in df.columns:
                 df['time'] = pd.to_datetime(df['D'])
     else:
-        # Future: Load from S3
-        raise NotImplementedError(
-            "S3 loading not yet implemented. Use use_local_data=True for now."
-        )
+        s3_resource = context.resources.s3
+        s3_path = context.op_config["s3_data_path"]
+        context.log.info(f"Loading from S3: {s3_path}")
+        try:
+            from io import BytesIO
+            data_bytes = s3_resource.getFile(s3_path)
+            if s3_path.endswith('.parquet'):
+                df = pd.read_parquet(BytesIO(data_bytes))
+            else:
+                import io
+                df = pd.read_csv(io.StringIO(data_bytes.decode('utf-8')))
+                if 'D' in df.columns and 'time' not in df.columns:
+                    df['time'] = pd.to_datetime(df['D'])
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load training data from S3 path '{s3_path}': {e}\n"
+                f"Upload training data to S3 first, or set use_local_data=True with a valid local_data_path."
+            )
 
     context.log.info(f"Loaded {len(df)} rows")
 

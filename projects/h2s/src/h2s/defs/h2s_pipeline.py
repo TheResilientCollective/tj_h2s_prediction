@@ -5,7 +5,7 @@ processes environmental data, generates H2S predictions (green/yellow/orange),
 and exports results to S3 with visualizations.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO
 
 import dagster as dg
@@ -16,7 +16,8 @@ from h2s.constants import (
     MODEL_PATH,
     PREDICTIONS_PATH,
     OUTPUT_PATH,
-    LATEST_FORECAST_DATA
+    LATEST_FORECAST_DATA,
+    VALIDATION_PATH,
 )
 
 STORE_ASSETS_AVAILABLE = True
@@ -619,6 +620,9 @@ def predictions_export(
 
     context.log.info("Using store_assets utility for export...")
 
+    run_timestamp = datetime.now().strftime("%Y-%m-%d_%H")
+    timestamped_path = f"{PREDICTIONS_PATH}/{run_timestamp}"
+
     metadata = store_assets.objectMetadata(
         name="H2S Predictions - NESTOR BES",
         description="H2S category predictions with probabilities for NESTOR - BES site",
@@ -627,7 +631,7 @@ def predictions_export(
 
     store_assets.store_dataframe_to_s3(
         df=h2s_predictions,
-        path=PREDICTIONS_PATH,
+        path=timestamped_path,
         dataset_identifier="h2s_predictions",
         s3_resource=s3_resource,
         metadata=metadata,
@@ -636,11 +640,125 @@ def predictions_export(
         formats=['csv', 'json']
     )
 
-    context.log.info(f"✓ Exported predictions to {PREDICTIONS_PATH}")
+    context.log.info(f"✓ Exported predictions to {timestamped_path}")
     context.log.info(f"✓ Latest path: latest/{LATEST_FORECAST_DATA}")
 
     context.add_output_metadata({
         "row_count": len(h2s_predictions),
         "export_timestamp": datetime.now().isoformat(),
-        "s3_path": PREDICTIONS_PATH,
+        "s3_path": timestamped_path,
+    })
+
+
+# ==============================================================================
+# Asset Group: Validation
+# ==============================================================================
+
+@dg.asset(
+    key_prefix="h2s",
+    group_name="h2s_validation",
+    required_resource_keys={"s3"},
+    kinds={"python", "s3"},
+    description="Daily report comparing previous day's 6-hourly predictions to actual H2S measurements",
+)
+def daily_validation_report(context: dg.AssetExecutionContext) -> None:
+    """Compare yesterday's 6-hourly predictions against actual H2S measurements.
+
+    Loads predictions from each of the 4 hourly runs (_00, _06, _12, _18),
+    combines them, and generates validation plots uploaded to S3.
+    Skips gracefully if predictions or actuals are unavailable.
+    """
+    from h2s.predictor.visualizations import (
+        generate_confusion_matrix_with_metrics,
+        generate_model_comparison,
+        generate_prediction_timeline,
+    )
+
+    s3_resource = context.resources.s3
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # Load yesterday's 6-hourly predictions
+    prediction_dfs = []
+    for hour in ["00", "06", "12", "18"]:
+        s3_path = f"{PREDICTIONS_PATH}/{yesterday}_{hour}/h2s_predictions.csv"
+        try:
+            stream = s3_resource.get_stream(path=s3_path)
+            df = pd.read_csv(stream)
+            df["run_hour"] = hour
+            prediction_dfs.append(df)
+            context.log.info(f"✓ Loaded predictions for {yesterday}_{hour}: {len(df)} rows")
+        except Exception as e:
+            context.log.warning(f"No predictions found for {yesterday}_{hour}: {e}")
+
+    if not prediction_dfs:
+        context.log.warning(f"No predictions found for {yesterday} — skipping validation report")
+        return
+
+    predictions_df = pd.concat(prediction_dfs, ignore_index=True)
+    context.log.info(f"Combined {len(predictions_df)} predictions across {len(prediction_dfs)} runs")
+
+    # Ensure time column exists
+    if 'time' not in predictions_df.columns and 'date' in predictions_df.columns:
+        predictions_df['time'] = pd.to_datetime(predictions_df['date'])
+
+    # Load actual H2S measurements
+    actuals_df = pd.DataFrame()
+    try:
+        stream = s3_resource.get_stream(path="tijuana/forecast/actuals/latest.csv")
+        actuals_df = pd.read_csv(stream)
+        if 'time' in actuals_df.columns:
+            actuals_df['time'] = pd.to_datetime(actuals_df['time'])
+            # Filter to yesterday's date range
+            actuals_df = actuals_df[actuals_df['time'].dt.strftime("%Y-%m-%d") == yesterday].copy()
+        context.log.info(f"✓ Loaded {len(actuals_df)} actual H2S measurements for {yesterday}")
+    except Exception as e:
+        context.log.warning(f"Could not load actual H2S data: {e} — plots will be skipped")
+
+    validation_base = f"{VALIDATION_PATH}/{yesterday}"
+
+    # Generate and upload validation plots (only when actuals are available)
+    if not actuals_df.empty:
+        h2s_cols = [col for col in actuals_df.columns if col.upper() == 'H2S' or 'h2s' in col.lower()]
+        if h2s_cols:
+            if 'H2S' not in actuals_df.columns:
+                actuals_df['H2S'] = actuals_df[h2s_cols[0]]
+
+            for plot_name, plot_fn, kwargs in [
+                ("confusion_matrix", generate_confusion_matrix_with_metrics, {"time_col": "time"}),
+                ("model_comparison", generate_model_comparison, {"model_name": "XGBoost Weighted", "time_col": "time"}),
+                ("prediction_timeline", generate_prediction_timeline, {}),
+            ]:
+                try:
+                    plot_bytes = plot_fn(predictions_df, actuals_df, **kwargs)
+                    s3_path = f"{validation_base}/{plot_name}.png"
+                    s3_resource.putFile(plot_bytes.read(), s3_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
+                    context.log.info(f"✓ Uploaded {plot_name} to {s3_path}")
+                except Exception as e:
+                    context.log.warning(f"Could not generate {plot_name}: {e}")
+        else:
+            context.log.warning("No H2S column in actuals data — skipping validation plots")
+
+    # Export combined predictions CSV (historical record, no latest/ overwrite)
+    metadata = store_assets.objectMetadata(
+        name=f"H2S Daily Predictions Combined - {yesterday}",
+        description=f"Combined 6-hourly H2S predictions for {yesterday}",
+        variableMeasured=["H2S Category", "Probability Scores", "Alert Status"],
+    )
+    store_assets.store_dataframe_to_s3(
+        df=predictions_df,
+        path=validation_base,
+        dataset_identifier="daily_predictions_combined",
+        s3_resource=s3_resource,
+        metadata=metadata,
+        enable_latest_path=False,
+        formats=['csv', 'json'],
+    )
+
+    context.log.info(f"✓ Validation report saved to {validation_base}")
+    context.add_output_metadata({
+        "date": yesterday,
+        "prediction_runs": len(prediction_dfs),
+        "total_predictions": len(predictions_df),
+        "actuals_available": not actuals_df.empty,
+        "s3_path": validation_base,
     })

@@ -15,3 +15,4 @@ OUTPUT_PATH = 'tijuana/forecast/output'  # Legacy - prefer PREDICTIONS_PATH
 # Latest path base
 LATEST_BASEPATH = 'latest/tijuana'
 LATEST_FORECAST_DATA = 'tijuana/forecast_data'
+VALIDATION_PATH = 'tijuana/forecast/validation'
