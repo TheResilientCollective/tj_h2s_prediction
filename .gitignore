@@ -2,3 +2,4 @@
 /projects/h2s/htmlcov/
 dagster_home/
 .dg/
+.env

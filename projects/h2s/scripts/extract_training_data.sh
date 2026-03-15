@@ -23,7 +23,7 @@ echo "================================================"
 echo "  Month: $MONTH"
 echo ""
 
-uv run dg launch \
+uv run dg launch -m h2s.definitions \
   --job monthly_data_extraction_job \
   --partition "$MONTH"
 

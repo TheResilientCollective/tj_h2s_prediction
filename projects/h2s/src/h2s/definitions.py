@@ -38,6 +38,7 @@ def defs():
         model_comparison_viz,
         prediction_timeline_viz,
         predictions_export,
+        daily_validation_report,
     )
 
     # Import training pipeline assets
@@ -69,12 +70,16 @@ def defs():
         deploy_approved_model_job,
         monthly_data_schedule,
         monthly_model_training_schedule,
+        forecast_prediction_job,
+        forecast_prediction_schedule,
+        daily_validation_job,
+        daily_validation_schedule,
     )
 
     # Create definitions with assets, jobs, schedules, and resources
     all_defs = Definitions(
         assets=[
-            # Prediction Pipeline Assets (11 assets)
+            # Prediction Pipeline Assets (12 assets)
             h2s_model_artifacts,
             raw_environmental_data,
             actual_h2s_data,
@@ -86,6 +91,7 @@ def defs():
             model_comparison_viz,
             prediction_timeline_viz,
             predictions_export,
+            daily_validation_report,
             # Training Pipeline Assets (14 assets)
             # Phase 1: Data Extraction
             monthly_training_data,
@@ -110,10 +116,14 @@ def defs():
             monthly_data_extraction_job,
             monthly_model_training_job,
             deploy_approved_model_job,
+            forecast_prediction_job,
+            daily_validation_job,
         ],
         schedules=[
             monthly_data_schedule,
             monthly_model_training_schedule,
+            forecast_prediction_schedule,
+            daily_validation_schedule,
         ],
         resources=resources[deployment_name]
     )

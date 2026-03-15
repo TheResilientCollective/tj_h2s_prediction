@@ -13,6 +13,18 @@ Workflow:
 
 import dagster as dg
 
+from h2s.defs.h2s_pipeline import (
+    raw_environmental_data,
+    preprocessed_features,
+    h2s_predictions,
+    h2s_alerts,
+    predictions_export,
+    confusion_matrix_viz,
+    model_comparison_viz,
+    prediction_timeline_viz,
+    daily_validation_report,
+)
+
 from h2s.defs.h2s_training_pipeline import (
     # Phase 1: Data Extraction (monthly partitioned)
     monthly_training_data,
@@ -140,3 +152,72 @@ def monthly_model_training_schedule(context: dg.ScheduleEvaluationContext):
         )
         for variant in model_run_partitions.get_partitions_def_for_dimension("variant").get_partition_keys()
     ]
+
+
+# ============================================================================
+# JOB 4: 6-Hourly Forecast Prediction (unpartitioned)
+# ============================================================================
+
+forecast_prediction_job = dg.define_asset_job(
+    name="forecast_prediction_job",
+    description="Run full H2S prediction pipeline and export results to S3",
+    selection=dg.AssetSelection.assets(
+        raw_environmental_data,
+        preprocessed_features,
+        h2s_predictions,
+        h2s_alerts,
+        predictions_export,
+        confusion_matrix_viz,
+        model_comparison_viz,
+        prediction_timeline_viz,
+    ),
+    tags={"environment": "production", "pipeline": "h2s_forecast"},
+)
+
+
+# ============================================================================
+# JOB 5: Daily Validation Report (unpartitioned)
+# ============================================================================
+
+daily_validation_job = dg.define_asset_job(
+    name="daily_validation_job",
+    description="Compare previous day's H2S predictions against actual measurements",
+    selection=dg.AssetSelection.assets(daily_validation_report),
+    tags={"environment": "production", "pipeline": "h2s_validation"},
+)
+
+
+# ============================================================================
+# SCHEDULE 3: 6-Hourly Forecast (00:00, 06:00, 12:00, 18:00 UTC)
+# ============================================================================
+
+@dg.schedule(
+    job=forecast_prediction_job,
+    cron_schedule="0 */6 * * *",
+    description="Run H2S forecast every 6 hours (00:00, 06:00, 12:00, 18:00 UTC)",
+    default_status=dg.DefaultScheduleStatus.RUNNING,
+    tags={"environment": "production", "schedule_type": "forecast"},
+)
+def forecast_prediction_schedule(context: dg.ScheduleEvaluationContext):
+    """Trigger the full H2S prediction pipeline every 6 hours."""
+    return dg.RunRequest(
+        run_key=f"forecast_{context.scheduled_execution_time.strftime('%Y-%m-%d_%H')}",
+    )
+
+
+# ============================================================================
+# SCHEDULE 4: Daily Validation (8 AM UTC)
+# ============================================================================
+
+@dg.schedule(
+    job=daily_validation_job,
+    cron_schedule="0 8 * * *",
+    description="Daily validation report at 8 AM UTC (after actuals data is expected)",
+    default_status=dg.DefaultScheduleStatus.RUNNING,
+    tags={"environment": "production", "schedule_type": "validation"},
+)
+def daily_validation_schedule(context: dg.ScheduleEvaluationContext):
+    """Trigger daily validation report comparing predictions vs actuals."""
+    return dg.RunRequest(
+        run_key=f"validation_{context.scheduled_execution_time.strftime('%Y-%m-%d')}",
+    )
