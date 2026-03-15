@@ -1,9 +1,10 @@
 [project]
-name = "h2s"
-requires-python = ">=3.10,<3.15"
+name = "resilient-h2s"
+requires-python = ">=3.12,<3.15"
 version = "0.1.0"
 dependencies = [
-    "dagster==1.12.12",
+    "dagster>=1.12.12",
+    "dagster-postgres>=0.28.2",
     "pandas>=2.0.0",
     "numpy>=1.23.0",
     "xgboost>=2.0.0",

@@ -1,79 +1,120 @@
-# H2S Pipeline Materialization Scripts
+# H2S Pipeline Scripts
 
-Helper scripts for materializing Dagster assets with different configurations.
+Helper scripts for running Dagster jobs. All scripts load `.env` from the repo root automatically.
 
-## Scripts
+---
 
-### Production Mode (S3 Data)
+## Prediction Pipeline
 
-**`materialize_data.sh`** - Run full pipeline with S3 environmental data
-```bash
-bash scripts/materialize_data.sh
-```
-- **Model:** Loaded from S3 (`tijuana/forecast/models/`)
-- **Environmental Data:** Loaded from S3 (`latest/tijuana/weather_forecast/latest.csv`)
-- **H2S Actuals:** Merged from local `data/modeldata_h2s.csv` if not in S3 data
-- **Behavior:** FAILS if S3 environmental data is not available (no fallback)
-
-### Test Mode (Local Data)
-
-**`materialize_local_test.sh`** - Run pipeline with local test data
-```bash
-bash scripts/materialize_local_test.sh
-```
-- **Model:** Loaded from S3 (`tijuana/forecast/models/`)
-- **Environmental Data:** Loaded from LOCAL (`data/latest.csv`)
-- **H2S Actuals:** Already included in `data/latest.csv`
-- **Use Case:** Testing when S3 environmental data is not available
-
-### Model Only
-
-**`materialize_artifacts.sh`** - Load model artifacts only
+### `materialize_artifacts.sh`
+Load the production model from S3.
 ```bash
 bash scripts/materialize_artifacts.sh
 ```
-- Loads just the model from S3
-- Useful for verifying S3 model access
+Materializes: `h2s_model_artifacts`
 
-## Configuration Details
-
-### Production Mode Config
-By default, `raw_environmental_data` asset uses:
-```yaml
-use_local_data: false  # Load from S3
+### `materialize_data.sh`
+Load live environmental data from S3 and run the full prediction pipeline.
+```bash
+bash scripts/materialize_data.sh
 ```
-This will **FAIL** if S3 data is not available (no silent fallbacks).
+Materializes: `raw_environmental_data` and all downstream assets (preprocessed_features → h2s_predictions → h2s_alerts → visualizations → export)
+**Requires:** `materialize_artifacts.sh` run first, S3 environmental data available.
 
-### Test Mode Config
-`materialize_local_test.sh` passes this config:
-```yaml
-ops:
-  raw_environmental_data:
-    config:
-      use_local_data: true
-      local_data_path: "/path/to/data/latest.csv"
+### `materialize_local_test.sh`
+Run the prediction pipeline using local data (no S3 environmental data required).
+```bash
+bash scripts/materialize_local_test.sh
+```
+Uses: `data/modeldata_h2s_nofill.parquet` (resolved automatically)
+**Requires:** `materialize_artifacts.sh` run first (model still loaded from S3).
+
+---
+
+## Training Pipeline
+
+The training pipeline has three phases that run in sequence:
+
+```
+extract_training_data.sh → train_models.sh → (review reports) → deploy_model.sh
 ```
 
-## Data Requirements
+### `extract_training_data.sh`
+Extract and prepare training/validation data for a given month.
+```bash
+bash scripts/extract_training_data.sh [MONTH]
+# e.g.
+bash scripts/extract_training_data.sh 2026-03-01
+```
+Materializes: `monthly_training_data → relabeled_training_data → data_quality_report → training_data → validation_data`
+Default MONTH: current month.
 
-### Production Mode
-- S3 must have: `latest/tijuana/weather_forecast/latest.csv`
-- Optional: H2S measurements (will merge from local if missing)
+### `train_models.sh`
+Train and validate model variants for a given month.
+```bash
+bash scripts/train_models.sh [MONTH] [VARIANT]
+# e.g. train all three variants:
+bash scripts/train_models.sh 2026-03-01
 
-### Test Mode
-- Local file: `data/latest.csv` (350KB, includes environmental + H2S data)
-- Backup: `data/modeldata_h2s.csv` (68KB, H2S measurements only)
+# or train a single variant:
+bash scripts/train_models.sh 2026-03-01 xgboost_smote
+```
+**VARIANT** options: `xgboost_base` | `xgboost_smote` | `random_forest` | `all` (default)
+Materializes: `trained_model_cv → model_training_metrics → feature_importance_analysis → validation_predictions → validation_report → model_comparison_report`
+**Requires:** `extract_training_data.sh` run first for the same MONTH.
 
-## Error Handling
+### `deploy_model.sh`
+Deploy an approved model variant to production (overwrites S3 production model).
+```bash
+bash scripts/deploy_model.sh MONTH VARIANT
+# e.g.
+bash scripts/deploy_model.sh 2026-03-01 xgboost_smote
+```
+Prompts for confirmation before deploying.
+Materializes: `deployment_approval → archived_previous_model → production_model_deployment`
+**Requires:** `train_models.sh` complete and validation reports reviewed.
 
-**Production mode will FAIL with clear error if:**
-- S3 environmental data path does not exist
-- S3 connection fails
-- Data is corrupted/unreadable
+---
 
-**Test mode will FAIL with clear error if:**
-- Local test data file does not exist
-- File path is incorrect
-- Data is corrupted/unreadable
+## Model Variants
 
-No silent fallbacks or mock data - all failures are explicit.
+| Variant | Description |
+|---|---|
+| `xgboost_base` | XGBoost with class weights only |
+| `xgboost_smote` | XGBoost with SMOTE oversampling on hazard classes |
+| `random_forest` | Random Forest with balanced class weights + SMOTE |
+
+---
+
+## Schedules (automatic)
+
+The following run automatically on the 1st of each month:
+
+| Schedule | Time (UTC) | Job |
+|---|---|---|
+| `monthly_data_schedule` | 02:00 | `monthly_data_extraction_job` |
+| `monthly_model_training_schedule` | 04:00 | `monthly_model_training_job` (all variants) |
+
+Manual deployment (`deploy_model.sh`) is always required after reviewing reports.
+
+---
+
+## Quick Reference: Full Monthly Retraining
+
+```bash
+# 1. Extract data for the month
+bash scripts/extract_training_data.sh 2026-03-01
+
+# 2. Train all variants
+bash scripts/train_models.sh 2026-03-01
+
+# 3. Review validation reports in S3:
+#    tijuana/forecast/models/training/2026_03/<variant>/validation_report.*
+
+# 4. Deploy the best variant
+bash scripts/deploy_model.sh 2026-03-01 xgboost_smote
+
+# 5. Refresh predictions
+bash scripts/materialize_artifacts.sh
+bash scripts/materialize_data.sh
+```

@@ -21,7 +21,7 @@ RUN pip install uv
 
 # Set up a virtual environment and install dependencies
 WORKDIR /usr/src/app/
-COPY pyproject.toml uv.lock ./
+COPY projects/h2s/pyproject.toml projects/h2s/uv.lock ./
 RUN uv venv .venv
 RUN chmod +x .venv/bin/activate && .venv/bin/activate && \
     uv sync --no-install-project

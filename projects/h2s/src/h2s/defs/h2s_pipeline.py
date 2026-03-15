@@ -99,7 +99,10 @@ def raw_environmental_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
         # TEST MODE: Load from local data directory
         context.log.info(f"TEST MODE: Loading from local file: {local_path}")
         try:
-            df = pd.read_csv(local_path)
+            if local_path.endswith(".parquet"):
+                df = pd.read_parquet(local_path)
+            else:
+                df = pd.read_csv(local_path)
             context.log.info(f"✓ Loaded {len(df)} rows from local test data")
             source = "local"
         except Exception as e:
