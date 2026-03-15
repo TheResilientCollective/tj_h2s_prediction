@@ -195,6 +195,7 @@ def raw_environmental_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
     group_name="h2s_prediction",
     kinds={"python"},
     description="Preprocessed features ready for model prediction",
+    auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
     ins={
         "h2s_model_artifacts": dg.AssetIn(key=_KEY("h2s_model_artifacts")),
         "raw_environmental_data": dg.AssetIn(key=_KEY("raw_environmental_data")),
@@ -224,6 +225,7 @@ def preprocessed_features(
     group_name="h2s_prediction",
     kinds={"xgboost", "ml"},
     description="H2S category predictions with probabilities",
+    auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
     ins={
         "h2s_model_artifacts": dg.AssetIn(key=_KEY("h2s_model_artifacts")),
         "preprocessed_features": dg.AssetIn(key=_KEY("preprocessed_features")),
@@ -268,6 +270,7 @@ def h2s_predictions(
     group_name="h2s_prediction",
     kinds={"python"},
     description="Filtered predictions showing only alerts (orange/yellow)",
+    auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
     ins={
         "h2s_predictions": dg.AssetIn(key=_KEY("h2s_predictions")),
     },
@@ -333,6 +336,7 @@ def actual_h2s_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
     group_name="h2s_visualization",
     required_resource_keys={"s3"},
     description="Feature importance visualization stored to S3",
+    auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
     ins={
         "h2s_model_artifacts": dg.AssetIn(key=_KEY("h2s_model_artifacts")),
     },
@@ -371,6 +375,7 @@ def feature_importance_viz(
     group_name="h2s_visualization",
     required_resource_keys={"s3"},
     description="Confusion matrix comparing predictions vs actuals (requires actual H2S data in raw_environmental_data)",
+    auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
     ins={
         "h2s_predictions": dg.AssetIn(key=_KEY("h2s_predictions")),
         "raw_environmental_data": dg.AssetIn(key=_KEY("raw_environmental_data")),
@@ -465,6 +470,7 @@ def confusion_matrix_viz(
     group_name="h2s_visualization",
     required_resource_keys={"s3"},
     description="Model performance comparison plot (requires actual H2S data)",
+    auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
     ins={
         "h2s_predictions": dg.AssetIn(key=_KEY("h2s_predictions")),
         "raw_environmental_data": dg.AssetIn(key=_KEY("raw_environmental_data")),
@@ -549,6 +555,7 @@ def model_comparison_viz(
     group_name="h2s_visualization",
     required_resource_keys={"s3"},
     description="Prediction timeline plot showing H2S predictions with environmental variables",
+    auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
     ins={
         "h2s_predictions": dg.AssetIn(key=_KEY("h2s_predictions")),
         "raw_environmental_data": dg.AssetIn(key=_KEY("raw_environmental_data")),
@@ -603,6 +610,7 @@ def prediction_timeline_viz(
     required_resource_keys={"s3"},
     kinds={"s3", "export"},
     description="Predictions exported to S3 as CSV and JSON",
+    auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
     ins={
         "h2s_predictions": dg.AssetIn(key=_KEY("h2s_predictions")),
     },
