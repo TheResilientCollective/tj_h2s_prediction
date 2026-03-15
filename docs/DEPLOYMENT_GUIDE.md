@@ -2,7 +2,7 @@
 
 ## Overview
 
-This package provides a complete production-ready system for generating H2S predictions at NESTOR - BES using the trained XGBoost model.
+This system generates H2S predictions for NESTOR - BES using a trained XGBoost model, orchestrated via a Dagster pipeline with S3 integration.
 
 **Performance:**
 - Orange Detection: 61.3% (84/137 events caught)
@@ -14,99 +14,130 @@ This package provides a complete production-ready system for generating H2S pred
 
 ## Quick Start
 
-### 1. Installation
+### 1. Environment Configuration
+
+Create a `.env` file in `projects/h2s/`:
 
 ```bash
-# Install required packages
-pip install pandas numpy xgboost scikit-learn
+S3_BUCKET=test
+S3_ADDRESS=oss.resilientservice.mooo.com
+S3_PORT=443
+S3_USE_SSL=true
+S3_ACCESS_KEY=your_access_key
+S3_SECRET_KEY=your_secret_key
 
-# Verify installation
-python -c "import xgboost; print(f'XGBoost version: {xgboost.__version__}')"
+# Optional
+PUBLIC_BUCKET=test
+LATEST_BASEPATH=latest/
 ```
 
-### 2. Required Files
-
-Place these files in your working directory:
-
-```
-your_project/
-├── predict_h2s.py                          # Main prediction script
-├── batch_predict.py                        # Batch processing script
-├── nestor_xgboost_weighted_model.json      # Trained model
-├── nestor_preprocessing_info.pkl           # Preprocessing info
-└── your_data.csv                           # Your input data
-```
-
-### 3. Generate Predictions
+### 2. Install & Start Dagster UI
 
 ```bash
-# Basic usage
-python predict_h2s.py --input your_data.csv --output predictions.csv
-
-# View results
-head predictions.csv
+cd projects/h2s
+uv sync
+uv run dg dev
 ```
 
-**Output columns added:**
-- `predicted_category`: green, yellow, or orange
-- `probability_green`: Confidence in green prediction (0-1)
-- `probability_orange`: Confidence in orange prediction (0-1)
-- `probability_yellow`: Confidence in yellow prediction (0-1)
-- `confidence`: Highest probability (model confidence)
-- `alert`: True if yellow or orange
+The UI is available at http://localhost:3000. Schedules are activated there — see [Automated Schedules](#automated-schedules).
+
+### 3. Validate Definitions Load
+
+```bash
+uv run dg check defs
+uv run dg list defs
+```
 
 ---
 
-## Detailed Usage
+## Automated Schedules
 
-### Single File Prediction
+All four schedules start in `RUNNING` state (`default_status=RUNNING`). They can be paused or resumed individually in the Dagster UI under **Automation → Schedules**.
+
+| Schedule Name | Cron | UTC Time | Job |
+|---|---|---|---|
+| `forecast_prediction_schedule` | `0 */6 * * *` | 00:00, 06:00, 12:00, 18:00 | `forecast_prediction_job` |
+| `daily_validation_schedule` | `0 8 * * *` | Daily at 08:00 | `daily_validation_job` |
+| `monthly_data_schedule` | `0 2 1 * *` | 1st of month at 02:00 | `monthly_data_extraction_job` |
+| `monthly_model_training_schedule` | `0 4 1 * *` | 1st of month at 04:00 | `monthly_model_training_job` |
+
+**No cron setup is needed** — Dagster manages all scheduling internally.
+
+### Enabling/Disabling Schedules
+
+In the Dagster UI:
+1. Go to **Automation → Schedules**
+2. Click the toggle next to any schedule to pause or resume it
+3. Click the schedule name to view run history and upcoming ticks
+
+---
+
+## Manual Runs
+
+### Run the full forecast pipeline
 
 ```bash
-# Standard prediction
-python predict_h2s.py --input new_data.csv --output predictions.csv
-
-# More sensitive detection (catch more events, more false alarms)
-python predict_h2s.py --input new_data.csv --output predictions.csv --orange-threshold 0.25
-
-# Only show alerts (filter out green)
-python predict_h2s.py --input new_data.csv --output alerts.csv --filter-alerts
-
-# Combine options
-python predict_h2s.py \
-    --input new_data.csv \
-    --output alerts.csv \
-    --orange-threshold 0.25 \
-    --yellow-threshold 0.30 \
-    --filter-alerts
+uv run dg launch --job forecast_prediction_job
 ```
 
-### Batch Processing (Multiple Files)
+### Run the daily validation report
 
 ```bash
-# Process all CSV files in a directory
-python batch_predict.py --input-dir ./new_data --output-dir ./predictions
+uv run dg launch --job daily_validation_job
+```
 
-# With archiving (moves processed files)
-python batch_predict.py \
-    --input-dir ./new_data \
-    --output-dir ./predictions \
-    --archive \
-    --archive-dir ./processed
+### Materialize individual assets
 
-# With custom thresholds
-python batch_predict.py \
-    --input-dir ./new_data \
-    --output-dir ./predictions \
-    --orange-threshold 0.25
+```bash
+# Load new environmental data from S3
+uv run dg launch --assets raw_environmental_data
+
+# Run prediction only (requires model + preprocessed data)
+uv run dg launch --assets h2s_predictions
+
+# Export predictions to S3
+uv run dg launch --assets predictions_export
+```
+
+### Helper scripts (auto-load .env)
+
+```bash
+bash scripts/materialize_artiacts.sh   # Load model artifacts from S3
+bash scripts/materialize_data.sh       # Load environmental data
+```
+
+---
+
+## S3 Output Structure
+
+```
+s3://test/
+├── tijuana/forecast/
+│   ├── models/                               # Pre-trained model
+│   │   ├── nestor_xgboost_weighted_model.json
+│   │   └── nestor_preprocessing_info.json
+│   ├── predictions/                          # Timestamped predictions
+│   │   └── YYYY-MM-DD_HH/
+│   │       ├── h2s_predictions.csv
+│   │       ├── h2s_predictions.json
+│   │       └── h2s_predictions.metadata.json
+│   └── validation/                           # Daily validation reports
+│       └── YYYY-MM-DD/validation_report.json
+└── latest/tijuana/
+    ├── weather_forecast/latest.csv           # Input data (from openmeteo pipeline)
+    └── forecast_data/                        # Latest predictions (overwritten each run)
+        ├── h2s_predictions.csv
+        ├── h2s_predictions.json
+        └── visualizations/
 ```
 
 ---
 
 ## Input Data Requirements
 
-### Required Columns
+The pipeline reads weather and tidal data from `latest/tijuana/weather_forecast/latest.csv` in S3 (written by the openmeteo pipeline). For local testing, place data at `projects/h2s/data/latest.csv`.
 
-Your CSV file must contain these columns:
+### Required Columns
 
 **Weather Data:**
 - `temperature_2m`: Temperature at 2m (°C)
@@ -120,487 +151,177 @@ Your CSV file must contain these columns:
 - `dewpoint_2m`: Dewpoint temperature (°C)
 
 **Tidal/Flow Data:**
-- `Flow (m^3/s)--Border`: Water flow rate (m³/s)
-- `tide_height`: Tide height (m)
-- `tidal_state`: Tidal state (flood, ebb, slack, slack low, slack high)
+- `flow_rate_cms`: Water flow rate (m³/s)
+- `tide_height_m`: Tide height (m)
+- `tidal_state`: Tidal state (`flood`, `ebb`, `slack`, `slack low`, `slack high`)
 
 **Categorical:**
-- `wind_direction_categorical`: N, NE, E, SE, S, SW, W, NW
+- `wind_direction_categorical`: `N`, `NE`, `E`, `SE`, `S`, `SW`, `W`, `NW`
 
 **Temporal:**
-- `time`: Timestamp (ISO format: 2024-01-15T12:00:00Z)
+- `time`: Timestamp (ISO format: `2024-01-15T12:00:00Z`)
 
 **Optional:**
 - `site_name`: Site name (will filter to NESTOR - BES if present)
-- `H2S`: Actual H2S value (for validation, not used in prediction)
+- `H2S`: Actual H2S value (used for validation only)
 
-### Example Input Format
+### Example Input Row
 
 ```csv
-time,site_name,temperature_2m,wind_speed_10m,wind_direction_10m,wind_gusts_10m,precipitation,relative_humidity_2m,surface_pressure,cloud_cover,dewpoint_2m,wind_direction_categorical,Flow (m^3/s)--Border,tide_height,tidal_state
-2024-01-15T12:00:00Z,NESTOR - BES,15.2,3.5,180,5.2,0.0,65,1013.2,25,8.1,S,125.5,1.2,flood
-2024-01-15T13:00:00Z,NESTOR - BES,16.1,4.2,190,6.1,0.0,62,1013.0,30,8.5,S,130.2,1.3,flood
+time,temperature_2m,wind_speed_10m,wind_direction_10m,wind_gusts_10m,precipitation,relative_humidity_2m,surface_pressure,cloud_cover,dewpoint_2m,wind_direction_categorical,flow_rate_cms,tide_height_m,tidal_state
+2024-01-15T12:00:00Z,15.2,3.5,180,5.2,0.0,65,1013.2,25,8.1,S,125.5,1.2,flood
 ```
 
 ---
 
 ## Output Format
 
-### Prediction File
+Predictions are exported to S3 as CSV and JSON. Each row contains all input columns plus:
 
-Output CSV contains all input columns plus:
+| Column | Type | Description |
+|---|---|---|
+| `predicted_category` | string | `green`, `yellow`, or `orange` |
+| `probability_green` | float | Model confidence in green (0–1) |
+| `probability_yellow` | float | Model confidence in yellow (0–1) |
+| `probability_orange` | float | Model confidence in orange (0–1) |
+| `confidence` | float | Max probability (model certainty) |
+| `alert` | bool | `True` if yellow or orange |
 
-```csv
-time,site_name,...,predicted_category,probability_green,probability_orange,probability_yellow,confidence,alert
-2024-01-15T12:00:00Z,NESTOR - BES,...,green,0.85,0.08,0.07,0.85,False
-2024-01-15T13:00:00Z,NESTOR - BES,...,orange,0.15,0.62,0.23,0.62,True
-2024-01-15T14:00:00Z,NESTOR - BES,...,yellow,0.25,0.18,0.57,0.57,True
-```
+**Categories:**
+- `green`: H2S < 5 ppb (safe)
+- `yellow`: H2S 5–30 ppb (caution, monitor)
+- `orange`: H2S ≥ 30 ppb (alert, take action)
 
-### Understanding Predictions
-
-**predicted_category:**
-- `green`: H2S predicted < 5 ppb (safe)
-- `yellow`: H2S predicted 5-30 ppb (caution, monitor)
-- `orange`: H2S predicted ≥ 30 ppb (alert, take action)
-
-**Probabilities:**
-- Range: 0.0 to 1.0
-- Sum to 1.0 across three categories
-- Higher = more confident
-
-**confidence:**
-- Maximum probability across all categories
-- > 0.7: High confidence
-- 0.5-0.7: Moderate confidence
-- < 0.5: Low confidence (uncertain)
-
-**alert:**
-- `True`: Yellow or orange prediction
-- `False`: Green prediction
-
----
-
-## Automated Updates
-
-### Daily Cron Job
-
-Add to crontab for daily automatic predictions:
-
-```bash
-# Edit crontab
-crontab -e
-
-# Add this line for daily processing at 2 AM
-0 2 * * * /usr/bin/python3 /path/to/batch_predict.py --input-dir /data/incoming --output-dir /data/predictions --archive --archive-dir /data/processed >> /var/log/h2s_predictions.log 2>&1
-```
-
-### Hourly Updates
-
-For real-time monitoring:
-
-```bash
-# Every hour
-0 * * * * /usr/bin/python3 /path/to/predict_h2s.py --input /data/latest.csv --output /data/current_predictions.csv --filter-alerts
-```
-
-### Watch Directory Script
-
-Create `watch_and_predict.sh`:
-
-```bash
-#!/bin/bash
-# Watch directory for new files and process automatically
-
-WATCH_DIR="/data/incoming"
-OUTPUT_DIR="/data/predictions"
-SCRIPT_DIR="/path/to/scripts"
-
-inotifywait -m -e create -e moved_to --format '%f' $WATCH_DIR |
-while read FILE; do
-    if [[ $FILE == *.csv ]]; then
-        echo "Processing $FILE..."
-        python3 $SCRIPT_DIR/predict_h2s.py \
-            --input "$WATCH_DIR/$FILE" \
-            --output "$OUTPUT_DIR/${FILE%.csv}_predictions.csv"
-        
-        # Move to archive
-        mv "$WATCH_DIR/$FILE" "$WATCH_DIR/processed/"
-        echo "Done: $FILE"
-    fi
-done
-```
+**Confidence levels:**
+- `> 0.7`: High confidence
+- `0.5–0.7`: Moderate confidence
+- `< 0.5`: Low confidence (uncertain)
 
 ---
 
 ## Threshold Tuning
 
-### Default Thresholds
-
-- Orange: 0.33 (probability ≥ 0.33 predicts orange)
-- Yellow: 0.33 (probability ≥ 0.33 predicts yellow)
-
-### Adjusting Sensitivity
-
-**More Sensitive (catch more events, more false alarms):**
-
-```bash
-# Lower thresholds = more alerts
-python predict_h2s.py \
-    --input data.csv \
-    --output predictions.csv \
-    --orange-threshold 0.25 \
-    --yellow-threshold 0.30
-```
-
-**Expected impact:**
-- Orange recall: 61.3% → ~70%
-- False positive rate: 5.4% → ~10%
-
-**Less Sensitive (fewer false alarms, miss more events):**
-
-```bash
-# Higher thresholds = fewer alerts
-python predict_h2s.py \
-    --input data.csv \
-    --output predictions.csv \
-    --orange-threshold 0.45 \
-    --yellow-threshold 0.40
-```
-
-**Expected impact:**
-- Orange recall: 61.3% → ~50%
-- False positive rate: 5.4% → ~3%
-
-### Threshold Selection Guide
+Default thresholds: orange = 0.33, yellow = 0.33.
 
 | Priority | Orange Threshold | Yellow Threshold | Orange Recall | False Positives |
-|----------|------------------|------------------|---------------|-----------------|
+|---|---|---|---|---|
 | **Balanced** (default) | 0.33 | 0.33 | 61% | 5.4% |
 | **Sensitive** | 0.25 | 0.30 | 70% | 10% |
 | **Very Sensitive** | 0.20 | 0.25 | 75% | 15% |
 | **Conservative** | 0.40 | 0.40 | 55% | 3% |
 | **Very Conservative** | 0.50 | 0.50 | 45% | 1.5% |
 
-**Recommendation:** Start with default (0.33), monitor for 2-4 weeks, then adjust based on feedback.
-
----
-
-## Integration Examples
-
-### Python Integration
-
-```python
-from src.predict_h2s import H2SPredictor
-import pandas as pd
-
-# Load model
-predictor = H2SPredictor(
-    '../nestor_xgboost_weighted_model.json',
-    'nestor_preprocessing_info.pkl'
-)
-
-# Load your data
-df = pd.read_csv('new_data.csv')
-
-# Preprocess
-df_processed = predictor.preprocess_data(df)
-
-# Generate predictions
-predictions = predictor.predict(df_processed)
-
-# Get only alerts
-alerts = predictions[predictions['alert'] == True]
-
-# Send email if orange detected
-if (alerts['predicted_category'] == 'orange').any():
-    send_email_alert(alerts)
-```
-
-### R Integration
-
-```r
-# Call Python script from R
-system("python3 predict_h2s.py --input data.csv --output predictions.csv")
-
-# Load results
-predictions <- read.csv("predictions.csv")
-
-# Filter alerts
-alerts <- predictions[predictions$alert == TRUE, ]
-
-# Plot
-library(ggplot2)
-ggplot(predictions, aes(x=time, y=probability_orange)) +
-  geom_line() +
-  theme_minimal()
-```
-
-### API Endpoint (Flask)
-
-```python
-from flask import Flask, request, jsonify
-from src.predict_h2s import H2SPredictor
-import pandas as pd
-
-app = Flask(__name__)
-predictor = H2SPredictor('nestor_xgboost_weighted_model.json',
-                         'nestor_preprocessing_info.pkl')
-
-
-@app.route('/predict', methods=['POST'])
-def predict():
-    data = request.get_json()
-    df = pd.DataFrame([data])
-    df_processed = predictor.preprocess_data(df)
-    result = predictor.predict(df_processed)
-
-    return jsonify({
-        'predicted_category': result['predicted_category'].iloc[0],
-        'probability_orange': float(result['probability_orange'].iloc[0]),
-        'probability_yellow': float(result['probability_yellow'].iloc[0]),
-        'confidence': float(result['confidence'].iloc[0]),
-        'alert': bool(result['alert'].iloc[0])
-    })
-
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
-```
+Thresholds are configured in `projects/h2s/src/h2s/defs/h2s_pipeline.py`. **Recommendation:** Start with defaults, monitor for 2–4 weeks, then adjust.
 
 ---
 
 ## Monitoring & Maintenance
 
-### Performance Monitoring
+### Dagster UI run history
 
-Track these metrics weekly:
+- Go to **Runs** in the Dagster UI to see all past and current runs
+- Each run shows asset materialization status, logs, and timing
+- Failed runs surface the full traceback in the run log
 
-```python
-import pandas as pd
+### Daily validation reports
 
-# Load predictions and actual values
-predictions = pd.read_csv('predictions.csv')
-actual = pd.read_csv('actual_h2s.csv')
+`daily_validation_schedule` runs every morning at 08:00 UTC and writes a JSON report to `tijuana/forecast/validation/YYYY-MM-DD/`. Reports compare prior predictions against actual H2S measurements.
 
-# Merge on time
-df = predictions.merge(actual, on='time')
-
-# Calculate actual categories
-df['actual_category'] = df['H2S'].apply(
-    lambda x: 'green' if x < 5 else ('yellow' if x < 30 else 'orange')
-)
-
-# Metrics
-from sklearn.metrics import classification_report
-print(classification_report(df['actual_category'], df['predicted_category']))
-```
-
-**Alert if:**
+**Alert thresholds to watch:**
 - Orange recall drops below 55%
 - False positive rate exceeds 10%
 - Balanced accuracy drops below 60%
 
-### Retraining Schedule
+### Retraining workflow
 
-**When to retrain:**
-- Quarterly (every 3 months) - routine update
-- When orange recall drops below 55%
-- After sensor calibration or maintenance
-- When new data patterns emerge
+Retraining runs automatically on the 1st of each month:
 
-**How to retrain:**
-1. Collect new data (append to original dataset)
-2. Run training script (contact data science team)
-3. Validate on held-out test set
-4. Deploy if performance improves
-5. Archive old model
+1. `monthly_data_schedule` (02:00 UTC) — extracts and prepares training data
+2. `monthly_model_training_schedule` (04:00 UTC) — trains all model variants in parallel
+3. Review validation reports in `tijuana/forecast/models/training/` (S3)
+4. Manually trigger `deploy_approved_model_job` in Dagster UI for the approved variant
 
-### Log Monitoring
-
-Check logs regularly:
-
-```bash
-# View recent predictions
-tail -f /var/log/h2s_predictions.log
-
-# Count alerts per day
-grep "alert.*True" predictions_*.csv | wc -l
-
-# Check for errors
-grep "Error" /var/log/h2s_predictions.log
-```
+The deployment step requires a human approval gate and is never triggered automatically.
 
 ---
 
 ## Troubleshooting
 
-### Common Issues
-
-**1. "FileNotFoundError: model file not found"**
+**`ModuleNotFoundError: No module named 'h2s'`**
 ```bash
-# Verify files exist
-ls -lh nestor_xgboost_weighted_model.json
-ls -lh nestor_preprocessing_info.pkl
-
-# Check current directory
-pwd
-
-# Provide full path
-python predict_h2s.py \
-    --input data.csv \
-    --output predictions.csv \
-    --model /full/path/to/nestor_xgboost_weighted_model.json \
-    --preprocessing /full/path/to/nestor_preprocessing_info.pkl
+# Ensure you're in the right directory and run via uv
+cd projects/h2s
+uv sync
+uv run dg dev
 ```
 
-**2. "KeyError: 'temperature_2m' not found"**
+**`Validation error for S3Resource: Input should be a valid string`**
+- S3 config in `definitions.py` must use `EnvVar('S3_BUCKET')`, not `os.getenv()`
+- Verify `.env` file exists in `projects/h2s/` and all required keys are set
+
+**`AttributeError: 'bytes' object has no attribute 'read'`**
+- `S3Resource.getFile()` returns raw bytes, not a file-like object
+- Pass bytes directly; do not call `.read()` on the result
+
+**Assets not appearing in Dagster UI**
 ```bash
-# Check column names in your data
-head -1 your_data.csv
-
-# Compare with required columns (see Input Data Requirements section)
-# Fix column names to match exactly
+uv run dg list defs --json   # Verify assets are registered
 ```
+- Assets must be explicitly imported and registered in `definitions.py`
 
-**3. "ValueError: unknown categorical value"**
-```
-# This occurs when categorical variables have new values not seen in training
+**`KeyError: 'temperature_2m' not found`**
+- Check column names in the input CSV against the Required Columns list above
+- Column names are case-sensitive and must match exactly
 
-# For wind_direction_categorical, use only: N, NE, E, SE, S, SW, W, NW
-# For tidal_state, use only: flood, ebb, slack, slack low, slack high
-
-# Check your data:
-cat your_data.csv | cut -d',' -f13 | sort | uniq  # wind_direction_categorical
-cat your_data.csv | cut -d',' -f24 | sort | uniq  # tidal_state
-```
-
-**4. "Model predictions all green"**
-```python
-# This can happen if thresholds are too high
-# Lower thresholds:
-python predict_h2s.py \
-    --input data.csv \
-    --output predictions.csv \
-    --orange-threshold 0.20 \
-    --yellow-threshold 0.25
-
-# Or check if input data is realistic
-# Flow rate, wind speed, H2S patterns should match training range
-```
-
-**5. "Too many false alarms"**
-```python
-# Raise thresholds:
-python predict_h2s.py \
-    --input data.csv \
-    --output predictions.csv \
-    --orange-threshold 0.40 \
-    --yellow-threshold 0.40
-
-# Or model may need retraining if patterns changed
-```
+**`ValueError: unknown categorical value`**
+- `wind_direction_categorical` accepts only: `N`, `NE`, `E`, `SE`, `S`, `SW`, `W`, `NW`
+- `tidal_state` accepts only: `flood`, `ebb`, `slack`, `slack low`, `slack high`
 
 ---
 
 ## Performance Expectations
 
-### What the Model Can Do
-
-✅ **Strengths:**
-- Detect 61.3% of critical orange events (H2S ≥ 30 ppb)
-- Provide 1-3 hour advance warning
+**Strengths:**
+- Detects 61.3% of critical orange events (H2S ≥ 30 ppb)
+- Provides 1–3 hour advance warning
 - Low false alarm rate (5.4%)
-- Process predictions in seconds
-- Works 24/7 without manual intervention
+- Runs automatically every 6 hours
 
-### What the Model Cannot Do
-
-❌ **Limitations:**
-- Still misses ~39% of orange events
+**Limitations:**
+- Misses ~39% of orange events
 - Cannot detect sudden spikes (< 1 hour)
-- Requires sensor data to be current and accurate
-- Not 100% accurate (no ML model is)
+- Requires input sensor data to be current and accurate
 - Should supplement, not replace, direct H2S monitoring
 
-### Use Cases
+**Good for:** Early warning, maintenance planning, trend analysis, reducing operator workload
 
-**Good for:**
-- Early warning system
-- Planning maintenance during predicted high H2S
-- Trend analysis and reporting
-- Reducing operator workload
-- Prioritizing direct monitoring efforts
-
-**Not suitable for:**
-- Emergency response (too slow, not 100% reliable)
-- Replacing H2S sensors
-- Regulatory compliance as sole measure
-- Life-safety critical decisions without verification
-
----
-
-## Support
-
-### Getting Help
-
-**For technical issues:**
-1. Check this documentation
-2. Review error messages carefully
-3. Verify input data format
-4. Check log files
-
-**For model questions:**
-- Review `Complete_Model_Testing_Summary.md`
-- See `NESTOR_BES_H2S_Forecasting_Report.md`
-
-**For updates:**
-- Model retraining: Contact data science team
-- Feature requests: Submit via project management system
-
----
-
-## Files Included
-
-```
-h2s_prediction_system/
-├── predict_h2s.py                          # Main prediction script
-├── batch_predict.py                        # Batch processing
-├── nestor_xgboost_weighted_model.json      # Trained XGBoost model
-├── nestor_preprocessing_info.pkl           # Feature encoders & config
-├── DEPLOYMENT_GUIDE.md                     # This file
-├── NESTOR_BES_Quick_Start.md               # Quick reference
-├── NESTOR_BES_H2S_Forecasting_Report.md    # Full technical report
-└── Complete_Model_Testing_Summary.md       # All algorithms tested
-```
+**Not suitable for:** Emergency response, regulatory compliance as sole measure, life-safety decisions without verification
 
 ---
 
 ## Version History
 
+**v2.0** (March 2026)
+- Migrated to Dagster pipeline with automated scheduling
+- S3-backed model loading and prediction export
+- Added daily validation reports and monthly retraining workflow
+- Preprocessing metadata converted from `.pkl` to `.json`
+
 **v1.0** (December 2025)
 - Initial production release
 - XGBoost model with 61.3% orange recall
 - Trained on 9,631 NESTOR - BES samples
-- 20 engineered features
-- Balanced class weighting
+- 20 engineered features, balanced class weighting
 
 ---
 
-## License & Citation
+## Related Documentation
 
-**Model:** Proprietary
-**Data:** NESTOR - BES site, November 2023 - January 2025
-**Contact:** [Your organization]
-
-When referencing this model, cite:
-```
-H2S Forecasting Model for NESTOR - BES, v1.0
-Trained: December 2025
-Performance: 61.3% orange recall, 63.1% balanced accuracy
-Algorithm: XGBoost with class weighting
-```
+- `README.md` — Quick start and usage examples
+- `NESTOR_BES_H2S_Forecasting_Report.md` — Full technical report
+- `Complete_Model_Testing_Summary.md` — All algorithms tested
+- `projects/h2s/tests/README.md` — Test documentation
 
 ---
 
-*Last updated: December 2025*
+*Last updated: March 2026*
