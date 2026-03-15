@@ -1,5 +1,5 @@
 <component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="test_pipeline" type="UvRunConfigurationType" factoryName="UvRunConfigurationType">
+  <configuration default="false" name="test_pipeline" type="UvRunConfigurationType" factoryName="UvRunConfigurationType" folderName="scripts">
     <option name="args">
       <list />
     </option>
