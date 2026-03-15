@@ -47,6 +47,7 @@ COPY --from=builder /usr/src/app/.venv /usr/src/app/.venv
 # Copy application code and configurations
 WORKDIR /usr/src/app/
 COPY configs/dagster/dagster.yaml /usr/src/app/
+COPY projects/h2s/pyproject.toml /usr/src/app/
 COPY projects/h2s/src /usr/src/app/src
 
 # Set environment variables
