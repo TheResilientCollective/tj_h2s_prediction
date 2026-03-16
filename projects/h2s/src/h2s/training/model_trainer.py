@@ -327,16 +327,19 @@ def get_feature_importance(model: xgb.XGBClassifier,
         >>> importance['temp']
         0.342
     """
-    # Get importance dict from booster (uses f0, f1, f2... as keys)
+    # RandomForest (and other sklearn estimators) expose feature_importances_ directly
+    if hasattr(model, 'feature_importances_'):
+        return {
+            name: float(score)
+            for name, score in zip(feature_names, model.feature_importances_)
+        }
+
+    # XGBoost: get importance dict from booster (uses f0, f1, f2... as keys)
     importance_dict = model.get_booster().get_score(importance_type=importance_type)
-
-    # Map to feature names
-    feature_importance = {}
-    for i, feature_name in enumerate(feature_names):
-        key = f'f{i}'
-        feature_importance[feature_name] = float(importance_dict.get(key, 0.0))
-
-    return feature_importance
+    return {
+        name: float(importance_dict.get(f'f{i}', 0.0))
+        for i, name in enumerate(feature_names)
+    }
 
 
 def calculate_cv_summary(cv_metrics: List[Dict]) -> Dict:

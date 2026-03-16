@@ -11,14 +11,18 @@ Workflow:
 4. Manual trigger of deploy_approved_model_job for the chosen variant
 """
 
+from datetime import timedelta
+
 import dagster as dg
 
 from h2s.defs.h2s_pipeline import (
+    h2s_model_artifacts,
     raw_environmental_data,
     preprocessed_features,
     h2s_predictions,
     h2s_alerts,
     predictions_export,
+    feature_importance_viz,
     confusion_matrix_viz,
     model_comparison_viz,
     prediction_timeline_viz,
@@ -117,8 +121,14 @@ deploy_approved_model_job = dg.define_asset_job(
     tags={"environment": "production", "schedule_type": "monthly_data"},
 )
 def monthly_data_schedule(context: dg.ScheduleEvaluationContext):
-    """Materialize monthly training/validation data on the 1st of each month."""
-    month_key = context.scheduled_execution_time.strftime('%Y-%m-01')
+    """Materialize monthly training/validation data on the 1st of each month.
+
+    Uses the previous month as the partition key — the schedule fires on the 1st
+    of the current month, but we want to process the just-completed previous month,
+    which is the latest available partition under end_offset=0.
+    """
+    prev_month = (context.scheduled_execution_time.replace(day=1) - timedelta(days=1)).replace(day=1)
+    month_key = prev_month.strftime('%Y-%m-%d')
     return dg.RunRequest(
         partition_key=month_key,
         run_key=f"data_extraction_{month_key}",
@@ -138,12 +148,14 @@ def monthly_data_schedule(context: dg.ScheduleEvaluationContext):
     tags={"environment": "production", "schedule_type": "monthly_training"},
 )
 def monthly_model_training_schedule(context: dg.ScheduleEvaluationContext):
-    """Train all model variants for the current month.
+    """Train all model variants for the previous (completed) month.
 
     Runs 2 hours after data extraction to allow data assets to materialize.
     Emits one RunRequest per variant so they train in parallel.
+    Uses the previous month partition key to match end_offset=0.
     """
-    month_key = context.scheduled_execution_time.strftime('%Y-%m-01')
+    prev_month = (context.scheduled_execution_time.replace(day=1) - timedelta(days=1)).replace(day=1)
+    month_key = prev_month.strftime('%Y-%m-%d')
     return [
         dg.RunRequest(
             partition_key=dg.MultiPartitionKey({"month": month_key, "variant": variant}),
@@ -162,11 +174,13 @@ forecast_prediction_job = dg.define_asset_job(
     name="forecast_prediction_job",
     description="Run full H2S prediction pipeline and export results to S3",
     selection=dg.AssetSelection.assets(
+        h2s_model_artifacts,
         raw_environmental_data,
         preprocessed_features,
         h2s_predictions,
         h2s_alerts,
         predictions_export,
+        feature_importance_viz,
         confusion_matrix_viz,
         model_comparison_viz,
         prediction_timeline_viz,

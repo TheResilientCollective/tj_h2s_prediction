@@ -27,18 +27,22 @@ def generate_feature_importance(model, prep_info: Dict, top_n: int = 15) -> Byte
     """
     feature_names = prep_info['feature_cols']
 
-    # Get feature importance from model
-    importance_dict = model.get_booster().get_score(importance_type='gain')
-
-    # Map to feature names
-    importance_data = []
-    for i, fname in enumerate(feature_names):
-        key = f'f{i}'
-        if key in importance_dict:
-            importance_data.append({
-                'feature': fname,
-                'importance': importance_dict[key]
-            })
+    # Get feature importance — handle both XGBoost and sklearn estimators
+    if hasattr(model, 'feature_importances_'):
+        # sklearn (e.g. RandomForest): direct array aligned to feature_names
+        importance_data = [
+            {'feature': fname, 'importance': float(score)}
+            for fname, score in zip(feature_names, model.feature_importances_)
+            if score > 0
+        ]
+    else:
+        # XGBoost: booster uses f0, f1, ... keys
+        importance_dict = model.get_booster().get_score(importance_type='gain')
+        importance_data = [
+            {'feature': fname, 'importance': importance_dict[f'f{i}']}
+            for i, fname in enumerate(feature_names)
+            if f'f{i}' in importance_dict
+        ]
 
     # Sort and get top N
     importance_df = pd.DataFrame(importance_data)

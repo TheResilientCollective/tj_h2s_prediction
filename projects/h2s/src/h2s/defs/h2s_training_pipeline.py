@@ -98,7 +98,7 @@ model_run_partitions = dg.MultiPartitionsDefinition({
         ),
         "s3_data_path": dg.Field(
             str,
-            default_value="tijuana/forecast/models/training/modeldata_h2s.parquet",
+            default_value="latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet",
             description="S3 path to training data parquet file"
         ),
         "site_filter": dg.Field(
@@ -181,13 +181,13 @@ def monthly_training_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
     partition_key = context.partition_key
     if partition_key:
         # Parse partition key: "2024-01-01" -> first day of month
-        partition_start = pd.to_datetime(partition_key).tz_localize('UTC')
+        partition_start = pd.to_datetime(partition_key)  # tz-naive to match df['time']
 
         # Create end date for the month (last day)
         if partition_start.month == 12:
-            end_date = pd.Timestamp(partition_start.year + 1, 1, 1, tz='UTC') - pd.Timedelta(days=1)
+            end_date = pd.Timestamp(partition_start.year + 1, 1, 1) - pd.Timedelta(days=1)
         else:
-            end_date = pd.Timestamp(partition_start.year, partition_start.month + 1, 1, tz='UTC') - pd.Timedelta(days=1)
+            end_date = pd.Timestamp(partition_start.year, partition_start.month + 1, 1) - pd.Timedelta(days=1)
 
         # Cumulative filter: all data from beginning up to end of partition month
         df = df[df['time'] <= end_date].copy()
@@ -319,8 +319,10 @@ def data_quality_report(
     # Check 2: H2S range
     h2s_min = df['H2S'].min()
     h2s_max = df['H2S'].max()
-    if h2s_min < 0 or h2s_max > 100:
-        issues.append(f"H2S out of reasonable range: [{h2s_min}, {h2s_max}]")
+    if h2s_min < 0:
+        issues.append(f"H2S has negative values: min={h2s_min}")
+    if h2s_max > 650:
+        context.log.warning(f"H2S max ({h2s_max} ppb) exceeds expected upper bound of 650 ppb")
 
     # Check 3: Class imbalance
     category_pct = (df['h2s_category'].value_counts() / len(df) * 100).round(2)
@@ -670,6 +672,8 @@ def trained_model_cv(
         'training_metadata': training_metadata,
         'variant': variant,
         'month_str': month_str,
+        'feature_names': available_features,
+        'label_map': label_map,
     }
 
 
@@ -767,9 +771,9 @@ def feature_importance_analysis(
 
     context.log.info(f"Generating feature importance visualization for {variant}...")
 
-    # Generate plot
+    # Generate plot — use the new model's own feature list, not the production model's
     new_model = trained_model_cv['model']
-    prep_info = h2s_model_artifacts.prep_info
+    prep_info = {'feature_cols': trained_model_cv['feature_names']}
 
     plot_bytes = generate_feature_importance(new_model, prep_info, top_n=15)
 
@@ -817,13 +821,11 @@ def feature_importance_analysis(
         "validation_data": dg.AssetIn(
             partition_mapping=dg.MultiToSingleDimensionPartitionMapping("month")
         ),
-        "h2s_model_artifacts": dg.AssetIn(key=dg.AssetKey(["h2s", "h2s_model_artifacts"])),
     },
 )
 def validation_predictions(
     context: dg.AssetExecutionContext,
     trained_model_cv: Dict,
-    h2s_model_artifacts,
     validation_data: pd.DataFrame,
 ) -> pd.DataFrame:
     """Generate predictions on validation set using newly trained model.
@@ -843,14 +845,15 @@ def validation_predictions(
     # Extract validation data and new model
     val_df = validation_data.copy()
     new_model = trained_model_cv['model']
-    label_map = {'green': 0, 'orange': 1, 'yellow': 2}
+    feature_names = trained_model_cv['feature_names']
+    label_map = trained_model_cv['label_map']
     reverse_label_map = {v: k for k, v in label_map.items()}
 
     context.log.info(f"Validation samples: {len(val_df)}")
+    context.log.info(f"Using {len(feature_names)} features from trained model")
 
-    # Preprocess validation data using existing predictor
-    val_processed = h2s_model_artifacts.preprocess_data(val_df)
-    X_val = val_processed[h2s_model_artifacts.feature_cols]
+    # Use the same raw features the model was trained on — no re-preprocessing needed
+    X_val = val_df[feature_names].copy()
 
     # Generate predictions
     y_pred = new_model.predict(X_val)
@@ -956,8 +959,10 @@ def validation_report(
             context.log.info(f"  {class_name.capitalize()} F1: {new_metrics[f'f1_{class_name}']:.3f}")
 
     # === CURRENT MODEL METRICS ===
-    # Use existing H2SPredictor to get current production model predictions
-    current_predictions = h2s_model_artifacts.predict(val_df)
+    # The production model's preprocess_data expects a 'date' column for temporal features
+    val_for_prod = val_df.rename(columns={'time': 'date'})
+    val_preprocessed = h2s_model_artifacts.preprocess_data(val_for_prod)
+    current_predictions = h2s_model_artifacts.predict(val_preprocessed)
     y_pred_current = current_predictions['predicted_category'].map(label_map).values
 
     current_metrics = calculate_metrics(y_true, y_pred_current, class_names=unique_classes)
