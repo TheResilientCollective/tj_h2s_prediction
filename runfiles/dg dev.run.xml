@@ -9,8 +9,8 @@
     <option name="env">
       <map />
     </option>
-    <option name="runType" value="SCRIPT" />
-    <option name="scriptOrModule" value="dg" />
+    <option name="runType" value="MODULE" />
+    <option name="scriptOrModule" value="dagster_dg_cli.cli" />
     <option name="uvArgs">
       <list />
     </option>

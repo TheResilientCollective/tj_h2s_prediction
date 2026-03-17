@@ -22,14 +22,16 @@ import xgboost as xgb
 class H2SPredictor:
     """H2S Forecasting Model with S3 support and JSON-based metadata."""
 
-    def __init__(self, model, prep_info_dict):
+    def __init__(self, model, prep_info_dict, model_name: str = ""):
         """Initialize predictor with loaded model and preprocessing info.
 
         Args:
             model: Loaded XGBoost classifier
             prep_info_dict: Dictionary with preprocessing metadata (from JSON)
+            model_name: Human-readable name for the model (e.g. variant name)
         """
         self.model = model
+        self.model_name = model_name
         self.prep_info = prep_info_dict
         self.feature_cols = prep_info_dict['feature_cols']
         self.class_names = prep_info_dict['class_names']
@@ -61,7 +63,7 @@ class H2SPredictor:
         return cls(model, prep_info)
 
     @classmethod
-    def from_s3(cls, s3_resource, model_path: str, preprocessing_json_path: str):
+    def from_s3(cls, s3_resource, model_path: str, preprocessing_json_path: str, model_name: str = ""):
         """Load model and preprocessing info from S3.
 
         Args:
@@ -72,27 +74,32 @@ class H2SPredictor:
         Returns:
             H2SPredictor instance
         """
+        import os
+
         # Download model from S3 (returns bytes)
         model_bytes = s3_resource.getFile(path=model_path, bucket=s3_resource.S3_BUCKET)
 
-        # XGBoost requires a file path, so use tempfile
-        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as tmp_model:
-            tmp_model.write(model_bytes)
-            tmp_model_path = tmp_model.name
+        # Detect format by content (magic byte 0x80 = pickle/joblib),
+        # not by extension — so a random_forest deployed to a .json path still loads correctly.
+        is_joblib = model_bytes[:1] == b'\x80'
 
-        # Load model from temporary file
-        model = xgb.XGBClassifier()
-        model.load_model(tmp_model_path)
-
-        # Clean up temp file
-        import os
-        os.unlink(tmp_model_path)
+        if is_joblib or model_path.endswith('.joblib'):
+            import joblib, io
+            model = joblib.load(io.BytesIO(model_bytes))
+        else:
+            # XGBoost requires a file path, so use tempfile
+            with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as tmp:
+                tmp.write(model_bytes)
+                tmp_path = tmp.name
+            model = xgb.XGBClassifier()
+            model.load_model(tmp_path)
+            os.unlink(tmp_path)
 
         # Download and parse preprocessing JSON from S3 (returns bytes)
         prep_bytes = s3_resource.getFile(path=preprocessing_json_path, bucket=s3_resource.S3_BUCKET)
         prep_info = json.loads(prep_bytes.decode('utf-8'))
 
-        return cls(model, prep_info)
+        return cls(model, prep_info, model_name=model_name)
 
     def preprocess_data(self, df: pd.DataFrame) -> pd.DataFrame:
         """Preprocess raw data to match model training format.
@@ -109,14 +116,14 @@ class H2SPredictor:
         if 'date' in df.columns:
             df['date'] = pd.to_datetime(df['date'])
 
-            # Extract temporal features
-            df['hour'] = df['date'].dt.hour
-            df['day_of_week'] = df['date'].dt.dayofweek
-           # df['month'] = df['date'].dt.month
-
-            # Cyclical encoding for hour
-            df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
-            df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
+           #  # Extract temporal features
+           #  df['hour'] = df['date'].dt.hour
+           #  df['day_of_week'] = df['date'].dt.dayofweek
+           # # df['month'] = df['date'].dt.month
+           #
+           #  # Cyclical encoding for hour
+           #  df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
+           #  df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
 
         # Wind direction cyclical encoding
         if 'wind_direction_10m' in df.columns:

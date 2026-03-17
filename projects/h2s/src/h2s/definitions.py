@@ -33,6 +33,8 @@ def defs():
         preprocessed_features,
         h2s_predictions,
         h2s_alerts,
+        h2s_variant_predictions,
+        h2s_ensemble_predictions,
         feature_importance_viz,
         confusion_matrix_viz,
         model_comparison_viz,
@@ -59,7 +61,6 @@ def defs():
         model_comparison_report,
         # Phase 4: Deployment
         deployment_approval,
-        archived_previous_model,
         production_model_deployment,
     )
 
@@ -68,6 +69,7 @@ def defs():
         monthly_data_extraction_job,
         monthly_model_training_job,
         deploy_approved_model_job,
+        approve_and_deploy_job,
         monthly_data_schedule,
         monthly_model_training_schedule,
         forecast_prediction_job,
@@ -79,13 +81,15 @@ def defs():
     # Create definitions with assets, jobs, schedules, and resources
     all_defs = Definitions(
         assets=[
-            # Prediction Pipeline Assets (12 assets)
+            # Prediction Pipeline Assets (14 assets)
             h2s_model_artifacts,
             raw_environmental_data,
             actual_h2s_data,
             preprocessed_features,
             h2s_predictions,
             h2s_alerts,
+            h2s_variant_predictions,
+            h2s_ensemble_predictions,
             feature_importance_viz,
             confusion_matrix_viz,
             model_comparison_viz,
@@ -109,13 +113,13 @@ def defs():
             model_comparison_report,
             # Phase 4: Deployment
             deployment_approval,
-            archived_previous_model,
             production_model_deployment,
         ],
         jobs=[
             monthly_data_extraction_job,
             monthly_model_training_job,
             deploy_approved_model_job,
+            approve_and_deploy_job,
             forecast_prediction_job,
             daily_validation_job,
         ],

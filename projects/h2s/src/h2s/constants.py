@@ -11,6 +11,7 @@ TRAINING_PATH = 'tijuana/forecast/models/training'
 ARCHIVE_PATH = 'tijuana/forecast/models/archive'
 PREDICTIONS_PATH = 'tijuana/forecast/predictions'
 OUTPUT_PATH = 'tijuana/forecast/output'  # Legacy - prefer PREDICTIONS_PATH
+VISUALIZATIONS_PATH = 'tijuana/forecast/visualizations'
 
 # Latest path base
 LATEST_BASEPATH = 'latest/tijuana'

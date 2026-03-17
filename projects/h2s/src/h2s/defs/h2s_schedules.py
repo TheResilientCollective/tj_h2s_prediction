@@ -21,6 +21,8 @@ from h2s.defs.h2s_pipeline import (
     preprocessed_features,
     h2s_predictions,
     h2s_alerts,
+    h2s_variant_predictions,
+    h2s_ensemble_predictions,
     predictions_export,
     feature_importance_viz,
     confusion_matrix_viz,
@@ -45,7 +47,6 @@ from h2s.defs.h2s_training_pipeline import (
     model_comparison_report,
     # Phase 4: Deployment (model_run partitioned)
     deployment_approval,
-    archived_previous_model,
     production_model_deployment,
     # Partition definitions
     monthly_training_partitions,
@@ -85,7 +86,6 @@ monthly_model_training_job = dg.define_asset_job(
         feature_importance_analysis,
         validation_predictions,
         validation_report,
-        model_comparison_report,
     ),
     partitions_def=model_run_partitions,
     tags={"environment": "production", "pipeline": "h2s_model_training"},
@@ -100,11 +100,38 @@ deploy_approved_model_job = dg.define_asset_job(
     name="deploy_approved_model_job",
     description="Deploy an approved model variant to production (manual trigger only)",
     selection=dg.AssetSelection.assets(
+        model_comparison_report,
         deployment_approval,
-        archived_previous_model,
         production_model_deployment,
     ),
     partitions_def=model_run_partitions,
+    tags={"environment": "production", "pipeline": "h2s_deployment"},
+)
+
+
+# ============================================================================
+# JOB 3b: Approve and Deploy (pre-approved, no config editing needed)
+# ============================================================================
+
+approve_and_deploy_job = dg.define_asset_job(
+    name="approve_and_deploy_job",
+    description=(
+        "Approve and deploy a model variant to production. "
+        "Select the partition (month | variant) and launch — no config editing required."
+    ),
+    selection=dg.AssetSelection.assets(
+        model_comparison_report,
+        deployment_approval,
+        production_model_deployment,
+    ),
+    partitions_def=model_run_partitions,
+    config={
+        "ops": {
+            "deployment_approval": {
+                "config": {"approve_deployment": True}
+            }
+        }
+    },
     tags={"environment": "production", "pipeline": "h2s_deployment"},
 )
 
@@ -179,6 +206,8 @@ forecast_prediction_job = dg.define_asset_job(
         preprocessed_features,
         h2s_predictions,
         h2s_alerts,
+        h2s_variant_predictions,
+        h2s_ensemble_predictions,
         predictions_export,
         feature_importance_viz,
         confusion_matrix_viz,

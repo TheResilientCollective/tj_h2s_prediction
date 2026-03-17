@@ -30,14 +30,14 @@ trap "rm -f $TMPCONFIG" EXIT
 
 cat > "$TMPCONFIG" <<EOF
 ops:
-  h2s/raw_environmental_data:
+  h2s__raw_environmental_data:
     config:
       use_local_data: true
       local_data_path: "$DATA_PATH"
 EOF
 
 uv run dg launch -m h2s.definitions \
-  --assets "h2s/raw_environmental_data,h2s/preprocessed_features,h2s/h2s_predictions,h2s/h2s_alerts,h2s/predictions_export,h2s/confusion_matrix_viz,h2s/model_comparison_viz,h2s/prediction_timeline_viz" \
+  --assets "h2s/raw_environmental_data,h2s/preprocessed_features,h2s/h2s_predictions,h2s/h2s_alerts,h2s/h2s_variant_predictions,h2s/h2s_ensemble_predictions,h2s/predictions_export,h2s/confusion_matrix_viz,h2s/model_comparison_viz,h2s/prediction_timeline_viz" \
   --config "$TMPCONFIG"
 
 echo ""

@@ -5,6 +5,7 @@ processes environmental data, generates H2S predictions (green/yellow/orange),
 and exports results to S3 with visualizations.
 """
 
+import json
 from datetime import datetime, timedelta
 from io import BytesIO
 
@@ -15,7 +16,7 @@ from h2s.utils import store_assets
 from h2s.constants import (
     MODEL_PATH,
     PREDICTIONS_PATH,
-    OUTPUT_PATH,
+    VISUALIZATIONS_PATH,
     LATEST_FORECAST_DATA,
     VALIDATION_PATH,
 )
@@ -23,6 +24,8 @@ from h2s.constants import (
 STORE_ASSETS_AVAILABLE = True
 
 _KEY = lambda name: dg.AssetKey(["h2s", name])
+
+MODEL_VARIANTS = ["xgboost_base", "xgboost_smote", "random_forest"]
 
 
 # ==============================================================================
@@ -47,10 +50,22 @@ def h2s_model_artifacts(context: dg.AssetExecutionContext):
 
     context.log.info(f"Loading model from S3: {MODEL_PATH}")
 
+    # Resolve display name from deployment metadata (written by production_model_deployment)
+    model_display_name = "XGBoost Weighted"
+    try:
+        meta_bytes = s3_resource.getFile(f"{MODEL_PATH}/deployment_metadata.json", bucket=s3_resource.S3_BUCKET)
+        meta = json.loads(meta_bytes.decode("utf-8"))
+        variant = meta.get("approval_metadata", {}).get("variant", "")
+        if variant:
+            model_display_name = variant.replace("_", " ").title()
+    except Exception:
+        pass  # No deployment metadata yet — use default name
+
     predictor = H2SPredictor.from_s3(
         s3_resource,
         f"{MODEL_PATH}/nestor_xgboost_weighted_model.json",
-        f"{MODEL_PATH}/nestor_preprocessing_info.json"
+        f"{MODEL_PATH}/nestor_preprocessing_info.json",
+        model_name=model_display_name,
     )
 
     context.log.info(f"Model loaded successfully")
@@ -79,7 +94,7 @@ def h2s_model_artifacts(context: dg.AssetExecutionContext):
         ),
         "local_data_path": dg.Field(
             str,
-            default_value="/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/latest.csv",
+            default_value="/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/modeldata_h2s_nofill.parquet",
             description="Path to local test data file (used when use_local_data=True)"
         ),
     }
@@ -141,8 +156,8 @@ def raw_environmental_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
     if not h2s_cols and source == "s3":
         try:
             context.log.info("No H2S measurements in S3 data - attempting to merge from local modeldata_h2s.csv")
-            local_path = "/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/modeldata_h2s.csv"
-            h2s_df = pd.read_csv(local_path)
+            local_path = "/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/modeldata_h2s_nofill.parquet"
+            h2s_df = pd.read_parquet(local_path)
 
             # Standardize time column in H2S data
             if 'time' in h2s_df.columns:
@@ -292,6 +307,108 @@ def h2s_alerts(
     return alerts
 
 
+@dg.asset(
+    key_prefix="h2s",
+    group_name="h2s_prediction",
+    required_resource_keys={"s3"},
+    kinds={"ml", "xgboost"},
+    description="Run predictions for each deployed model variant; skips missing variants",
+)
+def h2s_variant_predictions(
+    context: dg.AssetExecutionContext,
+    preprocessed_features: pd.DataFrame,
+) -> dict:
+    """Load each variant model from S3 and generate predictions.
+
+    Returns:
+        Dict mapping variant name → predictions DataFrame.
+        Variants whose models are not yet deployed are silently skipped.
+    """
+    from h2s.predictor.h2s_predictor import H2SPredictor
+
+    s3_resource = context.resources.s3
+    prep_path = f"{MODEL_PATH}/nestor_preprocessing_info.json"
+    results = {}
+
+    for variant in MODEL_VARIANTS:
+        for model_filename in ("model.json", "model.joblib"):
+            model_path = f"{MODEL_PATH}/{variant}/{model_filename}"
+            try:
+                predictor = H2SPredictor.from_s3(s3_resource, model_path, prep_path, model_name=variant.replace("_", " ").title())
+                preds = predictor.predict(preprocessed_features)
+                results[variant] = preds
+                context.log.info(f"✓ {variant}: {len(preds)} predictions")
+                break
+            except Exception:
+                continue
+        else:
+            context.log.info(f"⚠ {variant}: no deployed model found, skipping")
+
+    context.add_output_metadata({"variants_loaded": list(results.keys()), "n_variants": len(results)})
+    return results
+
+
+@dg.asset(
+    key_prefix="h2s",
+    group_name="h2s_prediction",
+    kinds={"ml"},
+    description="Ensemble predictions by averaging probabilities across all available variants",
+)
+def h2s_ensemble_predictions(
+    context: dg.AssetExecutionContext,
+    h2s_variant_predictions: dict,
+    h2s_predictions: pd.DataFrame,
+) -> pd.DataFrame:
+    """Average class probabilities across all variant models.
+
+    Falls back to primary model (h2s_predictions) if no variants are loaded.
+
+    Returns:
+        DataFrame with ensemble predicted_category, probability_green/yellow/orange, confidence, alert
+    """
+    variant_dfs = list(h2s_variant_predictions.values())
+
+    if not variant_dfs:
+        context.log.warning("No variant models loaded — returning primary model predictions as ensemble")
+        return h2s_predictions.copy()
+
+    # Include the primary model in the ensemble
+    all_dfs = [h2s_predictions] + variant_dfs
+
+    # Average probabilities
+    prob_cols = ["probability_green", "probability_yellow", "probability_orange"]
+
+    avg_probs = pd.DataFrame(0.0, index=all_dfs[0].index, columns=prob_cols)
+    for df in all_dfs:
+        for col in prob_cols:
+            if col in df.columns:
+                avg_probs[col] += df[col]
+    avg_probs = avg_probs / len(all_dfs)
+
+    # Classify by argmax
+    class_map = {0: "green", 1: "yellow", 2: "orange"}
+    avg_probs_array = avg_probs[["probability_green", "probability_yellow", "probability_orange"]].values
+    predicted_idx = avg_probs_array.argmax(axis=1)
+    predicted_category = pd.Series([class_map[i] for i in predicted_idx], index=all_dfs[0].index)
+
+    ensemble_df = all_dfs[0][["time"]].copy() if "time" in all_dfs[0].columns else pd.DataFrame(index=all_dfs[0].index)
+    ensemble_df["predicted_category"] = predicted_category
+    ensemble_df["probability_green"] = avg_probs["probability_green"]
+    ensemble_df["probability_yellow"] = avg_probs["probability_yellow"]
+    ensemble_df["probability_orange"] = avg_probs["probability_orange"]
+    ensemble_df["confidence"] = avg_probs_array.max(axis=1)
+    ensemble_df["alert"] = predicted_category.isin(["yellow", "orange"])
+    ensemble_df["n_models"] = len(all_dfs)
+
+    context.log.info(f"✓ Ensemble from {len(all_dfs)} models: {predicted_category.value_counts().to_dict()}")
+    context.add_output_metadata({
+        "n_models": len(all_dfs),
+        "variants": list(h2s_variant_predictions.keys()),
+        "alert_count": int(ensemble_df["alert"].sum()),
+    })
+    return ensemble_df
+
+
 # ==============================================================================
 # Asset Group: Actual Data (Optional)
 # ==============================================================================
@@ -351,14 +468,16 @@ def feature_importance_viz(
     context.log.info("Generating feature importance visualization...")
 
     s3_resource = context.resources.s3
+    model_name = h2s_model_artifacts.model_name
     plot_bytes = generate_feature_importance(
         h2s_model_artifacts.model,
-        h2s_model_artifacts.prep_info
+        h2s_model_artifacts.prep_info,
+        model_name=model_name,
     )
 
     # Upload to timestamped path
     timestamp = datetime.now().strftime("%Y-%m-%d")
-    timestamped_path = f"{OUTPUT_PATH}/visualizations/{timestamp}/feature_importance.png"
+    timestamped_path = f"{VISUALIZATIONS_PATH}/{timestamp}/feature_importance.png"
     s3_resource.putFile(plot_bytes.read(), timestamped_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     # Upload to latest path
@@ -379,12 +498,14 @@ def feature_importance_viz(
     ins={
         "h2s_predictions": dg.AssetIn(key=_KEY("h2s_predictions")),
         "raw_environmental_data": dg.AssetIn(key=_KEY("raw_environmental_data")),
+        "h2s_model_artifacts": dg.AssetIn(key=_KEY("h2s_model_artifacts")),
     },
 )
 def confusion_matrix_viz(
     context: dg.AssetExecutionContext,
     h2s_predictions: pd.DataFrame,
-    raw_environmental_data: pd.DataFrame
+    raw_environmental_data: pd.DataFrame,
+    h2s_model_artifacts,
 ) -> None:
     """Generate and upload confusion matrix plot to S3.
 
@@ -445,15 +566,17 @@ def confusion_matrix_viz(
     context.log.info(f"  Predictions: {len(predictions_df)} rows")
     context.log.info(f"  H2S value range: {actuals_df['H2S'].min():.2f} - {actuals_df['H2S'].max():.2f} ppb")
 
+    model_name = h2s_model_artifacts.model_name
     plot_bytes = generate_confusion_matrix_with_metrics(
         predictions_df,
         actuals_df,
-        time_col='time'
+        time_col='time',
+        model_name=model_name,
     )
 
     # Upload to timestamped path
     timestamp = datetime.now().strftime("%Y-%m-%d")
-    timestamped_path = f"{OUTPUT_PATH}/visualizations/{timestamp}/confusion_matrix.png"
+    timestamped_path = f"{VISUALIZATIONS_PATH}/{timestamp}/confusion_matrix.png"
     s3_resource.putFile(plot_bytes.read(), timestamped_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     # Upload to latest path
@@ -474,12 +597,14 @@ def confusion_matrix_viz(
     ins={
         "h2s_predictions": dg.AssetIn(key=_KEY("h2s_predictions")),
         "raw_environmental_data": dg.AssetIn(key=_KEY("raw_environmental_data")),
+        "h2s_model_artifacts": dg.AssetIn(key=_KEY("h2s_model_artifacts")),
     },
 )
 def model_comparison_viz(
     context: dg.AssetExecutionContext,
     h2s_predictions: pd.DataFrame,
-    raw_environmental_data: pd.DataFrame
+    raw_environmental_data: pd.DataFrame,
+    h2s_model_artifacts,
 ) -> None:
     """Generate and upload model comparison plot to S3.
 
@@ -529,16 +654,17 @@ def model_comparison_viz(
 
     context.log.info(f"Generating model comparison visualization with {len(actuals_df)} H2S measurements...")
 
+    model_name = h2s_model_artifacts.model_name
     plot_bytes = generate_model_comparison(
         predictions_df,
         actuals_df,
-        model_name="XGBoost Weighted",
+        model_name=model_name,
         time_col='time'
     )
 
     # Upload to timestamped path
     timestamp = datetime.now().strftime("%Y-%m-%d")
-    timestamped_path = f"{OUTPUT_PATH}/visualizations/{timestamp}/model_comparison.png"
+    timestamped_path = f"{VISUALIZATIONS_PATH}/{timestamp}/model_comparison.png"
     s3_resource.putFile(plot_bytes.read(), timestamped_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     # Upload to latest path
@@ -592,7 +718,7 @@ def prediction_timeline_viz(
 
     # Upload to timestamped path
     timestamp = datetime.now().strftime("%Y-%m-%d")
-    timestamped_path = f"{OUTPUT_PATH}/visualizations/{timestamp}/prediction_timeline.png"
+    timestamped_path = f"{VISUALIZATIONS_PATH}/{timestamp}/prediction_timeline.png"
     s3_resource.putFile(plot_bytes.read(), timestamped_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     # Upload to latest path
@@ -613,11 +739,15 @@ def prediction_timeline_viz(
     auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
     ins={
         "h2s_predictions": dg.AssetIn(key=_KEY("h2s_predictions")),
+        "h2s_variant_predictions": dg.AssetIn(key=_KEY("h2s_variant_predictions")),
+        "h2s_ensemble_predictions": dg.AssetIn(key=_KEY("h2s_ensemble_predictions")),
     },
 )
 def predictions_export(
     context: dg.AssetExecutionContext,
-    h2s_predictions: pd.DataFrame
+    h2s_predictions: pd.DataFrame,
+    h2s_variant_predictions: dict,
+    h2s_ensemble_predictions: pd.DataFrame,
 ) -> None:
     """Export predictions to S3 with versioning.
 
@@ -643,13 +773,34 @@ def predictions_export(
         dataset_identifier="h2s_predictions",
         s3_resource=s3_resource,
         metadata=metadata,
-        latestdatasetpath=f"latest/{LATEST_FORECAST_DATA}",
+        latestdatasetpath=LATEST_FORECAST_DATA,
         enable_latest_path=True,
         formats=['csv', 'json']
     )
 
     context.log.info(f"✓ Exported predictions to {timestamped_path}")
     context.log.info(f"✓ Latest path: latest/{LATEST_FORECAST_DATA}")
+
+    # === PER-VARIANT PREDICTIONS ===
+    for variant, variant_df in h2s_variant_predictions.items():
+        variant_csv = variant_df.to_csv(index=False)
+        s3_resource.putFile_text(
+            variant_csv,
+            path=f"latest/{LATEST_FORECAST_DATA}/h2s_predictions_{variant}.csv",
+            bucket=s3_resource.S3_BUCKET,
+            content_type='text/csv',
+        )
+        context.log.info(f"✓ Exported variant predictions: h2s_predictions_{variant}.csv")
+
+    # === ENSEMBLE PREDICTIONS ===
+    ensemble_csv = h2s_ensemble_predictions.to_csv(index=False)
+    s3_resource.putFile_text(
+        ensemble_csv,
+        path=f"latest/{LATEST_FORECAST_DATA}/h2s_predictions_ensemble.csv",
+        bucket=s3_resource.S3_BUCKET,
+        content_type='text/csv',
+    )
+    context.log.info(f"✓ Exported ensemble predictions: h2s_predictions_ensemble.csv")
 
     context.add_output_metadata({
         "row_count": len(h2s_predictions),

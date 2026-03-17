@@ -1,0 +1,8 @@
+# Template config for local test mode.
+# Used by materialize_local_test.sh — the script substitutes the correct absolute path at runtime.
+# Do not use this file directly; the hardcoded path will not work on other machines.
+ops:
+  raw_environmental_data:
+    config:
+      use_local_data: false
+      local_data_path: "https://oss.resilientservice.mooo.com/resilentpublic/latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet"

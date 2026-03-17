@@ -14,13 +14,14 @@ import seaborn as sns
 from sklearn.metrics import confusion_matrix, balanced_accuracy_score
 
 
-def generate_feature_importance(model, prep_info: Dict, top_n: int = 15) -> BytesIO:
+def generate_feature_importance(model, prep_info: Dict, top_n: int = 15, model_name: str = "") -> BytesIO:
     """Generate feature importance plot as BytesIO.
 
     Args:
-        model: Trained XGBoost model
+        model: Trained model (XGBoost or sklearn)
         prep_info: Preprocessing info dict with 'feature_cols'
         top_n: Number of top features to display
+        model_name: Display name for the model (shown in plot title)
 
     Returns:
         BytesIO object with PNG image data
@@ -49,12 +50,13 @@ def generate_feature_importance(model, prep_info: Dict, top_n: int = 15) -> Byte
     importance_df = importance_df.sort_values('importance', ascending=False).head(top_n)
 
     # Create plot
+    name_suffix = f" — {model_name}" if model_name else ""
     fig, ax = plt.subplots(figsize=(10, 8))
     ax.barh(range(len(importance_df)), importance_df['importance'].values, color='steelblue')
     ax.set_yticks(range(len(importance_df)))
     ax.set_yticklabels(importance_df['feature'].values)
     ax.set_xlabel('Importance (Gain)', fontsize=12, fontweight='bold')
-    ax.set_title(f'Top {top_n} Most Important Features for H2S Prediction',
+    ax.set_title(f'Top {top_n} Most Important Features for H2S Prediction{name_suffix}',
                  fontsize=14, fontweight='bold')
     ax.invert_yaxis()
     plt.tight_layout()
@@ -126,7 +128,7 @@ def generate_confusion_matrix(predictions: pd.DataFrame, actuals: pd.DataFrame) 
 
 
 def generate_confusion_matrix_with_metrics(predictions: pd.DataFrame, actuals: pd.DataFrame,
-                                           time_col: str = 'time') -> BytesIO:
+                                           time_col: str = 'time', model_name: str = "") -> BytesIO:
     """Generate enhanced confusion matrix plot with metrics as BytesIO.
 
     Args:
@@ -197,7 +199,8 @@ def generate_confusion_matrix_with_metrics(predictions: pd.DataFrame, actuals: p
                 cbar_kws={'label': 'Percentage'}, ax=ax,
                 vmin=0, vmax=1)
 
-    ax.set_title('Confusion Matrix - H2S Predictions vs Actuals',
+    name_suffix = f" — {model_name}" if model_name else ""
+    ax.set_title(f'Confusion Matrix - H2S Predictions vs Actuals{name_suffix}',
                 fontsize=14, fontweight='bold', pad=20)
     ax.set_ylabel('Actual Category', fontsize=12, fontweight='bold')
     ax.set_xlabel('Predicted Category', fontsize=12, fontweight='bold')

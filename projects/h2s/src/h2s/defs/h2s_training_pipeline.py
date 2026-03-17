@@ -20,7 +20,6 @@ Phase 3: Validation
 
 Phase 4: Deployment
     - deployment_approval: Manual approval gate (BLOCKS auto-deployment)
-    - archived_previous_model: Backup current production model
     - production_model_deployment: Deploy new model to production S3 paths
 
 Scheduling:
@@ -49,7 +48,7 @@ from h2s.training.model_trainer import (
 )
 from h2s.training.validation import calculate_metrics, compare_models, format_metrics_report
 from h2s.utils import store_assets
-from h2s.constants import MODEL_PATH, TRAINING_PATH, ARCHIVE_PATH
+from h2s.constants import MODEL_PATH, TRAINING_PATH, LATEST_FORECAST_DATA
 
 
 # ==============================================================================
@@ -75,11 +74,17 @@ model_run_partitions = dg.MultiPartitionsDefinition({
 })
 
 
+def _KEY(name: str) -> dg.AssetKey:
+    """Helper: resolve an intra-file asset key under the 'h2s' prefix."""
+    return dg.AssetKey(["h2s", name])
+
+
 # ==============================================================================
 # PHASE 1: Data Extraction & Preparation
 # ==============================================================================
 
 @dg.asset(
+    key_prefix="h2s",
     group_name="h2s_training_data",
     kinds={"csv"},
     required_resource_keys={"s3"},
@@ -225,10 +230,14 @@ def monthly_training_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
 
 
 @dg.asset(
+    key_prefix="h2s",
     group_name="h2s_training_data",
     kinds={"python"},
     description="Apply new H2S thresholds (Yellow: 5-30 ppb, Orange: ≥30 ppb)",
     partitions_def=monthly_training_partitions,
+    ins={
+        "monthly_training_data": dg.AssetIn(key=_KEY("monthly_training_data")),
+    },
 )
 def relabeled_training_data(
     context: dg.AssetExecutionContext,
@@ -284,10 +293,14 @@ def relabeled_training_data(
 
 
 @dg.asset(
+    key_prefix="h2s",
     group_name="h2s_training_data",
     kinds={"validation"},
     description="Data quality validation report",
     partitions_def=monthly_training_partitions,
+    ins={
+        "relabeled_training_data": dg.AssetIn(key=_KEY("relabeled_training_data")),
+    },
 )
 def data_quality_report(
     context: dg.AssetExecutionContext,
@@ -364,10 +377,14 @@ def data_quality_report(
 
 
 @dg.asset(
+    key_prefix="h2s",
     group_name="h2s_training_data",
     kinds={"python"},
     description="Time-based training/validation split (80/20)",
     partitions_def=monthly_training_partitions,
+    ins={
+        "relabeled_training_data": dg.AssetIn(key=_KEY("relabeled_training_data")),
+    },
     config_schema={
         "validation_split": dg.Field(
             float,
@@ -411,9 +428,13 @@ def training_data(
 
 
 @dg.asset(
+    key_prefix="h2s",
     group_name="h2s_training_data",
     description="Validation data (20% time-based split)",
     partitions_def=monthly_training_partitions,
+    ins={
+        "relabeled_training_data": dg.AssetIn(key=_KEY("relabeled_training_data")),
+    },
     config_schema={
         "validation_split": dg.Field(
             float,
@@ -461,12 +482,14 @@ def validation_data(
 # ==============================================================================
 
 @dg.asset(
+    key_prefix="h2s",
     group_name="h2s_model_training",
     kinds={"xgboost", "ml"},
     description="Train XGBoost model with 5-fold time-series cross-validation. Partition variant controls preprocessing (xgboost_base=class weights only, xgboost_smote=SMOTE oversampling).",
     partitions_def=model_run_partitions,
     ins={
         "training_data": dg.AssetIn(
+            key=dg.AssetKey(["h2s", "training_data"]),
             partition_mapping=dg.MultiToSingleDimensionPartitionMapping("month")
         ),
     },
@@ -665,6 +688,8 @@ def trained_model_cv(
 
     context.add_output_metadata(metadata)
 
+    model_filename = "model.json" if hasattr(model, 'save_model') else "model.joblib"
+
     return {
         'model': model,
         'cv_metrics': cv_metrics,
@@ -674,15 +699,20 @@ def trained_model_cv(
         'month_str': month_str,
         'feature_names': available_features,
         'label_map': label_map,
+        'model_filename': model_filename,
     }
 
 
 @dg.asset(
+    key_prefix="h2s",
     group_name="h2s_training_export",
     required_resource_keys={"s3"},
     kinds={"s3", "json"},
     description="Export training metrics to S3",
     partitions_def=model_run_partitions,
+    ins={
+        "trained_model_cv": dg.AssetIn(key=_KEY("trained_model_cv")),
+    },
 )
 def model_training_metrics(
     context: dg.AssetExecutionContext,
@@ -697,7 +727,40 @@ def model_training_metrics(
     variant = trained_model_cv['variant']
     base_path = f"{TRAINING_PATH}/{month_str}/{variant}"
 
-    context.log.info(f"Exporting training metrics to S3: {base_path}")
+    context.log.info(f"Exporting training artifacts to S3: {base_path}")
+
+    # Export trained model file
+    model = trained_model_cv['model']
+    if hasattr(model, 'save_model'):
+        # XGBoost
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as tmp:
+            tmp_path = tmp.name
+            model.save_model(tmp_path)
+            with open(tmp_path, 'rb') as f:
+                model_bytes = f.read()
+            os.unlink(tmp_path)
+        model_filename = "model.json"
+        content_type = 'application/json'
+    else:
+        # sklearn (RandomForest, etc.) — use joblib
+        import joblib
+        with tempfile.NamedTemporaryFile(suffix='.joblib', delete=False) as tmp:
+            tmp_path = tmp.name
+            joblib.dump(model, tmp_path)
+            with open(tmp_path, 'rb') as f:
+                model_bytes = f.read()
+            os.unlink(tmp_path)
+        model_filename = "model.joblib"
+        content_type = 'application/octet-stream'
+
+    model_filename = trained_model_cv['model_filename']
+    s3_resource.putFile(
+        model_bytes,
+        f"{base_path}/{model_filename}",
+        bucket=s3_resource.S3_BUCKET,
+        content_type=content_type,
+    )
+    context.log.info(f"✓ Saved model to {base_path}/{model_filename} ({len(model_bytes) / 1024:.1f} KB)")
 
     # Export CV metrics
     cv_metrics_json = json.dumps(trained_model_cv['cv_metrics'], indent=2)
@@ -748,19 +811,19 @@ def model_training_metrics(
 
 
 @dg.asset(
+    key_prefix="h2s",
     group_name="h2s_model_training",
     required_resource_keys={"s3"},
     kinds={"visualization", "s3"},
     description="Generate and export feature importance visualization",
     partitions_def=model_run_partitions,
     ins={
-        "h2s_model_artifacts": dg.AssetIn(key=dg.AssetKey(["h2s", "h2s_model_artifacts"])),
+        "trained_model_cv": dg.AssetIn(key=_KEY("trained_model_cv")),
     },
 )
 def feature_importance_analysis(
     context: dg.AssetExecutionContext,
     trained_model_cv: Dict,
-    h2s_model_artifacts
 ) -> None:
     """Generate feature importance comparison visualization."""
     from h2s.predictor.visualizations import generate_feature_importance
@@ -775,17 +838,17 @@ def feature_importance_analysis(
     new_model = trained_model_cv['model']
     prep_info = {'feature_cols': trained_model_cv['feature_names']}
 
-    plot_bytes = generate_feature_importance(new_model, prep_info, top_n=15)
+    model_name = f"{variant} ({type(new_model).__name__})"
+    plot_bytes = generate_feature_importance(new_model, prep_info, top_n=15, model_name=model_name)
 
-    # Upload to S3
+    # Upload to training path
     s3_path = f"{TRAINING_PATH}/{month_str}/{variant}/feature_importance.png"
     plot_data = plot_bytes.read()
-    s3_resource.putFile(
-        plot_data,
-        s3_path,
-        bucket=s3_resource.S3_BUCKET,
-        content_type='image/png'
-    )
+    s3_resource.putFile(plot_data, s3_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
+
+    # Also write to forecast latest path so dashboards pick it up
+    latest_path = f"latest/{LATEST_FORECAST_DATA}/visualizations/feature_importance_{variant}.png"
+    s3_resource.putFile(plot_data, latest_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     # Create metadata for visualization
     viz_metadata = store_assets.objectMetadata(
@@ -813,12 +876,15 @@ def feature_importance_analysis(
 
 
 @dg.asset(
+    key_prefix="h2s",
     group_name="h2s_model_validation",
     kinds={"ml", "validation"},
     description="Generate predictions on validation set using newly trained model",
     partitions_def=model_run_partitions,
     ins={
+        "trained_model_cv": dg.AssetIn(key=_KEY("trained_model_cv")),
         "validation_data": dg.AssetIn(
+            key=dg.AssetKey(["h2s", "validation_data"]),
             partition_mapping=dg.MultiToSingleDimensionPartitionMapping("month")
         ),
     },
@@ -896,36 +962,35 @@ def validation_predictions(
 
 
 @dg.asset(
+    key_prefix="h2s",
     group_name="h2s_model_validation",
     required_resource_keys={"s3"},
     kinds={"ml", "validation"},
-    description="Compare new model vs current production model with quality gates",
+    description="Compute new model metrics on the validation set",
     partitions_def=model_run_partitions,
     ins={
+        "validation_predictions": dg.AssetIn(key=_KEY("validation_predictions")),
         "validation_data": dg.AssetIn(
+            key=dg.AssetKey(["h2s", "validation_data"]),
             partition_mapping=dg.MultiToSingleDimensionPartitionMapping("month")
         ),
-        "h2s_model_artifacts": dg.AssetIn(key=dg.AssetKey(["h2s", "h2s_model_artifacts"])),
     },
 )
 def validation_report(
     context: dg.AssetExecutionContext,
     validation_predictions: pd.DataFrame,
-    h2s_model_artifacts,
     validation_data: pd.DataFrame,
 ) -> Dict:
-    """Compare new model vs current production model on validation set.
+    """Evaluate the newly trained model on the held-out validation set.
 
-    Calculates metrics for both models and applies quality gates:
-    - Balanced accuracy: new >= current - 5%
-    - Orange recall: new >= current - 5%
-    - Orange precision: new >= current - 10%
+    Returns new-model metrics only.  Comparison against the current production
+    model is handled downstream by model_comparison_report (eager automation).
 
     Returns:
-        Dict with comparison results and approval recommendation
+        Dict with new model metrics and validation metadata
     """
     context.log.info("=" * 60)
-    context.log.info("MODEL COMPARISON REPORT")
+    context.log.info("NEW MODEL VALIDATION REPORT")
     context.log.info("=" * 60)
 
     s3_resource = context.resources.s3
@@ -951,15 +1016,88 @@ def validation_report(
     context.log.info("\n📊 NEW MODEL METRICS:")
     context.log.info(f"  Balanced Accuracy: {new_metrics['balanced_accuracy']:.3f}")
 
-    # Log per-class metrics (only for classes present)
     for class_name in unique_classes:
         if f'recall_{class_name}' in new_metrics:
             context.log.info(f"  {class_name.capitalize()} Recall: {new_metrics[f'recall_{class_name}']:.3f}")
             context.log.info(f"  {class_name.capitalize()} Precision: {new_metrics[f'precision_{class_name}']:.3f}")
             context.log.info(f"  {class_name.capitalize()} F1: {new_metrics[f'f1_{class_name}']:.3f}")
 
+    # === EXPORT TO S3 ===
+    validation_report_json = {
+        'timestamp': datetime.now().isoformat(),
+        'validation_period': month_str,
+        'variant': variant,
+        'validation_samples': len(val_df),
+        'new_model_metrics': new_metrics,
+    }
+
+    s3_path = f"{TRAINING_PATH}/{month_str}/{variant}/validation_report.json"
+    s3_resource.putFile(
+        json.dumps(validation_report_json, indent=2).encode('utf-8'),
+        s3_path,
+        bucket=s3_resource.S3_BUCKET,
+        content_type='application/json'
+    )
+
+    context.log.info(f"✓ Uploaded validation report to {s3_path}")
+
+    context.add_output_metadata({
+        "s3_path": s3_path,
+        "new_balanced_accuracy": float(new_metrics['balanced_accuracy']),
+        "new_orange_recall": float(new_metrics.get('recall_orange', 0.0)),
+    })
+
+    return validation_report_json
+
+
+@dg.asset(
+    key_prefix="h2s",
+    group_name="h2s_model_validation",
+    required_resource_keys={"s3"},
+    kinds={"ml", "visualization"},
+    description="Compare new vs current production model; triggers automatically when both are ready",
+    partitions_def=model_run_partitions,
+    ins={
+        "validation_report": dg.AssetIn(key=_KEY("validation_report")),
+        "h2s_model_artifacts": dg.AssetIn(key=dg.AssetKey(["h2s", "h2s_model_artifacts"])),
+        "validation_data": dg.AssetIn(
+            key=dg.AssetKey(["h2s", "validation_data"]),
+            partition_mapping=dg.MultiToSingleDimensionPartitionMapping("month")
+        ),
+    },
+    auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
+)
+def model_comparison_report(
+    context: dg.AssetExecutionContext,
+    validation_report: Dict,
+    h2s_model_artifacts,
+    validation_data: pd.DataFrame,
+) -> Dict:
+    """Compare new model vs current production model and generate visualization.
+
+    Runs automatically (eager) once both validation_report and h2s_model_artifacts
+    are materialized — no hard dependency from the training job.
+
+    Returns:
+        Dict with comparison results, quality gates, and approval recommendation
+    """
+    context.log.info("=" * 60)
+    context.log.info("MODEL COMPARISON REPORT")
+    context.log.info("=" * 60)
+
+    s3_resource = context.resources.s3
+    month_str = validation_report['validation_period']
+    variant = validation_report['variant']
+
+    val_df = validation_data.copy()
+    unique_classes = sorted(val_df['h2s_category'].unique())
+    label_map = {class_name: idx for idx, class_name in enumerate(unique_classes)}
+
+    new_metrics = validation_report['new_model_metrics']
+
     # === CURRENT MODEL METRICS ===
-    # The production model's preprocess_data expects a 'date' column for temporal features
+    # Production model expects a 'date' column for temporal feature engineering
+    y_true = val_df['h2s_category'].map(label_map).values
     val_for_prod = val_df.rename(columns={'time': 'date'})
     val_preprocessed = h2s_model_artifacts.preprocess_data(val_for_prod)
     current_predictions = h2s_model_artifacts.predict(val_preprocessed)
@@ -967,18 +1105,10 @@ def validation_report(
 
     current_metrics = calculate_metrics(y_true, y_pred_current, class_names=unique_classes)
 
-    context.log.info("\n📊 CURRENT MODEL METRICS:")
-    context.log.info(f"  Balanced Accuracy: {current_metrics['balanced_accuracy']:.3f}")
-
-    # Log per-class metrics (only for classes present)
-    for class_name in unique_classes:
-        if f'recall_{class_name}' in current_metrics:
-            context.log.info(f"  {class_name.capitalize()} Recall: {current_metrics[f'recall_{class_name}']:.3f}")
-            context.log.info(f"  {class_name.capitalize()} Precision: {current_metrics[f'precision_{class_name}']:.3f}")
-            context.log.info(f"  {class_name.capitalize()} F1: {current_metrics[f'f1_{class_name}']:.3f}")
+    context.log.info(f"\n📊 NEW MODEL:     balanced_acc={new_metrics['balanced_accuracy']:.3f}")
+    context.log.info(f"📊 CURRENT MODEL: balanced_acc={current_metrics['balanced_accuracy']:.3f}")
 
     # === MODEL COMPARISON ===
-    # Note: compare_models expects orange metrics, so provide defaults if missing
     new_metrics_with_defaults = {
         **new_metrics,
         'recall_orange': new_metrics.get('recall_orange', 0.0),
@@ -998,100 +1128,23 @@ def validation_report(
         min_orange_precision_delta=-0.10,
     )
 
-    # Warn if orange class was missing
     if 'orange' not in unique_classes:
-        context.log.warning("\n⚠️  Orange class not present in validation data")
-        context.log.warning("   Orange recall/precision metrics set to 0.0 for comparison")
-        context.log.warning("   Quality gates for orange metrics may not be meaningful")
+        context.log.warning("⚠️  Orange class not present in validation data — orange quality gates may not be meaningful")
 
-    context.log.info("\n" + "=" * 60)
-    context.log.info("QUALITY GATES ASSESSMENT")
-    context.log.info("=" * 60)
-
+    context.log.info("\n🚦 QUALITY GATES:")
     for gate_name, gate_info in comparison_details['quality_gates'].items():
         status = "✓ PASS" if gate_info['passed'] else "✗ FAIL"
-        context.log.info(
-            f"{status} - {gate_name}: {gate_info['actual']:.3f} "
-            f"(threshold: {gate_info['threshold']:.3f})"
-        )
+        context.log.info(f"  {status} - {gate_name}: {gate_info['actual']:.3f} (threshold: {gate_info['threshold']:.3f})")
 
     context.log.info("\n" + "=" * 60)
-    if approval_recommended:
-        context.log.info("✓ RECOMMENDATION: APPROVE DEPLOYMENT")
-    else:
-        context.log.info("✗ RECOMMENDATION: REJECT DEPLOYMENT")
+    context.log.info("✓ RECOMMENDATION: APPROVE DEPLOYMENT" if approval_recommended else "✗ RECOMMENDATION: REJECT DEPLOYMENT")
     context.log.info("=" * 60)
 
-    # === EXPORT TO S3 ===
-    validation_report_json = {
-        'timestamp': datetime.now().isoformat(),
-        'validation_period': month_str,
-        'variant': variant,
-        'validation_samples': len(val_df),
-        'approval_recommended': approval_recommended,
-        'comparison_details': comparison_details,
-        'new_model_metrics': new_metrics,
-        'current_model_metrics': current_metrics,
-    }
-
-    s3_path = f"{TRAINING_PATH}/{month_str}/{variant}/validation_report.json"
-    s3_resource.putFile(
-        json.dumps(validation_report_json, indent=2).encode('utf-8'),
-        s3_path,
-        bucket=s3_resource.S3_BUCKET,
-        content_type='application/json'
-    )
-
-    context.log.info(f"✓ Uploaded validation report to {s3_path}")
-
-    context.add_output_metadata({
-        "s3_path": s3_path,
-        "approval_recommended": approval_recommended,
-        "new_balanced_accuracy": float(new_metrics['balanced_accuracy']),
-        "current_balanced_accuracy": float(current_metrics['balanced_accuracy']),
-        "balanced_acc_delta": float(comparison_details['metric_differences']['balanced_accuracy']),
-        "orange_recall_delta": float(comparison_details['metric_differences']['recall_orange']),
-    })
-
-    return validation_report_json
-
-
-@dg.asset(
-    group_name="h2s_model_validation",
-    required_resource_keys={"s3"},
-    kinds={"ml", "visualization"},
-    description="Generate visual comparison of new vs current model performance",
-    partitions_def=model_run_partitions,
-)
-def model_comparison_report(
-    context: dg.AssetExecutionContext,
-    validation_report: Dict,
-) -> None:
-    """Generate visual comparison of model performance metrics.
-
-    Creates a multi-panel plot showing:
-    - Confusion matrices (new vs current)
-    - Per-class metrics comparison (precision, recall, F1)
-    - Overall metrics comparison
-
-    Uploads visualization to S3.
-    """
-    context.log.info("=" * 60)
-    context.log.info("GENERATING MODEL COMPARISON VISUALIZATION")
-    context.log.info("=" * 60)
-
-    s3_resource = context.resources.s3
-    month_str = validation_report['validation_period']
-    variant = validation_report['variant']
-
-    new_metrics = validation_report['new_model_metrics']
-    current_metrics = validation_report['current_model_metrics']
-
-    # Create figure with subplots
+    # === VISUALIZATION ===
     fig, axes = plt.subplots(2, 2, figsize=(14, 12))
     fig.suptitle('Model Comparison Report', fontsize=16, fontweight='bold')
 
-    # === SUBPLOT 1: Confusion Matrix - New Model ===
+    # Subplot 1: Confusion Matrix — New Model
     ax1 = axes[0, 0]
     cm_new = np.array(new_metrics['confusion_matrix'])
     sns.heatmap(
@@ -1104,7 +1157,7 @@ def model_comparison_report(
     ax1.set_ylabel('True Label')
     ax1.set_xlabel('Predicted Label')
 
-    # === SUBPLOT 2: Confusion Matrix - Current Model ===
+    # Subplot 2: Confusion Matrix — Current Model
     ax2 = axes[0, 1]
     cm_current = np.array(current_metrics['confusion_matrix'])
     sns.heatmap(
@@ -1117,24 +1170,18 @@ def model_comparison_report(
     ax2.set_ylabel('True Label')
     ax2.set_xlabel('Predicted Label')
 
-    # === SUBPLOT 3: Per-Class Metrics Comparison ===
+    # Subplot 3: Per-Class Metrics Comparison
     ax3 = axes[1, 0]
     classes = ['green', 'orange', 'yellow']
     metrics_to_plot = ['precision', 'recall', 'f1']
-
     x = np.arange(len(classes))
     width = 0.12
-
     for i, metric in enumerate(metrics_to_plot):
-        new_values = [new_metrics[f'{metric}_{cls}'] for cls in classes]
-        current_values = [current_metrics[f'{metric}_{cls}'] for cls in classes]
-
+        new_values = [new_metrics.get(f'{metric}_{cls}', 0.0) for cls in classes]
+        current_values = [current_metrics.get(f'{metric}_{cls}', 0.0) for cls in classes]
         offset = (i - 1) * width
-        ax3.bar(x + offset - width/2, new_values, width,
-                label=f'New {metric.capitalize()}', alpha=0.8)
-        ax3.bar(x + offset + width/2, current_values, width,
-                label=f'Current {metric.capitalize()}', alpha=0.6)
-
+        ax3.bar(x + offset - width/2, new_values, width, label=f'New {metric.capitalize()}', alpha=0.8)
+        ax3.bar(x + offset + width/2, current_values, width, label=f'Current {metric.capitalize()}', alpha=0.6)
     ax3.set_ylabel('Score')
     ax3.set_title('Per-Class Metrics Comparison', fontweight='bold')
     ax3.set_xticks(x)
@@ -1143,69 +1190,69 @@ def model_comparison_report(
     ax3.set_ylim([0, 1.0])
     ax3.grid(axis='y', alpha=0.3)
 
-    # === SUBPLOT 4: Overall Metrics & Quality Gates ===
+    # Subplot 4: Summary text
     ax4 = axes[1, 1]
     ax4.axis('off')
-
-    # Build summary text
     summary_text = "VALIDATION SUMMARY\n" + "=" * 40 + "\n\n"
     summary_text += f"Validation Samples: {validation_report['validation_samples']}\n\n"
-
     summary_text += "BALANCED ACCURACY\n"
     summary_text += f"  New:     {new_metrics['balanced_accuracy']:.3f}\n"
     summary_text += f"  Current: {current_metrics['balanced_accuracy']:.3f}\n"
-    delta = new_metrics['balanced_accuracy'] - current_metrics['balanced_accuracy']
-    summary_text += f"  Delta:   {delta:+.3f}\n\n"
-
+    summary_text += f"  Delta:   {new_metrics['balanced_accuracy'] - current_metrics['balanced_accuracy']:+.3f}\n\n"
     summary_text += "ORANGE RECALL (Critical Metric)\n"
-    summary_text += f"  New:     {new_metrics['recall_orange']:.3f}\n"
-    summary_text += f"  Current: {current_metrics['recall_orange']:.3f}\n"
-    delta = new_metrics['recall_orange'] - current_metrics['recall_orange']
-    summary_text += f"  Delta:   {delta:+.3f}\n\n"
-
+    nr = new_metrics.get('recall_orange', 0.0)
+    cr = current_metrics.get('recall_orange', 0.0)
+    summary_text += f"  New:     {nr:.3f}\n"
+    summary_text += f"  Current: {cr:.3f}\n"
+    summary_text += f"  Delta:   {nr - cr:+.3f}\n\n"
     summary_text += "QUALITY GATES\n"
-    for gate_name, gate_info in validation_report['comparison_details']['quality_gates'].items():
-        status = "✓" if gate_info['passed'] else "✗"
-        summary_text += f"  {status} {gate_name}\n"
-
+    for gate_name, gate_info in comparison_details['quality_gates'].items():
+        summary_text += f"  {'✓' if gate_info['passed'] else '✗'} {gate_name}\n"
     summary_text += "\n" + "=" * 40 + "\n"
-    if validation_report['approval_recommended']:
-        summary_text += "✓ APPROVED FOR DEPLOYMENT"
-        color = 'green'
-    else:
-        summary_text += "✗ NOT RECOMMENDED FOR DEPLOYMENT"
-        color = 'red'
-
+    summary_text += "✓ APPROVED FOR DEPLOYMENT" if approval_recommended else "✗ NOT RECOMMENDED FOR DEPLOYMENT"
     ax4.text(0.05, 0.95, summary_text,
-             transform=ax4.transAxes,
-             fontsize=10,
-             verticalalignment='top',
-             fontfamily='monospace',
-             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
+             transform=ax4.transAxes, fontsize=10, verticalalignment='top',
+             fontfamily='monospace', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
 
     plt.tight_layout()
-
-    # Save to BytesIO
     plot_bytes = io.BytesIO()
     plt.savefig(plot_bytes, format='png', dpi=150, bbox_inches='tight')
     plot_bytes.seek(0)
     plt.close()
 
-    # Upload to S3
+    # Upload visualization and comparison report to S3
     s3_path = f"{TRAINING_PATH}/{month_str}/{variant}/model_comparison.png"
-    s3_resource.putFile(
-        plot_bytes.read(),
-        s3_path,
-        bucket=s3_resource.S3_BUCKET,
-        content_type='image/png'
-    )
-
+    s3_resource.putFile(plot_bytes.read(), s3_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
     context.log.info(f"✓ Uploaded model comparison visualization to {s3_path}")
+
+    comparison_report_json = {
+        'timestamp': datetime.now().isoformat(),
+        'validation_period': month_str,
+        'variant': variant,
+        'validation_samples': validation_report['validation_samples'],
+        'approval_recommended': approval_recommended,
+        'comparison_details': comparison_details,
+        'new_model_metrics': new_metrics,
+        'current_model_metrics': current_metrics,
+        'visualization_path': s3_path,
+    }
+
+    report_s3_path = f"{TRAINING_PATH}/{month_str}/{variant}/model_comparison_report.json"
+    s3_resource.putFile(
+        json.dumps(comparison_report_json, indent=2).encode('utf-8'),
+        report_s3_path,
+        bucket=s3_resource.S3_BUCKET,
+        content_type='application/json',
+    )
 
     context.add_output_metadata({
         "s3_path": s3_path,
-        "approval_recommended": validation_report['approval_recommended'],
+        "approval_recommended": approval_recommended,
+        "balanced_acc_delta": float(comparison_details['metric_differences']['balanced_accuracy']),
+        "orange_recall_delta": float(comparison_details['metric_differences'].get('recall_orange', 0.0)),
     })
+
+    return comparison_report_json
 
 
 # ============================================================================
@@ -1215,10 +1262,14 @@ def model_comparison_report(
 
 
 @dg.asset(
+    key_prefix="h2s",
     group_name="h2s_model_deployment",
     kinds={"ml", "deployment"},
     description="Manual approval gate for model deployment (BLOCKS auto-deployment)",
     partitions_def=model_run_partitions,
+    ins={
+        "model_comparison_report": dg.AssetIn(key=_KEY("model_comparison_report")),
+    },
     config_schema={
         "approve_deployment": dg.Field(
             bool,
@@ -1229,15 +1280,15 @@ def model_comparison_report(
 )
 def deployment_approval(
     context: dg.AssetExecutionContext,
-    validation_report: Dict,
+    model_comparison_report: Dict,
 ) -> Dict:
     """Manual approval gate for model deployment.
 
     This asset BLOCKS automatic deployment by default. Human must review
-    validation_report in S3 and explicitly approve by setting
+    model_comparison_report in S3 and explicitly approve by setting
     approve_deployment=True in asset config.
 
-    Quality Gates (from validation_report):
+    Quality Gates (from model_comparison_report):
     - Balanced accuracy: new >= current - 5%
     - Orange recall: new >= current - 5%
     - Orange precision: new >= current - 10%
@@ -1253,15 +1304,15 @@ def deployment_approval(
     context.log.info("=" * 60)
 
     approve = context.op_config.get("approve_deployment", False)
-    recommendation = validation_report['approval_recommended']
+    recommendation = model_comparison_report['approval_recommended']
 
-    context.log.info(f"\n📊 VALIDATION REPORT SUMMARY:")
-    context.log.info(f"  Validation Samples: {validation_report['validation_samples']}")
+    context.log.info(f"\n📊 COMPARISON REPORT SUMMARY:")
+    context.log.info(f"  Validation Samples: {model_comparison_report['validation_samples']}")
     context.log.info(f"  Automated Recommendation: {'✓ APPROVE' if recommendation else '✗ REJECT'}")
 
     # Show quality gates
     context.log.info(f"\n🚦 QUALITY GATES:")
-    for gate_name, gate_info in validation_report['comparison_details']['quality_gates'].items():
+    for gate_name, gate_info in model_comparison_report['comparison_details']['quality_gates'].items():
         status = "✓ PASS" if gate_info['passed'] else "✗ FAIL"
         context.log.info(
             f"  {status} - {gate_name}: {gate_info['actual']:.3f} "
@@ -1269,7 +1320,7 @@ def deployment_approval(
         )
 
     # Show metric deltas
-    deltas = validation_report['comparison_details']['metric_differences']
+    deltas = model_comparison_report['comparison_details']['metric_differences']
     context.log.info(f"\n📈 METRIC CHANGES (New - Current):")
     context.log.info(f"  Balanced Accuracy: {deltas['balanced_accuracy']:+.3f}")
     context.log.info(f"  Orange Recall:     {deltas['recall_orange']:+.3f}")
@@ -1282,15 +1333,15 @@ def deployment_approval(
         context.log.info("=" * 60)
         context.log.info("\n⚠️  To approve deployment, rematerialize this asset with:")
         context.log.info("   approve_deployment: true")
-        context.log.info("\n📋 Review validation report at:")
-        context.log.info(f"   s3://{validation_report.get('s3_path', 'N/A')}")
+        context.log.info("\n📋 Review comparison report at:")
+        context.log.info(f"   s3://{model_comparison_report.get('visualization_path', 'N/A')}")
 
         raise dg.Failure(
             description="Deployment not approved. Set approve_deployment=True to proceed.",
             metadata={
                 "automated_recommendation": recommendation,
                 "approval_required": True,
-                "validation_report_path": validation_report.get('s3_path', 'N/A'),
+                "comparison_report_path": model_comparison_report.get('visualization_path', 'N/A'),
             }
         )
 
@@ -1301,11 +1352,12 @@ def deployment_approval(
         'approved_at': datetime.now().isoformat(),
         'approved_by': 'manual',
         'automated_recommendation': recommendation,
-        'validation_period': validation_report['validation_period'],
-        'new_model_metrics': validation_report['new_model_metrics'],
+        'validation_period': model_comparison_report['validation_period'],
+        'variant': model_comparison_report['variant'],
+        'new_model_metrics': model_comparison_report['new_model_metrics'],
         'quality_gates_passed': all(
             gate['passed']
-            for gate in validation_report['comparison_details']['quality_gates'].values()
+            for gate in model_comparison_report['comparison_details']['quality_gates'].values()
         ),
     }
 
@@ -1320,139 +1372,31 @@ def deployment_approval(
     return approval_metadata
 
 
-@dg.asset(
-    group_name="h2s_model_deployment",
-    required_resource_keys={"s3"},
-    kinds={"ml", "deployment", "archival"},
-    description="Archive current production model before deployment",
-    partitions_def=model_run_partitions,
-    ins={
-        "h2s_model_artifacts": dg.AssetIn(key=dg.AssetKey(["h2s", "h2s_model_artifacts"])),
-    },
-)
-def archived_previous_model(
-    context: dg.AssetExecutionContext,
-    deployment_approval: Dict,
-    h2s_model_artifacts,
-) -> Dict:
-    """Archive current production model to S3 before deploying new model.
-
-    Creates timestamped backup in archive/ directory:
-    - model.json
-    - preprocessing_info.json
-    - archive_metadata.json (timestamp, metrics, etc.)
-
-    This enables rollback if deployment issues occur.
-
-    Returns:
-        Dict with archive paths and metadata
-    """
-    context.log.info("=" * 60)
-    context.log.info("ARCHIVING CURRENT PRODUCTION MODEL")
-    context.log.info("=" * 60)
-
-    s3_resource = context.resources.s3
-    multi_key = context.partition_key
-    month_str = pd.to_datetime(multi_key.keys_by_dimension["month"]).strftime("%Y_%m")
-    variant = multi_key.keys_by_dimension["variant"]
-    archive_dir = f"{ARCHIVE_PATH}/{month_str}/{variant}"
-
-    # Current production model paths
-    current_model_path = f"{MODEL_PATH}/nestor_xgboost_weighted_model.json"
-    current_prep_path = f"{MODEL_PATH}/nestor_preprocessing_info.json"
-
-    # Archive paths
-    archive_model_path = f"{archive_dir}/nestor_xgboost_weighted_model.json"
-    archive_prep_path = f"{archive_dir}/nestor_preprocessing_info.json"
-    archive_metadata_path = f"{archive_dir}/archive_metadata.json"
-
-    context.log.info(f"Archive directory: s3://{s3_resource.S3_BUCKET}/{archive_dir}")
-
-    # === COPY MODEL TO ARCHIVE ===
-    try:
-        # Download current model
-        model_bytes = s3_resource.getFile(current_model_path, bucket=s3_resource.S3_BUCKET)
-        prep_bytes = s3_resource.getFile(current_prep_path, bucket=s3_resource.S3_BUCKET)
-
-        # Upload to archive
-        s3_resource.putFile(model_bytes, archive_model_path, bucket=s3_resource.S3_BUCKET)
-        s3_resource.putFile(prep_bytes, archive_prep_path, bucket=s3_resource.S3_BUCKET)
-
-        context.log.info(f"✓ Archived model to {archive_model_path}")
-        context.log.info(f"✓ Archived preprocessing to {archive_prep_path}")
-
-    except Exception as e:
-        context.log.error(f"✗ Failed to archive model: {e}")
-        raise dg.Failure(f"Could not archive current production model: {e}")
-
-    # === CREATE ARCHIVE METADATA ===
-    archive_metadata = {
-        'archived_at': datetime.now().isoformat(),
-        'archived_from': current_model_path,
-        'archive_paths': {
-            'model': archive_model_path,
-            'preprocessing': archive_prep_path,
-        },
-        'deployment_approval': deployment_approval,
-        'model_info': {
-            'feature_count': len(h2s_model_artifacts.feature_cols),
-            'classes': h2s_model_artifacts.prep_info.get('classes', []),
-        },
-        'rollback_instructions': {
-            'description': 'To rollback, copy archived files back to production paths',
-            'commands': [
-                f"s3.copyFile('{archive_model_path}', '{current_model_path}')",
-                f"s3.copyFile('{archive_prep_path}', '{current_prep_path}')",
-            ]
-        }
-    }
-
-    # Upload metadata
-    s3_resource.putFile(
-        json.dumps(archive_metadata, indent=2).encode('utf-8'),
-        archive_metadata_path,
-        bucket=s3_resource.S3_BUCKET,
-        content_type='application/json'
-    )
-
-    context.log.info(f"✓ Uploaded archive metadata to {archive_metadata_path}")
-    context.log.info("\n✓ ARCHIVE COMPLETE - Rollback available if needed")
-
-    context.add_output_metadata({
-        "archive_directory": archive_dir,
-        "archive_model_path": archive_model_path,
-        "archive_prep_path": archive_prep_path,
-        "archived_at": archive_metadata['archived_at'],
-    })
-
-    return archive_metadata
-
 
 @dg.asset(
+    key_prefix="h2s",
     group_name="h2s_model_deployment",
     required_resource_keys={"s3"},
     kinds={"ml", "deployment"},
     description="Deploy new trained model to production S3 paths",
     partitions_def=model_run_partitions,
     ins={
-        "h2s_model_artifacts": dg.AssetIn(key=dg.AssetKey(["h2s", "h2s_model_artifacts"])),
+        "deployment_approval": dg.AssetIn(key=_KEY("deployment_approval")),
     },
 )
 def production_model_deployment(
     context: dg.AssetExecutionContext,
-    trained_model_cv: Dict,
-    archived_previous_model: Dict,
     deployment_approval: Dict,
-    h2s_model_artifacts,
 ) -> Dict:
     """Deploy newly trained model to production S3 paths.
 
-    Replaces current production model with new trained model:
-    - nestor_xgboost_weighted_model.json
-    - nestor_preprocessing_info.json (unchanged - same features)
-    - deployment_metadata.json (new deployment record)
+    Loads the trained model from its S3 training path (saved by model_training_metrics)
+    and copies it to the production path. To roll back, re-run approve_and_deploy_job
+    for a previous month's partition.
 
-    Previous model is already archived by archived_previous_model asset.
+    Replaces:
+    - nestor_xgboost_weighted_model.json
+    - deployment_metadata.json (new deployment record)
 
     Returns:
         Dict with deployment status and metadata
@@ -1464,26 +1408,28 @@ def production_model_deployment(
     s3_resource = context.resources.s3
     timestamp = datetime.now().strftime("%Y_%m_%d_%H%M%S")
 
+    # Resolve source model path from approval metadata
+    validation_period = deployment_approval['validation_period']
+    variant = deployment_approval['variant']
+    source_model_path = f"{TRAINING_PATH}/{validation_period}/{variant}/model.json"
+
     # Production paths
     prod_model_path = f"{MODEL_PATH}/nestor_xgboost_weighted_model.json"
     prod_prep_path = f"{MODEL_PATH}/nestor_preprocessing_info.json"
     deployment_metadata_path = f"{MODEL_PATH}/deployment_metadata.json"
 
-    # === EXPORT NEW MODEL TO TEMP FILE ===
-    new_model = trained_model_cv['model']
-
-    with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as tmp_file:
-        temp_model_path = tmp_file.name
-        new_model.save_model(temp_model_path)
-
-        # Read model bytes
-        with open(temp_model_path, 'rb') as f:
-            new_model_bytes = f.read()
-
-        # Clean up temp file
-        os.unlink(temp_model_path)
-
-    context.log.info(f"✓ Exported new model ({len(new_model_bytes) / 1024:.1f} KB)")
+    # === LOAD NEW MODEL FROM S3 TRAINING PATH ===
+    # Try XGBoost format first, then sklearn joblib
+    for candidate_filename in ("model.json", "model.joblib"):
+        source_model_path = f"{TRAINING_PATH}/{validation_period}/{variant}/{candidate_filename}"
+        try:
+            new_model_bytes = s3_resource.getFile(source_model_path, bucket=s3_resource.S3_BUCKET)
+            context.log.info(f"✓ Loaded model from {source_model_path} ({len(new_model_bytes) / 1024:.1f} KB)")
+            break
+        except Exception:
+            continue
+    else:
+        raise dg.Failure(f"Could not find trained model at {TRAINING_PATH}/{validation_period}/{variant}/ (tried model.json and model.joblib)")
 
     # === DEPLOY NEW MODEL ===
     try:
@@ -1497,12 +1443,22 @@ def production_model_deployment(
 
         context.log.info(f"✓ Deployed new model to {prod_model_path}")
 
+        # Also write to variant-specific production path for multi-model forecast
+        variant_model_path = f"{MODEL_PATH}/{deployment_approval['variant']}/{candidate_filename}"
+        s3_resource.putFile(
+            new_model_bytes,
+            variant_model_path,
+            bucket=s3_resource.S3_BUCKET,
+            content_type='application/json'
+        )
+        context.log.info(f"✓ Deployed variant model to {variant_model_path}")
+
         # NOTE: preprocessing_info.json stays the same (same 20 features)
         # Only the trained model changes
 
     except Exception as e:
         context.log.error(f"✗ Deployment failed: {e}")
-        context.log.error(f"⚠️  Rollback available from: {archived_previous_model['archive_directory']}")
+        context.log.error(f"⚠️  To roll back, re-run approve_and_deploy_job for a previous partition")
         raise dg.Failure(f"Model deployment failed: {e}")
 
     # === CREATE DEPLOYMENT METADATA ===
@@ -1511,13 +1467,8 @@ def production_model_deployment(
         'deployment_id': timestamp,
         'model_path': prod_model_path,
         'preprocessing_path': prod_prep_path,
+        'source_model_path': f"{TRAINING_PATH}/{validation_period}/{variant}/{candidate_filename}",
         'approval_metadata': deployment_approval,
-        'training_metadata': trained_model_cv['training_metadata'],
-        'cv_summary': {
-            k: v for k, v in trained_model_cv['training_metadata'].items()
-            if k.endswith('_mean') or k.endswith('_std')
-        },
-        'archive_backup': archived_previous_model['archive_directory'],
         'deployment_status': 'success',
     }
 
@@ -1536,14 +1487,13 @@ def production_model_deployment(
     context.log.info("=" * 60)
     context.log.info(f"\n📦 New model deployed to: {prod_model_path}")
     context.log.info(f"📋 Deployment metadata: {deployment_metadata_path}")
-    context.log.info(f"💾 Backup available at: {archived_previous_model['archive_directory']}")
+    context.log.info(f"↩️  To roll back, re-run approve_and_deploy_job for a previous partition")
 
     context.add_output_metadata({
         "deployed_at": deployment_metadata['deployed_at'],
         "deployment_id": timestamp,
         "model_path": prod_model_path,
         "deployment_status": "success",
-        "archive_backup": archived_previous_model['archive_directory'],
     })
 
     return deployment_metadata
