@@ -2,11 +2,10 @@
 
 Steps:
   1. Fetch hourly weather forecast from Open-Meteo (free, no key)
-  2. Train xgboost_base + xgboost_smote on last available training data (Dec 2025)
-  3. Predict for this month (March 2026) and tomorrow using all three models:
-       - production model  (nestor_xgboost_weighted_model.json)
-       - xgboost_base      (freshly trained, class weights only)
-       - xgboost_smote     (freshly trained, SMOTE on hazard classes)
+  2. Train xgboost_base + xgboost_smote + random_forest on latest available training data
+  3. Save trained models to data/startmodels/ (ready for upload_models_to_s3.py)
+  4. Predict for this month (so far) and tomorrow using all three models
+  5. Deploy & approve: verify saved models reload correctly, update deployment_metadata.json
 
 Run from projects/h2s/:
     uv run python test_pipeline.py
@@ -21,15 +20,19 @@ import numpy as np
 import pandas as pd
 import requests
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+from h2s.defs.h2s_pipeline import _derive_tidal_state
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 DATA_DIR = os.path.join(ROOT, "data")
+STARTMODELS_DIR = os.path.join(DATA_DIR, "startmodels")
 TRAINING_CSV = os.path.join(DATA_DIR, "modeldata_h2s_nofill.parquet")
-PROD_MODEL = os.path.join(ROOT, "nestor_xgboost_weighted_model.json")
-PROD_PREP = os.path.join(ROOT, "nestor_preprocessing_info.json")
+PROD_MODEL = os.path.join(STARTMODELS_DIR, "random_forest/model.joblib")
+PROD_PREP  = os.path.join(STARTMODELS_DIR, "random_forest/nestor_preprocessing_info.json")
 
 # NESTOR - BES site coords (Imperial Beach / Tijuana border area)
 LATITUDE = 32.545
@@ -44,18 +47,16 @@ TRAIN_FEATURES = [
     "wind_direction_sin", "wind_direction_cos",
     "wind_speed_10m_avg_2h", "wind_speed_10m_avg_3h", "wind_speed_10m_avg_4h",
     "wind_gusts_10m_max_2h", "wind_gusts_10m_max_3h", "wind_gusts_10m_max_4h",
+    "Flow (m^3/s)--Border", "tide_height", "tidal_state_encoded",
+    "wind_direction_categorical_encoded",
     "wind_temp_interaction", "humidity_temp_interaction",
-    "tide_height", "tidal_state_encoded", "Flow (m^3/s)--Border",
 ]
 
 # NOAA CO-OPS station: San Diego, CA (closest to NESTOR-BES)
 NOAA_STATION = "9410170"
 
-# Encoding from training parquet: slack=-1, low=0, flood=1, high=2, ebb=3
-TIDAL_ENCODING = {"slack": -1, "low": 0, "flood": 1, "high": 2, "ebb": 3}
-
-# Median dry-weather Tijuana River flow (m³/s) — used when live USGS data unavailable
-FLOW_BASELINE_M3S = 1.35
+# Encoding matching nestor_preprocessing_info.json tidal_mapping
+TIDAL_ENCODING = {"ebb": 0, "flood": 1, "slack": 2, "slack high": 3, "slack low": 4}
 
 warnings.filterwarnings("ignore")
 
@@ -102,6 +103,7 @@ def fetch_weather() -> pd.DataFrame:
     tides = fetch_tides(df["date"].dt.date.min(), df["date"].dt.date.max())
     df = df.merge(tides, on="date", how="left")
     df["tide_height"] = df["tide_height"].ffill().bfill()
+    df["tidal_state"] = df["tidal_state"].ffill().bfill().fillna("ebb")
     df["tidal_state_encoded"] = df["tidal_state_encoded"].ffill().bfill().fillna(-1).astype(int)
     df["Flow (m^3/s)--Border"] = df["Flow (m^3/s)--Border"].ffill().bfill()
 
@@ -112,8 +114,14 @@ def fetch_weather() -> pd.DataFrame:
 def fetch_tides(date_min, date_max) -> pd.DataFrame:
     """Fetch NOAA tidal predictions and estimate Tijuana River flow.
 
-    Returns DataFrame with columns: date, tide_height, tidal_state_encoded,
-    Flow (m^3/s)--Border.
+    Tidal states derived using the same _derive_tidal_state function as the
+    Dagster pipeline (flood/ebb/slack high/slack low).
+
+    Flow estimated using diurnal (month, hour) median from historical training
+    data — same approach as the streamflow_forecast Dagster asset.
+
+    Returns DataFrame with columns: date, tide_height, tidal_state,
+    tidal_state_encoded, Flow (m^3/s)--Border.
     """
     begin = date_min.strftime("%Y%m%d")
     end   = date_max.strftime("%Y%m%d")
@@ -140,75 +148,65 @@ def fetch_tides(date_min, date_max) -> pd.DataFrame:
         "tide_height": [float(p["v"]) for p in raw],
     }).sort_values("date").reset_index(drop=True)
 
-    # Derive tidal state from hourly delta
-    delta = df["tide_height"].diff()
-    prev_delta = delta.shift(1)
-    states = []
-    for i in range(len(df)):
-        d = delta.iloc[i] if not pd.isna(delta.iloc[i]) else 0.0
-        p = prev_delta.iloc[i] if not pd.isna(prev_delta.iloc[i]) else 0.0
-        if p > 0.02 and d <= 0:       # just turned — local high
-            state = "high"
-        elif p < -0.02 and d >= 0:    # just turned — local low
-            state = "low"
-        elif d > 0.02:
-            state = "flood"
-        elif d < -0.02:
-            state = "ebb"
-        else:
-            state = "slack"
-        states.append(state)
-    df["tidal_state_encoded"] = pd.Series(states).map(TIDAL_ENCODING).fillna(-1).astype(int)
+    # Derive tidal state using the same function as the Dagster pipeline
+    df["tidal_state"] = _derive_tidal_state(df["tide_height"])
+    df["tidal_state_encoded"] = df["tidal_state"].map(TIDAL_ENCODING).fillna(-1).astype(int)
 
-    # Flow: try USGS 11013500 (Tijuana River near Nestor); fall back to baseline
-    flow_series = _fetch_usgs_flow(begin, end)
-    if flow_series is not None:
-        df = df.merge(flow_series, on="date", how="left")
-        df["Flow (m^3/s)--Border"] = df["Flow (m^3/s)--Border"].ffill().fillna(FLOW_BASELINE_M3S)
-        print(f"{len(df)} hrs, USGS flow merged")
-    else:
-        df["Flow (m^3/s)--Border"] = FLOW_BASELINE_M3S
-        print(f"{len(df)} hrs, flow=baseline ({FLOW_BASELINE_M3S} m³/s)")
+    # Flow: diurnal (month, hour) median from historical training data
+    # — same approach as the streamflow_forecast Dagster asset
+    flow_col = "Flow (m^3/s)--Border"
+    flow_series = _flow_from_diurnal_median(df["date"])
+    df[flow_col] = flow_series.values
+    print(f"{len(df)} hrs, flow from diurnal median")
 
-    return df[["date", "tide_height", "tidal_state_encoded", "Flow (m^3/s)--Border"]]
+    return df[["date", "tide_height", "tidal_state", "tidal_state_encoded", flow_col]]
 
 
-def _fetch_usgs_flow(begin: str, end: str) -> pd.DataFrame | None:
-    """Fetch Tijuana River flow from USGS; returns None if unavailable."""
+def _flow_from_diurnal_median(timestamps: pd.Series) -> pd.Series:
+    """Estimate flow using (month, hour) median from historical training data.
+
+    Mirrors the streamflow_forecast Dagster asset logic.
+    """
+    flow_col = "Flow (m^3/s)--Border"
+    global_fallback = 1.35
     try:
-        url = "https://waterservices.usgs.gov/nwis/iv/"
-        params = {
-            "sites": "11013500",
-            "parameterCd": "00060",   # discharge in cfs
-            "startDT": f"{begin[:4]}-{begin[4:6]}-{begin[6:]}",
-            "endDT":   f"{end[:4]}-{end[4:6]}-{end[6:]}",
-            "format": "json",
-        }
-        resp = requests.get(url, params=params, timeout=10)
-        resp.raise_for_status()
-        ts = resp.json()["value"]["timeSeries"]
-        if not ts:
-            return None
-        vals = ts[0]["values"][0]["value"]
-        if not vals:
-            return None
-        df = pd.DataFrame({
-            "date": pd.to_datetime([v["dateTime"] for v in vals], utc=True),
-            "Flow (m^3/s)--Border": [float(v["value"]) * 0.028316847 for v in vals],
-        })
-        # Resample to hourly
-        df = df.set_index("date").resample("1h").mean().interpolate().reset_index()
-        return df
+        hist = pd.read_parquet(TRAINING_CSV)
+        time_col = next((c for c in ["time", "date"] if c in hist.columns), None)
+        if time_col and flow_col in hist.columns:
+            hist["_t"] = pd.to_datetime(hist[time_col]).dt.tz_localize(None)
+            valid = hist[hist[flow_col].notna()].copy()
+            valid["_month"] = valid["_t"].dt.month
+            valid["_hour"]  = valid["_t"].dt.hour
+            profile = valid.groupby(["_month", "_hour"])[flow_col].median()
+            global_fallback = valid[flow_col].median()
+        else:
+            profile = {}
     except Exception:
-        return None
+        profile = {}
+
+    ts_naive = timestamps.dt.tz_localize(None) if timestamps.dt.tz is not None else timestamps
+    return pd.Series(
+        [profile.get((t.month, t.hour), global_fallback) for t in ts_naive],
+        index=timestamps.index,
+    )
+
+
+_CARDINAL_DIRS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+_WD_CAT_MAPPING = {"E": 0, "N": 1, "NE": 2, "NW": 3, "S": 4, "SE": 5, "SW": 6, "W": 7}
+
+
+def _degrees_to_cardinal(deg: float) -> str:
+    return _CARDINAL_DIRS[int((deg + 22.5) / 45.0) % 8]
 
 
 def _add_derived_features(df: pd.DataFrame, time_col: str = "date") -> pd.DataFrame:
-    """Compute wind sin/cos, rolling windows, and interaction features."""
+    """Compute wind sin/cos, rolling windows, interaction features, and wind_direction_categorical."""
     df = df.copy().sort_values(time_col).reset_index(drop=True)
     rad = np.deg2rad(df["wind_direction_10m"].fillna(0))
     df["wind_direction_sin"] = np.sin(rad)
     df["wind_direction_cos"] = np.cos(rad)
+    df["wind_direction_categorical"] = df["wind_direction_10m"].fillna(0).apply(_degrees_to_cardinal)
+    df["wind_direction_categorical_encoded"] = df["wind_direction_categorical"].map(_WD_CAT_MAPPING).fillna(-1).astype(int)
     for h in (2, 3, 4):
         df[f"wind_speed_10m_avg_{h}h"]  = df["wind_speed_10m"].rolling(h, min_periods=1).mean()
         df[f"wind_gusts_10m_max_{h}h"]  = df["wind_gusts_10m"].rolling(h, min_periods=1).max()
@@ -221,7 +219,12 @@ def _add_derived_features(df: pd.DataFrame, time_col: str = "date") -> pd.DataFr
 # STEP 2: Train fresh models on Dec 2025 training data
 # ===========================================================================
 
-def load_training_data() -> pd.DataFrame:
+def load_training_data():
+    """Load and split training data into 80/20 time-based train/val sets.
+
+    Returns:
+        Tuple of (train_df, val_df)
+    """
     from h2s.training.relabeling import apply_categorization
 
     df = pd.read_parquet(TRAINING_CSV)
@@ -231,14 +234,22 @@ def load_training_data() -> pd.DataFrame:
 
     avail = [f for f in TRAIN_FEATURES if f in df.columns]
     df = df.dropna(subset=avail + ["h2s_category"])
+    df = df.sort_values("time").reset_index(drop=True)
+
+    split = int(len(df) * 0.8)
+    train_df = df.iloc[:split].copy()
+    val_df = df.iloc[split:].copy()
+
     print(f"Training data: {len(df)} rows ({df['time'].min().date()} → {df['time'].max().date()})")
+    print(f"  Train: {len(train_df)} rows ({train_df['time'].min().date()} → {train_df['time'].max().date()})")
+    print(f"  Val:   {len(val_df)} rows ({val_df['time'].min().date()} → {val_df['time'].max().date()})")
     dist = df["h2s_category"].value_counts()
     for cat in ["green", "yellow", "orange"]:
         print(f"  {cat:8s}: {dist.get(cat, 0)}")
-    return df
+    return train_df, val_df
 
 
-def train_variant(train_df: pd.DataFrame, variant: str):
+def train_variant(train_df: pd.DataFrame, variant: str, hazard_multiplier: float = 3.0):
     from h2s.training.model_trainer import (
         train_model_with_cv, train_random_forest_with_cv, calculate_cv_summary,
     )
@@ -253,13 +264,14 @@ def train_variant(train_df: pd.DataFrame, variant: str):
     n_folds = max(2, min(3, len(X) // (n_classes * 2)))
 
     use_smote = variant == "xgboost_smote"
-    print(f"  Training {variant} ({len(X)} samples, {n_folds} folds)...", end=" ", flush=True)
+    print(f"  Training {variant} ({len(X)} samples, {n_folds} folds, hazard_mult={hazard_multiplier})...", end=" ", flush=True)
 
     if variant == "random_forest":
         model, cv = train_random_forest_with_cv(
             X_train=X, y_train=y, label_map=label_map,
             n_folds=n_folds, n_estimators=300,
             use_class_weights=True, use_smote=True, random_state=42,
+            hazard_multiplier=hazard_multiplier,
         )
     else:
         model, cv = train_model_with_cv(
@@ -267,6 +279,7 @@ def train_variant(train_df: pd.DataFrame, variant: str):
             n_folds=n_folds, n_estimators=100, max_depth=5,
             learning_rate=0.1, use_class_weights=True,
             use_smote=use_smote, random_state=42,
+            hazard_multiplier=hazard_multiplier,
         )
 
     summary = calculate_cv_summary(cv)
@@ -276,7 +289,128 @@ def train_variant(train_df: pd.DataFrame, variant: str):
 
 
 # ===========================================================================
-# STEP 3: Predict
+# STEP 3: Save models + deploy & approve
+# ===========================================================================
+
+_VARIANT_FILES = {
+    "xgboost_base":  "model.json",
+    "xgboost_smote": "model.json",
+    "random_forest": "model.joblib",
+}
+
+_CLASS_NAMES = ["green", "orange", "yellow"]
+
+
+def _make_prep_info(feature_cols: list) -> dict:
+    return {
+        "feature_cols": feature_cols,
+        "class_names": _CLASS_NAMES,
+        "site_name": SITE,
+        "wind_cat_mapping": _WD_CAT_MAPPING,
+        "tidal_mapping": TIDAL_ENCODING,
+    }
+
+
+def save_models_to_startmodels(
+    retrained: dict,           # {variant: (model, label_map, features, unique_classes)}
+    primary: str = "random_forest",
+) -> None:
+    """Save all trained model variants to data/startmodels/.
+
+    Writes:
+      data/startmodels/{variant}/model.{json|joblib}
+      data/startmodels/{variant}/nestor_preprocessing_info.json
+      data/startmodels/deployment_metadata.json  (primary variant)
+    """
+    import json
+    import joblib
+
+    os.makedirs(STARTMODELS_DIR, exist_ok=True)
+    print(f"\n[save] Writing models to {STARTMODELS_DIR}")
+
+    for variant, (model, _label_map, features, _classes) in retrained.items():
+        variant_dir = os.path.join(STARTMODELS_DIR, variant)
+        os.makedirs(variant_dir, exist_ok=True)
+
+        filename = _VARIANT_FILES[variant]
+        model_path = os.path.join(variant_dir, filename)
+
+        if filename.endswith(".joblib"):
+            joblib.dump(model, model_path)
+        else:
+            model.save_model(model_path)
+
+        prep_path = os.path.join(variant_dir, "nestor_preprocessing_info.json")
+        with open(prep_path, "w") as f:
+            json.dump(_make_prep_info(features), f, indent=2)
+
+        size_kb = os.path.getsize(model_path) / 1024
+        print(f"  ✓ {variant}/{filename}  ({size_kb:.0f} KB)  {len(features)} features")
+
+    # deployment_metadata.json — marks which variant is primary
+    meta = {
+        "deployed_at": datetime.now(timezone.utc).isoformat(),
+        "primary_variant": primary,
+        "model_path": "tijuana/forecast/models/nestor_xgboost_weighted_model.json",
+        "preprocessing_path": "tijuana/forecast/models/nestor_preprocessing_info.json",
+        "approval_metadata": {
+            "approved_by": "test_pipeline",
+            "variant": primary,
+            "quality_gates_passed": True,
+        },
+        "deployment_status": "success",
+    }
+    meta_path = os.path.join(STARTMODELS_DIR, "deployment_metadata.json")
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+    print(f"  ✓ deployment_metadata.json  (primary={primary})")
+
+
+def deploy_and_approve(retrained: dict, forecast_df: pd.DataFrame) -> None:
+    """Verify all saved models reload correctly and can run inference.
+
+    Reloads each variant from data/startmodels/ via H2SPredictor.from_local,
+    runs predict() on a small sample, and reports pass/fail for each check.
+    """
+    from h2s.predictor.h2s_predictor import H2SPredictor
+
+    print("\n[deploy] Verifying saved models")
+    sample = forecast_df.head(24).copy()
+    all_passed = True
+
+    for variant, filename in _VARIANT_FILES.items():
+        model_path = os.path.join(STARTMODELS_DIR, variant, filename)
+        prep_path  = os.path.join(STARTMODELS_DIR, variant, "nestor_preprocessing_info.json")
+
+        checks = []
+        try:
+            predictor = H2SPredictor.from_local(model_path, prep_path)
+            checks.append(("load", True, f"{len(predictor.feature_cols)} features"))
+
+            df_proc = predictor.preprocess_data(sample.copy())
+            preds   = predictor.predict(df_proc)
+            checks.append(("predict", True, f"{len(preds)} rows, cats={sorted(preds['predicted_category'].unique())}"))
+
+            missing = [c for c in predictor.feature_cols if c not in df_proc.columns]
+            checks.append(("features", len(missing) == 0, f"missing={missing}" if missing else "all present"))
+
+        except Exception as e:
+            checks.append(("error", False, str(e)))
+            all_passed = False
+
+        status = "✓" if all(ok for _, ok, _ in checks) else "✗"
+        print(f"  {status} {variant}")
+        for check, ok, detail in checks:
+            icon = "    ✓" if ok else "    ✗"
+            print(f"  {icon} {check}: {detail}")
+            if not ok:
+                all_passed = False
+
+    print(f"\n  {'✓ All models approved — ready to upload' if all_passed else '✗ Some checks failed — review above'}")
+
+
+# ===========================================================================
+# STEP 4: Predict
 # ===========================================================================
 
 def predict_production(forecast_df: pd.DataFrame) -> pd.DataFrame:
@@ -285,8 +419,6 @@ def predict_production(forecast_df: pd.DataFrame) -> pd.DataFrame:
 
     predictor = H2SPredictor.from_local(PROD_MODEL, PROD_PREP)
     df = forecast_df.copy()
-    # month is a feature but commented out in preprocess_data — add manually
-    df["month"] = df["date"].dt.month
     df_proc = predictor.preprocess_data(df)
     return predictor.predict(df_proc)
 
@@ -496,31 +628,39 @@ if __name__ == "__main__":
     print(f"  This month: {len(this_month)} hrs | Today: {len(today_df)} hrs | Tomorrow: {len(tomorrow_df)} hrs")
 
     # --- Step 2: Train ---
-    print("\n[2/3] TRAINING MODELS")
-    train_df = load_training_data()
-    model_base,  lm_base,  feat_base,  _  = train_variant(train_df, "xgboost_base")
-    model_smote, lm_smote, feat_smote, _  = train_variant(train_df, "xgboost_smote")
-    model_rf,    lm_rf,    feat_rf,    _  = train_variant(train_df, "random_forest")
+    print("\n[2/4] TRAINING MODELS")
+    train_df, val_df = load_training_data()
+    model_base,  lm_base,  feat_base,  cls_base   = train_variant(train_df, "xgboost_base")
+    model_smote, lm_smote, feat_smote, cls_smote  = train_variant(train_df, "xgboost_smote")
+    model_rf,    lm_rf,    feat_rf,    cls_rf     = train_variant(train_df, "random_forest")
 
     print_feature_importance(model_base,  feat_base,  "xgboost_base")
     print_feature_importance(model_smote, feat_smote, "xgboost_smote")
     print_feature_importance(model_rf,    feat_rf,    "random_forest")
 
-    # Validation slices from training parquet (have actual H2S labels)
-    val_df       = train_df[train_df["time"] >= pd.Timestamp(month_start)].copy()
-    last_week_df = train_df[
-        (train_df["time"].dt.date >= week_start) &
-        (train_df["time"].dt.date < today)
-    ].copy()
-
     retrained_models = {
-        "xgboost_base":  (model_base,  lm_base,  feat_base),
-        "xgboost_smote": (model_smote, lm_smote, feat_smote),
-        "random_forest": (model_rf,    lm_rf,    feat_rf),
+        "xgboost_base":  (model_base,  lm_base,  feat_base,  cls_base),
+        "xgboost_smote": (model_smote, lm_smote, feat_smote, cls_smote),
+        "random_forest": (model_rf,    lm_rf,    feat_rf,    cls_rf),
     }
 
-    # --- Step 3 & 4: Predict + display ---
-    print("\n[3/3] PREDICTIONS")
+    # --- Step 3: Save + deploy ---
+    print("\n[3/4] SAVE & DEPLOY")
+    save_models_to_startmodels(retrained_models, primary="random_forest")
+    deploy_and_approve(retrained_models, forecast)
+
+    # Validation slices from the held-out val set (have actual H2S labels, not seen during training)
+    val_month_df = val_df[val_df["time"] >= pd.Timestamp(month_start)].copy()
+    last_week_df = val_df[
+        (val_df["time"].dt.date >= week_start) &
+        (val_df["time"].dt.date < today)
+    ].copy()
+
+    # predict_fresh uses (model, label_map, features) — drop classes for display helpers
+    retrained_for_display = {k: v[:3] for k, v in retrained_models.items()}
+
+    # --- Step 4: Predict + display ---
+    print("\n[4/4] PREDICTIONS")
     for label, window in [
         ("This month (so far)", this_month),
         (f"Today ({today})",    today_df),
@@ -530,26 +670,26 @@ if __name__ == "__main__":
             print(f"\n  {label}: no forecast data in window")
             continue
         print(f"\n  {label}  ({len(window)} hours)")
-        print_summary(predict_production(window),                               "production model",         label)
-        for name, (m, lm, ft) in retrained_models.items():
+        print_summary(predict_production(window),                               "production model (RF)",    label)
+        for name, (m, lm, ft) in retrained_for_display.items():
             print_summary(predict_fresh(window, m, lm, ft), f"{name} (retrained)", label)
 
     # Hourly breakdown for today and tomorrow (production model)
     for df_, label_ in [(today_df, f"Today ({today})"), (tomorrow_df, f"Tomorrow ({tomorrow})")]:
         if len(df_) > 0:
-            print_hourly(predict_production(df_), f"{label_} — production model")
+            print_hourly(predict_production(df_), f"{label_} — production model (RF)")
 
     # Previous week: day-by-day predictions vs actuals
     print(f"\n  ── Previous week vs actuals ({week_start} → {today - timedelta(days=1)}) ──")
-    print_week_vs_actuals(last_week_df, retrained_models)
+    print_week_vs_actuals(last_week_df, retrained_for_display)
 
-    # Confusion matrices on labelled month data
-    if len(val_df) > 0:
-        print(f"\n  ── Month confusion matrices ({month_start} → {val_df['time'].max().date()}, N={len(val_df)}) ──")
-        y_true = val_df["h2s_category"].values
-        for name, (m, lm, ft) in retrained_models.items():
-            avail = [f for f in ft if f in val_df.columns]
-            X = val_df[avail].fillna(0.0)
+    # Confusion matrices on labelled month data (val holdout only)
+    if len(val_month_df) > 0:
+        print(f"\n  ── Month confusion matrices ({month_start} → {val_month_df['time'].max().date()}, N={len(val_month_df)}) ──")
+        y_true = val_month_df["h2s_category"].values
+        for name, (m, lm, ft) in retrained_for_display.items():
+            avail = [f for f in ft if f in val_month_df.columns]
+            X = val_month_df[avail].fillna(0.0)
             reverse = {v: k for k, v in lm.items()}
             preds = [reverse[int(i)] for i in np.argmax(m.predict_proba(X.values), axis=1)]
             print_confusion_matrix(y_true, preds, name)

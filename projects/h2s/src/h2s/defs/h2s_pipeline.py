@@ -25,6 +25,26 @@ STORE_ASSETS_AVAILABLE = True
 
 _KEY = lambda name: dg.AssetKey(["h2s", name])
 
+
+def _derive_tidal_state(heights: pd.Series) -> pd.Series:
+    """Classify each hourly tide height as flood, ebb, slack high, or slack low."""
+    states = ['ebb'] * len(heights)
+    for i in range(len(heights)):
+        h = heights.iloc[i]
+        h_prev = heights.iloc[i - 1] if i > 0 else h
+        h_next = heights.iloc[i + 1] if i < len(heights) - 1 else h
+        if i > 0 and i < len(heights) - 1:
+            if h >= h_prev and h >= h_next:
+                states[i] = 'slack high'
+            elif h <= h_prev and h <= h_next:
+                states[i] = 'slack low'
+            elif h > h_prev:
+                states[i] = 'flood'
+            # else: ebb (default)
+        elif h > h_prev:
+            states[i] = 'flood'
+    return pd.Series(states, index=heights.index)
+
 MODEL_VARIANTS = ["xgboost_base", "xgboost_smote", "random_forest"]
 
 
@@ -84,6 +104,195 @@ def h2s_model_artifacts(context: dg.AssetExecutionContext):
     key_prefix="h2s",
     group_name="h2s_prediction",
     required_resource_keys={"s3"},
+    kinds={"python", "s3"},
+    description="Streamflow forecast using diurnal (month, hour) median profile from historical data",
+    config_schema={
+        "local_fallback_path": dg.Field(
+            str,
+            default_value="/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/modeldata_h2s_nofill.parquet",
+            description="Local fallback path if S3 historical data is unavailable",
+        ),
+        "forecast_days": dg.Field(
+            int,
+            default_value=10,
+            description="Number of days forward to generate streamflow forecast",
+        ),
+    },
+)
+def streamflow_forecast(context: dg.AssetExecutionContext) -> pd.DataFrame:
+    """Generate flow rate forecast using historical diurnal (month, hour) median profile.
+
+    Loads historical training data, computes median Flow (m^3/s)--Border per (month, hour)
+    bucket, and projects that profile over the upcoming forecast window.
+    Returns columns: time, Flow (m^3/s)--Border
+    """
+    s3_resource = context.resources.s3
+    local_fallback = context.op_config["local_fallback_path"]
+    forecast_days = context.op_config["forecast_days"]
+    flow_col = "Flow (m^3/s)--Border"
+
+    # --- Load historical data (S3 with local fallback) ---
+    hist_df = None
+    s3_path = "latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet"
+    try:
+        stream = s3_resource.get_stream(path=s3_path)
+        hist_df = pd.read_parquet(stream)
+        context.log.info(f"✓ Loaded historical data from S3: {s3_path} ({len(hist_df)} rows)")
+    except Exception as e:
+        context.log.warning(f"S3 load failed ({e}), falling back to local: {local_fallback}")
+        hist_df = pd.read_parquet(local_fallback)
+        context.log.info(f"✓ Loaded historical data from local file ({len(hist_df)} rows)")
+
+    # --- Parse time column ---
+    time_col = next((c for c in ["time", "date", "Time", "Date"] if c in hist_df.columns), None)
+    if time_col is None:
+        raise ValueError(f"No time column found in historical data. Columns: {list(hist_df.columns)}")
+    if flow_col not in hist_df.columns:
+        raise ValueError(f"Column '{flow_col}' not found. Available: {list(hist_df.columns)}")
+
+    hist_df["_time"] = pd.to_datetime(hist_df[time_col])
+    hist_valid = hist_df[hist_df[flow_col].notna()].copy()
+    hist_valid["_month"] = hist_valid["_time"].dt.month
+    hist_valid["_hour"] = hist_valid["_time"].dt.hour
+
+    # --- Compute (month, hour) median profile ---
+    profile = hist_valid.groupby(["_month", "_hour"])[flow_col].median()
+    global_median = hist_valid[flow_col].median()
+
+    context.log.info(f"✓ Computed flow profile from {len(hist_valid)} rows")
+    context.log.info(f"  Date range: {hist_valid['_time'].min()} → {hist_valid['_time'].max()}")
+    context.log.info(f"  Flow range: {hist_valid[flow_col].min():.2f} – {hist_valid[flow_col].max():.2f} m³/s")
+    context.log.info(f"  Global median: {global_median:.3f} m³/s")
+
+    # --- Generate forecast timestamps (hourly from now) ---
+    now_utc = pd.Timestamp.utcnow().floor("h").tz_localize(None)
+    forecast_times = pd.date_range(start=now_utc, periods=forecast_days * 24, freq="h")
+
+    rows = [
+        {"time": ts, flow_col: profile.get((ts.month, ts.hour), global_median)}
+        for ts in forecast_times
+    ]
+    forecast_df = pd.DataFrame(rows)
+
+    context.log.info(f"✓ Generated {len(forecast_df)} hourly streamflow forecast rows")
+    context.log.info(f"  Flow range: {forecast_df[flow_col].min():.3f} – {forecast_df[flow_col].max():.3f} m³/s")
+
+    # --- Upload to S3 ---
+    csv_path = "latest/tijuana/streamflow_forecast/latest.csv"
+    try:
+        csv_bytes = forecast_df.to_csv(index=False).encode("utf-8")
+        s3_resource.putFile(csv_bytes, csv_path, bucket=s3_resource.S3_BUCKET, content_type="text/csv")
+        context.log.info(f"✓ Uploaded streamflow forecast to S3: {csv_path}")
+    except Exception as e:
+        context.log.warning(f"Could not upload streamflow forecast to S3: {e}")
+
+    context.add_output_metadata({
+        "row_count": len(forecast_df),
+        "flow_min": float(forecast_df[flow_col].min()),
+        "flow_max": float(forecast_df[flow_col].max()),
+        "flow_median": float(forecast_df[flow_col].median()),
+        "profile_buckets": int(len(profile)),
+        "historical_rows": int(len(hist_valid)),
+    })
+    return forecast_df
+
+
+@dg.asset(
+    key_prefix="h2s",
+    group_name="h2s_prediction",
+    required_resource_keys={"s3"},
+    kinds={"python", "s3"},
+    description="Tidal predictions from NOAA CO-OPS API (Station 9410170, San Diego)",
+    config_schema={
+        "forecast_days": dg.Field(
+            int,
+            default_value=10,
+            description="Number of days forward to fetch tidal predictions",
+        ),
+        "noaa_station": dg.Field(
+            str,
+            default_value="9410170",
+            description="NOAA CO-OPS station ID (default: San Diego, CA — closest to Tijuana River mouth)",
+        ),
+    },
+)
+def tidal_forecast(context: dg.AssetExecutionContext) -> pd.DataFrame:
+    """Fetch deterministic hourly tidal predictions from NOAA CO-OPS API.
+
+    Station 9410170 (San Diego) is the closest official NOAA gauge to the
+    Tijuana River mouth. Derives tidal_state (flood/ebb/slack high/slack low)
+    from the slope of the predicted tide height series.
+    Returns columns: time, tide_height, tidal_state
+    """
+    import json as _json
+    import urllib.request
+
+    s3_resource = context.resources.s3
+    forecast_days = context.op_config["forecast_days"]
+    station = context.op_config["noaa_station"]
+
+    now_utc = pd.Timestamp.utcnow()
+    begin_date = now_utc.strftime("%Y%m%d")
+    end_date = (now_utc + pd.Timedelta(days=forecast_days)).strftime("%Y%m%d")
+
+    api_url = (
+        f"https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
+        f"?product=predictions&datum=MLLW&interval=h&units=metric&time_zone=gmt"
+        f"&format=json&station={station}&begin_date={begin_date}&end_date={end_date}"
+    )
+
+    context.log.info(f"Fetching tidal predictions from NOAA CO-OPS (station {station})...")
+    context.log.info(f"  Date range: {begin_date} → {end_date}")
+
+    try:
+        with urllib.request.urlopen(api_url, timeout=30) as response:
+            data = _json.loads(response.read().decode("utf-8"))
+    except Exception as e:
+        raise RuntimeError(f"Failed to fetch NOAA tidal predictions: {e}")
+
+    if "error" in data:
+        raise RuntimeError(f"NOAA API error: {data['error'].get('message', data['error'])}")
+
+    predictions = data.get("predictions", [])
+    if not predictions:
+        raise RuntimeError("NOAA API returned no predictions")
+
+    context.log.info(f"✓ Received {len(predictions)} tidal predictions from NOAA")
+
+    tide_df = pd.DataFrame([
+        {"time": pd.to_datetime(p["t"]), "tide_height": float(p["v"])}
+        for p in predictions
+    ]).sort_values("time").reset_index(drop=True)
+
+    tide_df["tidal_state"] = _derive_tidal_state(tide_df["tide_height"])
+
+    state_counts = tide_df["tidal_state"].value_counts().to_dict()
+    context.log.info(f"✓ Tide height range: {tide_df['tide_height'].min():.3f} – {tide_df['tide_height'].max():.3f} m")
+    context.log.info(f"  Tidal states: {state_counts}")
+
+    # --- Upload to S3 ---
+    csv_path = "latest/tijuana/tidal_forecast/latest.csv"
+    try:
+        csv_bytes = tide_df.to_csv(index=False).encode("utf-8")
+        s3_resource.putFile(csv_bytes, csv_path, bucket=s3_resource.S3_BUCKET, content_type="text/csv")
+        context.log.info(f"✓ Uploaded tidal forecast to S3: {csv_path}")
+    except Exception as e:
+        context.log.warning(f"Could not upload tidal forecast to S3: {e}")
+
+    context.add_output_metadata({
+        "row_count": len(tide_df),
+        "tide_min": float(tide_df["tide_height"].min()),
+        "tide_max": float(tide_df["tide_height"].max()),
+        "tidal_states": state_counts,
+        "station": station,
+    })
+    return tide_df
+
+
+@dg.asset(
+    key_prefix="h2s",
+    group_name="h2s_prediction",
+    required_resource_keys={"s3"},
     kinds={"csv", "s3"},
     description="Environmental data loaded from S3 or local test data",
     config_schema={
@@ -97,15 +306,23 @@ def h2s_model_artifacts(context: dg.AssetExecutionContext):
             default_value="/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/modeldata_h2s_nofill.parquet",
             description="Path to local test data file (used when use_local_data=True)"
         ),
-    }
+    },
+    ins={
+        "streamflow_forecast": dg.AssetIn(key=_KEY("streamflow_forecast")),
+        "tidal_forecast": dg.AssetIn(key=_KEY("tidal_forecast")),
+    },
 )
-def raw_environmental_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
+def raw_environmental_data(
+    context: dg.AssetExecutionContext,
+    streamflow_forecast: pd.DataFrame,
+    tidal_forecast: pd.DataFrame,
+) -> pd.DataFrame:
     """Load environmental data from S3 or local test data.
 
     Production Mode (use_local_data=False):
     - Loads from S3: latest/tijuana/weather_forecast/latest.csv
     - FAILS if S3 data is not available (no fallback)
-    - If S3 data lacks H2S measurements, merges from local modeldata_h2s.csv
+    - If S3 data lacks H2S measurements, merges from local latest.csv
 
     Test Mode (use_local_data=True):
     - Loads from local data directory
@@ -156,7 +373,7 @@ def raw_environmental_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
     if not h2s_cols and source == "s3":
         try:
             context.log.info("No H2S measurements in S3 data - attempting to merge from local modeldata_h2s.csv")
-            local_path = "/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/modeldata_h2s_nofill.parquet"
+            local_path = "/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/latest.csv"
             h2s_df = pd.read_parquet(local_path)
 
             # Standardize time column in H2S data
@@ -193,6 +410,40 @@ def raw_environmental_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
             context.log.info(f"  H2S range: {df[h2s_col].min():.2f} - {df[h2s_col].max():.2f} ppb")
         else:
             context.log.warning(f"  ⚠ H2S column exists but has no values")
+
+    # --- Merge streamflow forecast ---
+    flow_col = "Flow (m^3/s)--Border"
+    merge_times = df["date"].dt.floor("h")
+    if merge_times.dt.tz is not None:
+        merge_times = merge_times.dt.tz_convert("UTC").dt.tz_localize(None)
+    df["_merge_time"] = merge_times
+
+    sf = streamflow_forecast[[c for c in ["time", flow_col] if c in streamflow_forecast.columns]].copy()
+    sf_times = pd.to_datetime(sf["time"])
+    if sf_times.dt.tz is not None:
+        sf_times = sf_times.dt.tz_convert("UTC").dt.tz_localize(None)
+    sf["_merge_time"] = sf_times.dt.floor("h")
+    flow_merge = sf[["_merge_time", flow_col]].drop_duplicates("_merge_time")
+    df = df.merge(flow_merge, on="_merge_time", how="left")
+    flow_matched = int(df[flow_col].notna().sum())
+    context.log.info(f"✓ Streamflow merged: {flow_matched}/{len(df)} rows matched")
+    if flow_matched < len(df):
+        context.log.warning(f"  {len(df) - flow_matched} rows have no streamflow match — will default to 0.0 in preprocessor")
+
+    # --- Merge tidal forecast ---
+    tf = tidal_forecast[["time", "tide_height", "tidal_state"]].copy()
+    tf_times = pd.to_datetime(tf["time"])
+    if tf_times.dt.tz is not None:
+        tf_times = tf_times.dt.tz_convert("UTC").dt.tz_localize(None)
+    tf["_merge_time"] = tf_times.dt.floor("h")
+    tide_merge = tf[["_merge_time", "tide_height", "tidal_state"]].drop_duplicates("_merge_time")
+    df = df.merge(tide_merge, on="_merge_time", how="left")
+    tide_matched = int(df["tide_height"].notna().sum())
+    context.log.info(f"✓ Tidal merged: {tide_matched}/{len(df)} rows matched")
+    if tide_matched < len(df):
+        context.log.warning(f"  {len(df) - tide_matched} rows have no tidal match — will default to 0.0 in preprocessor")
+
+    df = df.drop(columns=["_merge_time"])
 
     context.log.info(f"Loaded {len(df)} rows")
     context.log.info(f"Date range: {df['date'].min()} to {df['date'].max()}")

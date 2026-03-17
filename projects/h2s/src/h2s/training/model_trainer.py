@@ -11,12 +11,18 @@ from sklearn.model_selection import TimeSeriesSplit
 from h2s.training.validation import calculate_metrics
 
 
-def calculate_class_weights(y: pd.Series, label_map: Dict[str, int]) -> Dict[int, float]:
+HAZARD_CLASSES = {'orange', 'yellow'}
+
+
+def calculate_class_weights(
+    y: pd.Series, label_map: Dict[str, int], hazard_multiplier: float = 3.0
+) -> Dict[int, float]:
     """Calculate class weights to handle imbalanced data.
 
     Args:
         y: Series of class labels (as strings: 'green', 'yellow', 'orange')
         label_map: Mapping from class names to integers
+        hazard_multiplier: Extra weight multiplier applied to orange and yellow classes
 
     Returns:
         Dictionary mapping class indices to weights
@@ -35,7 +41,10 @@ def calculate_class_weights(y: pd.Series, label_map: Dict[str, int]) -> Dict[int
     weights = {}
     for class_name, class_idx in label_map.items():
         count = class_counts.get(class_name, 1)  # Avoid division by zero
-        weights[class_idx] = total / (n_classes * count)
+        w = total / (n_classes * count)
+        if class_name in HAZARD_CLASSES:
+            w *= hazard_multiplier
+        weights[class_idx] = w
 
     return weights
 
@@ -67,8 +76,13 @@ def apply_smote(X: pd.DataFrame, y: pd.Series, random_state: int = 42, logger=No
     k = min(5, min_samples - 1)
     if k < 1:
         if logger:
-            logger.warning(f"  Skipping SMOTE: minority class has only {min_samples} sample(s)")
-        return X, y
+            logger.warning(f"  SMOTE k<1 (minority={min_samples}): falling back to RandomOverSampler")
+        from imblearn.over_sampling import RandomOverSampler
+        ros = RandomOverSampler(random_state=random_state)
+        X_res, y_res = ros.fit_resample(X, y)
+        if logger:
+            logger.info(f"  After RandomOverSampler: {dict(pd.Series(y_res).value_counts())}")
+        return pd.DataFrame(X_res, columns=X.columns), pd.Series(y_res)
 
     try:
         smote = BorderlineSMOTE(random_state=random_state, k_neighbors=k)
@@ -95,7 +109,8 @@ def train_model_with_cv(
     use_class_weights: bool = True,
     use_smote: bool = False,
     random_state: int = 42,
-    logger = None  # Optional logger for debugging
+    logger = None,  # Optional logger for debugging
+    hazard_multiplier: float = 3.0,
 ) -> Tuple[xgb.XGBClassifier, List[Dict]]:
     """Train XGBoost model with time-series cross-validation.
 
@@ -128,7 +143,7 @@ def train_model_with_cv(
     class_weights = None
     sample_weights = None
     if use_class_weights:
-        class_weights = calculate_class_weights(y_train, label_map)
+        class_weights = calculate_class_weights(y_train, label_map, hazard_multiplier)
         sample_weights = y_encoded.map(class_weights).values
 
     # Initialize cross-validation
@@ -213,7 +228,8 @@ def train_model_with_cv(
         if use_class_weights:
             class_weights_final = calculate_class_weights(
                 y_encoded_final.map({v: k for k, v in label_map.items()}),
-                label_map
+                label_map,
+                hazard_multiplier,
             )
             sample_weights_final = y_encoded_final.map(class_weights_final).values
 
@@ -248,6 +264,7 @@ def train_random_forest_with_cv(
     use_smote: bool = False,
     random_state: int = 42,
     logger=None,
+    hazard_multiplier: float = 3.0,
 ) -> Tuple["sklearn.ensemble.RandomForestClassifier", List[Dict]]:  # noqa: F821
     """Train a Random Forest classifier with time-series cross-validation.
 
@@ -257,7 +274,11 @@ def train_random_forest_with_cv(
 
     y_encoded = y_train.map(label_map)
 
-    class_weight_arg = "balanced" if use_class_weights else None
+    # Build explicit weight dict with hazard multiplier instead of "balanced"
+    if use_class_weights:
+        class_weight_arg = calculate_class_weights(y_train, label_map, hazard_multiplier)
+    else:
+        class_weight_arg = None
 
     tscv = TimeSeriesSplit(n_splits=n_folds)
     cv_metrics = []
