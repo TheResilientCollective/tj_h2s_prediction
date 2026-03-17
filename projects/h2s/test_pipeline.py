@@ -665,11 +665,11 @@ if __name__ == "__main__":
     print(f"  This month: {len(this_month)} hrs | Today: {len(today_df)} hrs | Tomorrow: {len(tomorrow_df)} hrs")
 
     # --- Step 2: Train ---
-    print("\n[2/3] TRAINING MODELS")
-    train_df = load_training_data(filter_zero_h2s=args.filter_zero_h2s)
-    model_base,  lm_base,  feat_base,  _  = train_variant(train_df, "xgboost_base")
-    model_smote, lm_smote, feat_smote, _  = train_variant(train_df, "xgboost_smote")
-    model_rf,    lm_rf,    feat_rf,    _  = train_variant(train_df, "random_forest")
+    print("\n[2/4] TRAINING MODELS")
+    train_df, val_df = load_training_data(filter_zero_h2s=args.filter_zero_h2s)
+    model_base,  lm_base,  feat_base,  cls_base  = train_variant(train_df, "xgboost_base")
+    model_smote, lm_smote, feat_smote, cls_smote = train_variant(train_df, "xgboost_smote")
+    model_rf,    lm_rf,    feat_rf,    cls_rf    = train_variant(train_df, "random_forest")
 
     print_feature_importance(model_base,  feat_base,  "xgboost_base")
     print_feature_importance(model_smote, feat_smote, "xgboost_smote")
