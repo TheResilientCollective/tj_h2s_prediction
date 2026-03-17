@@ -127,7 +127,7 @@ approve_and_deploy_job = dg.define_asset_job(
     partitions_def=model_run_partitions,
     config={
         "ops": {
-            "deployment_approval": {
+            "h2s__deployment_approval": {
                 "config": {"approve_deployment": True}
             }
         }
