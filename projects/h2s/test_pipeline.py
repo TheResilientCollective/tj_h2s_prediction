@@ -12,6 +12,7 @@ Run from projects/h2s/:
     uv run python test_pipeline.py
 """
 
+import argparse
 import os
 import sys
 import warnings
@@ -28,8 +29,24 @@ import requests
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 DATA_DIR = os.path.join(ROOT, "data")
 TRAINING_CSV = os.path.join(DATA_DIR, "modeldata_h2s_nofill.parquet")
-PROD_MODEL = os.path.join(ROOT, "nestor_xgboost_weighted_model.json")
-PROD_PREP = os.path.join(ROOT, "nestor_preprocessing_info.json")
+
+# Select production model variant via H2S_MODEL_VARIANT env var.
+# Supported values: random_forest (default), xgboost_base, xgboost_smote
+# Each variant lives under data/startmodels/<variant>/
+_VARIANT_EXTS = {
+    "random_forest": "model.joblib",
+    "xgboost_base": "model.json",
+    "xgboost_smote": "model.json",
+}
+PROD_VARIANT = os.environ.get("H2S_MODEL_VARIANT", "random_forest")
+if PROD_VARIANT not in _VARIANT_EXTS:
+    raise SystemExit(
+        f"Unknown H2S_MODEL_VARIANT={PROD_VARIANT!r}. "
+        f"Choose from: {', '.join(_VARIANT_EXTS)}"
+    )
+_variant_dir = os.path.join(DATA_DIR, "startmodels", PROD_VARIANT)
+PROD_MODEL = os.path.join(_variant_dir, _VARIANT_EXTS[PROD_VARIANT])
+PROD_PREP  = os.path.join(_variant_dir, "nestor_preprocessing_info.json")
 
 # NESTOR - BES site coords (Imperial Beach / Tijuana border area)
 LATITUDE = 32.545
@@ -221,12 +238,18 @@ def _add_derived_features(df: pd.DataFrame, time_col: str = "date") -> pd.DataFr
 # STEP 2: Train fresh models on Dec 2025 training data
 # ===========================================================================
 
-def load_training_data() -> pd.DataFrame:
+def load_training_data(filter_zero_h2s: bool = True) -> pd.DataFrame:
     from h2s.training.relabeling import apply_categorization
 
     df = pd.read_parquet(TRAINING_CSV)
     df = df[df["site_name"] == SITE].copy()
     df["time"] = pd.to_datetime(df["time"]).dt.tz_convert(None)
+
+    if filter_zero_h2s:
+        before = len(df)
+        df = df[df["H2S"].notna() & (df["H2S"] > 0)].copy()
+        print(f"  --filter-zero-h2s: dropped {before - len(df)} rows with H2S=0 or NaN")
+
     df = apply_categorization(df, h2s_column="H2S")
 
     avail = [f for f in TRAIN_FEATURES if f in df.columns]
@@ -471,6 +494,22 @@ def print_hourly(preds: pd.DataFrame, label: str):
 # ===========================================================================
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="H2S end-to-end pipeline test")
+    parser.add_argument(
+        "--no-zero-h2s",
+        dest="filter_zero_h2s",
+        action="store_true",
+        default=True,
+        help="Exclude H2S=0/NaN rows from training (default: on)",
+    )
+    parser.add_argument(
+        "--with-zero-h2s",
+        dest="filter_zero_h2s",
+        action="store_false",
+        help="Include H2S=0/NaN rows in training (overrides default)",
+    )
+    args = parser.parse_args()
+
     now_utc = datetime.now(timezone.utc)
     today = now_utc.date()
     tomorrow = today + timedelta(days=1)
@@ -479,6 +518,9 @@ if __name__ == "__main__":
     print("=" * 65)
     print("  H2S PREDICTION PIPELINE — END-TO-END TEST")
     print(f"  Today: {today}   Tomorrow: {tomorrow}")
+    print(f"  Production model: {PROD_VARIANT}  (H2S_MODEL_VARIANT)")
+    if not args.filter_zero_h2s:
+        print("  Mode: --with-zero-h2s (H2S=0/NaN rows included in training)")
     print("=" * 65)
 
     # --- Step 1: Weather ---
@@ -497,7 +539,7 @@ if __name__ == "__main__":
 
     # --- Step 2: Train ---
     print("\n[2/3] TRAINING MODELS")
-    train_df = load_training_data()
+    train_df = load_training_data(filter_zero_h2s=args.filter_zero_h2s)
     model_base,  lm_base,  feat_base,  _  = train_variant(train_df, "xgboost_base")
     model_smote, lm_smote, feat_smote, _  = train_variant(train_df, "xgboost_smote")
     model_rf,    lm_rf,    feat_rf,    _  = train_variant(train_df, "random_forest")
