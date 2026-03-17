@@ -110,7 +110,12 @@ def _KEY(name: str) -> dg.AssetKey:
             str,
             default_value="NESTOR - BES",
             description="Site to filter training data (NESTOR - BES, IB CIVIC CTR, SAN YSIDRO)"
-        )
+        ),
+        "filter_zero_h2s": dg.Field(
+            bool,
+            default_value=False,
+            description="Drop rows where H2S == 0 or NaN (test: does removing zero/null readings improve model?)"
+        ),
     }
 )
 def monthly_training_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
@@ -211,6 +216,13 @@ def monthly_training_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
     df = df[df['h2s_measured'] == True].copy()  # noqa: E712
     context.log.info(f"Filtered to valid H2S measurements: {len(df)} rows")
 
+    # Optionally drop rows where H2S is zero or NaN
+    if context.op_config["filter_zero_h2s"]:
+        before = len(df)
+        df = df[df['H2S'].notna() & (df['H2S'] > 0)].copy()
+        dropped = before - len(df)
+        context.log.info(f"filter_zero_h2s=True: dropped {dropped} rows with H2S=0 or NaN, {len(df)} remaining")
+
     # Log H2S value distribution
     h2s_stats = df['H2S'].describe()
     context.log.info(f"H2S distribution:\n{h2s_stats}")
@@ -219,6 +231,7 @@ def monthly_training_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
     context.add_output_metadata({
         "total_rows": len(df),
         "site": site_filter,
+        "filter_zero_h2s": context.op_config["filter_zero_h2s"],
         "date_range_start": str(df['time'].min()),
         "date_range_end": str(df['time'].max()),
         "h2s_min": float(df['H2S'].min()),
