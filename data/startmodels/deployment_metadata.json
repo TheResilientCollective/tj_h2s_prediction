@@ -1,0 +1,45 @@
+{
+  "deployed_at": "2026-03-17T07:19:15.045710",
+  "deployment_id": "2026_03_17_071909",
+  "model_path": "tijuana/forecast/models/nestor_xgboost_weighted_model.json",
+  "preprocessing_path": "tijuana/forecast/models/nestor_preprocessing_info.json",
+  "source_model_path": "tijuana/forecast/models/training/2026_02/xgboost_smote/model.json",
+  "approval_metadata": {
+    "approved_at": "2026-03-17T07:19:06.836490",
+    "approved_by": "manual",
+    "automated_recommendation": false,
+    "validation_period": "2026_02",
+    "variant": "xgboost_smote",
+    "new_model_metrics": {
+      "balanced_accuracy": 0.29110920488287695,
+      "confusion_matrix": [
+        [
+          983,
+          309,
+          458
+        ],
+        [
+          69,
+          7,
+          22
+        ],
+        [
+          242,
+          87,
+          104
+        ]
+      ],
+      "precision_green": 0.759659969088099,
+      "recall_green": 0.5617142857142857,
+      "f1_green": 0.6458607095926413,
+      "precision_orange": 0.017369727047146403,
+      "recall_orange": 0.07142857142857142,
+      "f1_orange": 0.027944111776447105,
+      "precision_yellow": 0.1780821917808219,
+      "recall_yellow": 0.24018475750577367,
+      "f1_yellow": 0.20452310717797442
+    },
+    "quality_gates_passed": false
+  },
+  "deployment_status": "success"
+}

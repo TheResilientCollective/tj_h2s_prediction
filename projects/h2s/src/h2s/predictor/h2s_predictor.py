@@ -18,6 +18,52 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 
+# Default Hill/log-logistic parameters
+# c = EC50 (H2S concentration at 50% risk) = 5 ppb (green/yellow boundary)
+# b = Hill coefficient (slope) = 1.23
+_HILL_C = 5.0
+_HILL_B = 1.23
+
+# Representative H2S concentrations for each class (used to compute expected H2S)
+_CLASS_H2S_PPB = {"green": 2.5, "yellow": 17.5, "orange": 50.0}
+
+
+def hill_forward(x, c: float = _HILL_C, b: float = _HILL_B) -> np.ndarray:
+    """Map H2S concentration (ppb) to risk score [0, 1] via the Hill/log-logistic function.
+
+    f(x) = x^b / (c^b + x^b)
+
+    Args:
+        x: H2S concentration in ppb (≥ 0)
+        c: EC50 — concentration at which risk = 0.5 (default 5 ppb)
+        b: Hill coefficient / slope (default 1.23)
+
+    Returns:
+        Risk score in [0, 1]
+    """
+    x = np.asarray(x, dtype=float)
+    x_b = np.power(np.clip(x, 0, None), b)
+    c_b = np.power(c, b)
+    return x_b / (c_b + x_b)
+
+
+def hill_backward(risk, c: float = _HILL_C, b: float = _HILL_B) -> np.ndarray:
+    """Map risk score [0, 1) to equivalent H2S concentration (ppb) — inverse Hill function.
+
+    x = c * (f / (1 - f))^(1/b)
+
+    Args:
+        risk: Risk score in [0, 1) — values of 1.0 return inf
+        c: EC50 (default 5 ppb)
+        b: Hill coefficient (default 1.23)
+
+    Returns:
+        Equivalent H2S concentration in ppb
+    """
+    risk = np.asarray(risk, dtype=float)
+    odds = risk / (1.0 - risk)
+    return c * np.power(odds, 1.0 / b)
+
 
 class H2SPredictor:
     """H2S Forecasting Model with S3 support and JSON-based metadata."""
@@ -45,18 +91,15 @@ class H2SPredictor:
     def from_local(cls, model_path: str, preprocessing_json_path: str):
         """Load model and preprocessing info from local filesystem.
 
-        Args:
-            model_path: Path to XGBoost model file (.json)
-            preprocessing_json_path: Path to preprocessing info file (.json)
-
-        Returns:
-            H2SPredictor instance
+        Supports XGBoost (.json) and scikit-learn/joblib (.joblib) models.
         """
-        # Load XGBoost model
-        model = xgb.XGBClassifier()
-        model.load_model(model_path)
+        if model_path.endswith('.joblib'):
+            import joblib
+            model = joblib.load(model_path)
+        else:
+            model = xgb.XGBClassifier()
+            model.load_model(model_path)
 
-        # Load preprocessing info from JSON
         with open(preprocessing_json_path, 'r') as f:
             prep_info = json.load(f)
 
@@ -112,23 +155,24 @@ class H2SPredictor:
         """
         df = df.copy()
 
-        # Convert time to datetime if present
-        if 'date' in df.columns:
-            df['date'] = pd.to_datetime(df['date'])
-
-           #  # Extract temporal features
-           #  df['hour'] = df['date'].dt.hour
-           #  df['day_of_week'] = df['date'].dt.dayofweek
-           # # df['month'] = df['date'].dt.month
-           #
-           #  # Cyclical encoding for hour
-           #  df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
-           #  df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
+        # Sort by time before computing rolling features
+        time_col = next((c for c in ['date', 'time'] if c in df.columns), None)
+        if time_col:
+            df[time_col] = pd.to_datetime(df[time_col])
+            df = df.sort_values(time_col).reset_index(drop=True)
 
         # Wind direction cyclical encoding
         if 'wind_direction_10m' in df.columns:
             df['wind_direction_sin'] = np.sin(np.radians(df['wind_direction_10m']))
             df['wind_direction_cos'] = np.cos(np.radians(df['wind_direction_10m']))
+
+        # Rolling wind features (sort by time if available, else assume already sorted)
+        if 'wind_speed_10m' in df.columns:
+            for h in (2, 3, 4):
+                df[f'wind_speed_10m_avg_{h}h'] = df['wind_speed_10m'].rolling(h, min_periods=1).mean()
+        if 'wind_gusts_10m' in df.columns:
+            for h in (2, 3, 4):
+                df[f'wind_gusts_10m_max_{h}h'] = df['wind_gusts_10m'].rolling(h, min_periods=1).max()
 
         # Interaction features
         if 'wind_speed_10m' in df.columns and 'temperature_2m' in df.columns:
@@ -139,15 +183,13 @@ class H2SPredictor:
 
         # Encode categorical variables using dict lookups (instead of LabelEncoder)
         if 'wind_direction_categorical' in df.columns and self.wind_cat_mapping:
-            df['wind_direction_cat_encoded'] = df['wind_direction_categorical'].map(self.wind_cat_mapping).fillna(-1).astype(int)
+            df['wind_direction_categorical_encoded'] = df['wind_direction_categorical'].map(self.wind_cat_mapping).fillna(-1).astype(int)
         else:
-            # Default to -1 if column missing (unknown category)
-            df['wind_direction_cat_encoded'] = -1
+            df['wind_direction_categorical_encoded'] = -1
 
         if 'tidal_state' in df.columns and self.tidal_mapping:
             df['tidal_state_encoded'] = df['tidal_state'].map(self.tidal_mapping).fillna(-1).astype(int)
         else:
-            # Default to -1 if column missing (unknown category)
             df['tidal_state_encoded'] = -1
 
         # Add missing columns with default values (0 for missing measurements)
@@ -196,6 +238,15 @@ class H2SPredictor:
 
         # Add alert flag
         result['alert'] = result['predicted_category'].isin(['orange', 'yellow'])
+
+        # h2s_risk: Hill-function risk score derived from expected H2S concentration.
+        # Expected H2S = weighted sum of class-representative concentrations.
+        expected_h2s = (
+            result['probability_green'] * _CLASS_H2S_PPB['green']
+            + result['probability_yellow'] * _CLASS_H2S_PPB['yellow']
+            + result['probability_orange'] * _CLASS_H2S_PPB['orange']
+        )
+        result['h2s_risk'] = hill_forward(expected_h2s.values)
 
         return result
 
