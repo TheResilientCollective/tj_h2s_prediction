@@ -28,6 +28,8 @@ def defs():
     # Import prediction pipeline assets
     from h2s.defs.h2s_pipeline import (
         h2s_model_artifacts,
+        streamflow_forecast,
+        tidal_forecast,
         raw_environmental_data,
         actual_h2s_data,
         preprocessed_features,
@@ -81,8 +83,10 @@ def defs():
     # Create definitions with assets, jobs, schedules, and resources
     all_defs = Definitions(
         assets=[
-            # Prediction Pipeline Assets (14 assets)
+            # Prediction Pipeline Assets (16 assets)
             h2s_model_artifacts,
+            streamflow_forecast,
+            tidal_forecast,
             raw_environmental_data,
             actual_h2s_data,
             preprocessed_features,
