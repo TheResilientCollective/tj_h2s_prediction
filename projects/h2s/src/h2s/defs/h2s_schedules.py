@@ -17,6 +17,8 @@ import dagster as dg
 
 from h2s.defs.h2s_pipeline import (
     h2s_model_artifacts,
+    streamflow_forecast,
+    tidal_forecast,
     raw_environmental_data,
     preprocessed_features,
     h2s_predictions,
@@ -202,6 +204,8 @@ forecast_prediction_job = dg.define_asset_job(
     description="Run full H2S prediction pipeline and export results to S3",
     selection=dg.AssetSelection.assets(
         h2s_model_artifacts,
+        streamflow_forecast,
+        tidal_forecast,
         raw_environmental_data,
         preprocessed_features,
         h2s_predictions,

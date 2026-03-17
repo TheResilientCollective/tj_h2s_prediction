@@ -1,102 +1,152 @@
 #!/usr/bin/env python3
-"""Upload H2S model files to S3.
+"""Upload H2S model files from data/startmodels/ to S3.
 
-Uploads:
-1. nestor_xgboost_weighted_model.json (4.4 MB)
-2. nestor_preprocessing_info.json (converted from .pkl)
+Structure of data/startmodels/:
+    xgboost_base/
+        model.json                     → MODEL_PATH/xgboost_base/model.json
+        nestor_preprocessing_info.json → used as primary preprocessing info
+    xgboost_smote/
+        model.json                     → MODEL_PATH/xgboost_smote/model.json
+        nestor_preprocessing_info.json
+    random_forest/
+        model.joblib                   → MODEL_PATH/random_forest/model.joblib
+        nestor_preprocessing_info.json
 
-To: s3://test/tijuana/forecast/models/
+The --primary flag (default: xgboost_smote) also copies that variant's model to
+MODEL_PATH/nestor_xgboost_weighted_model.json (the path h2s_model_artifacts loads).
+
+Usage:
+    cd projects/h2s && uv run python ../../upload_models_to_s3.py
+    cd projects/h2s && uv run python ../../upload_models_to_s3.py --primary xgboost_base
+    cd projects/h2s && uv run python ../../upload_models_to_s3.py --primary random_forest
 """
 
 import os
 import sys
-from io import BytesIO
+import argparse
+from pathlib import Path
 
 # Add h2s project to path
-h2s_path = "/Users/valentin/development/dev_resilient/tj_h2s_prediction/projects/h2s/src"
+h2s_path = str(Path(__file__).parent / "projects/h2s/src")
 if h2s_path not in sys.path:
     sys.path.insert(0, h2s_path)
 
 from h2s.resources.minio import S3Resource
 
-# Paths
-base_dir = "/Users/valentin/development/dev_resilient/tj_h2s_prediction"
-model_file = f"{base_dir}/nestor_xgboost_weighted_model.json"
-prep_file = f"{base_dir}/nestor_preprocessing_info.json"
+BASE_DIR = Path(__file__).parent
+STARTMODELS_DIR = BASE_DIR / "data" / "startmodels"
+S3_MODEL_BASE = "tijuana/forecast/models"
 
-# S3 paths
-s3_model_path = "tijuana/forecast/models/nestor_xgboost_weighted_model.json"
-s3_prep_path = "tijuana/forecast/models/nestor_preprocessing_info.json"
+VARIANTS = {
+    "xgboost_base":  ("model.json",   "application/json"),
+    "xgboost_smote": ("model.json",   "application/json"),
+    "random_forest": ("model.joblib", "application/octet-stream"),
+}
 
-def main():
-    print("="*80)
-    print("H2S Model Upload to S3")
-    print("="*80)
 
-    # Check files exist
-    if not os.path.exists(model_file):
-        print(f"✗ Error: Model file not found: {model_file}")
-        sys.exit(1)
+def load_env():
+    env_file = BASE_DIR / "projects" / "h2s" / ".env"
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip())
 
-    if not os.path.exists(prep_file):
-        print(f"✗ Error: Preprocessing file not found: {prep_file}")
-        print("  Did you run convert_preprocessing.py?")
-        sys.exit(1)
 
-    print(f"✓ Found model file: {os.path.getsize(model_file) / 1024 / 1024:.1f} MB")
-    print(f"✓ Found preprocessing file: {os.path.getsize(prep_file)} bytes")
-    print()
-
-    # Initialize S3 resource
-    print("Connecting to S3...")
-    s3 = S3Resource(
-        S3_BUCKET=os.getenv('S3_BUCKET', 'test'),
-        S3_ADDRESS=os.getenv('S3_ADDRESS'),
-        S3_PORT=os.getenv('S3_PORT'),
-        S3_USE_SSL=os.getenv('S3_USE_SSL', 'true').lower() == 'true',
-        S3_ACCESS_KEY=os.getenv('S3_ACCESS_KEY'),
-        S3_SECRET_KEY=os.getenv('S3_SECRET_KEY'),
+def make_s3():
+    return S3Resource(
+        S3_BUCKET=os.environ.get("S3_BUCKET", "test"),
+        S3_ADDRESS=os.environ["S3_ADDRESS"],
+        S3_PORT=os.environ["S3_PORT"],
+        S3_USE_SSL=os.environ.get("S3_USE_SSL", "true").lower() == "true",
+        S3_ACCESS_KEY=os.environ["S3_ACCESS_KEY"],
+        S3_SECRET_KEY=os.environ["S3_SECRET_KEY"],
     )
 
-    print(f"✓ Connected to S3: {s3.S3_ADDRESS}:{s3.S3_PORT}")
-    print(f"  Bucket: {s3.S3_BUCKET}")
+
+def upload(s3, local_path: Path, s3_path: str, content_type: str):
+    data = local_path.read_bytes()
+    s3.putFile(data=data, path=s3_path, bucket=s3.S3_BUCKET, content_type=content_type)
+    print(f"  ✓ {s3_path}  ({len(data)/1024:.1f} KB)")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Upload H2S models from data/startmodels/ to S3")
+    parser.add_argument(
+        "--primary",
+        default="xgboost_smote",
+        choices=list(VARIANTS),
+        help="Variant to deploy as the primary production model (default: xgboost_smote)",
+    )
+    parser.add_argument(
+        "--skip-variants",
+        action="store_true",
+        help="Only upload the primary model + preprocessing info, skip individual variant paths",
+    )
+    args = parser.parse_args()
+
+    load_env()
+
+    print("=" * 70)
+    print("H2S Model Upload  —  data/startmodels/ → S3")
+    print("=" * 70)
+    print(f"Source: {STARTMODELS_DIR}")
+    print(f"Primary model variant: {args.primary}")
     print()
 
-    # Upload model
-    print(f"Uploading model to S3...")
-    with open(model_file, 'rb') as f:
-        model_data = BytesIO(f.read())
-        s3.putFile(
-            data=model_data.read(),
-            path=s3_model_path,
-            bucket=s3.S3_BUCKET,
-            content_type='application/json'
-        )
-    print(f"✓ Uploaded: {s3_model_path}")
+    # Validate source directory
+    if not STARTMODELS_DIR.exists():
+        print(f"✗ data/startmodels/ not found. Run the download section first.")
+        sys.exit(1)
 
-    # Upload preprocessing info
-    print(f"Uploading preprocessing metadata to S3...")
-    with open(prep_file, 'rb') as f:
-        prep_data = BytesIO(f.read())
-        s3.putFile(
-            data=prep_data.read(),
-            path=s3_prep_path,
-            bucket=s3.S3_BUCKET,
-            content_type='application/json'
-        )
-    print(f"✓ Uploaded: {s3_prep_path}")
+    s3 = make_s3()
+    print(f"Connected: {s3.S3_ADDRESS}:{s3.S3_PORT}  bucket={s3.S3_BUCKET}")
+    print()
 
+    # --- Upload preprocessing info (from primary variant) ---
+    prep_local = STARTMODELS_DIR / args.primary / "nestor_preprocessing_info.json"
+    if not prep_local.exists():
+        print(f"✗ Preprocessing info not found: {prep_local}")
+        sys.exit(1)
+
+    print("Uploading preprocessing info...")
+    upload(s3, prep_local, f"{S3_MODEL_BASE}/nestor_preprocessing_info.json", "application/json")
     print()
-    print("="*80)
-    print("✓ Upload Complete!")
-    print("="*80)
-    print(f"\nModel files now available at:")
-    print(f"  s3://{s3.S3_BUCKET}/{s3_model_path}")
-    print(f"  s3://{s3.S3_BUCKET}/{s3_prep_path}")
+
+    # --- Upload primary production model ---
+    primary_filename, primary_ct = VARIANTS[args.primary]
+    primary_local = STARTMODELS_DIR / args.primary / primary_filename
+    if not primary_local.exists():
+        print(f"✗ Primary model not found: {primary_local}")
+        sys.exit(1)
+
+    print(f"Uploading primary production model ({args.primary} → nestor_xgboost_weighted_model.json)...")
+    upload(s3, primary_local, f"{S3_MODEL_BASE}/nestor_xgboost_weighted_model.json", primary_ct)
     print()
-    print("You can now run:")
-    print("  cd projects/h2s && uv run dg dev")
+
+    # --- Upload variant models ---
+    if not args.skip_variants:
+        print("Uploading variant models...")
+        for variant, (filename, ct) in VARIANTS.items():
+            local = STARTMODELS_DIR / variant / filename
+            if local.exists():
+                upload(s3, local, f"{S3_MODEL_BASE}/{variant}/{filename}", ct)
+            else:
+                print(f"  ⚠ skipped {variant}/{filename}  (not found locally)")
+        print()
+
+    print("=" * 70)
+    print("✓ Upload complete")
+    print("=" * 70)
     print()
+    print(f"Primary model:  s3://{s3.S3_BUCKET}/{S3_MODEL_BASE}/nestor_xgboost_weighted_model.json")
+    print(f"Preprocessing:  s3://{s3.S3_BUCKET}/{S3_MODEL_BASE}/nestor_preprocessing_info.json")
+    if not args.skip_variants:
+        for variant, (filename, _) in VARIANTS.items():
+            print(f"Variant:        s3://{s3.S3_BUCKET}/{S3_MODEL_BASE}/{variant}/{filename}")
+    print()
+
 
 if __name__ == "__main__":
     main()

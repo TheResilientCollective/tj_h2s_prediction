@@ -512,6 +512,8 @@ def validation_data(
         "max_depth": dg.Field(int, default_value=6, description="Maximum tree depth"),
         "learning_rate": dg.Field(float, default_value=0.1, description="Learning rate"),
         "use_class_weights": dg.Field(bool, default_value=True, description="Auto-balance class weights"),
+        "hazard_weight_multiplier": dg.Field(float, default_value=3.0,
+            description="Extra weight multiplier applied to orange and yellow classes"),
     }
 )
 def trained_model_cv(
@@ -629,6 +631,7 @@ def trained_model_cv(
             use_smote=use_smote,
             random_state=42,
             logger=context.log,
+            hazard_multiplier=context.op_config['hazard_weight_multiplier'],
         )
     else:
         model, cv_metrics = train_model_with_cv(
@@ -643,6 +646,7 @@ def trained_model_cv(
             use_smote=use_smote,
             random_state=42,
             logger=context.log,
+            hazard_multiplier=context.op_config['hazard_weight_multiplier'],
         )
 
     # Log CV results
@@ -677,6 +681,7 @@ def trained_model_cv(
             'max_depth': context.op_config['max_depth'],
             'learning_rate': context.op_config['learning_rate'],
             'use_class_weights': context.op_config['use_class_weights'],
+            'hazard_weight_multiplier': context.op_config['hazard_weight_multiplier'],
             'use_smote': use_smote,
         },
         'cv_mean_balanced_accuracy': cv_summary['balanced_accuracy_mean'],
