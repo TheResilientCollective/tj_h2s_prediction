@@ -293,6 +293,107 @@ def tidal_forecast(context: dg.AssetExecutionContext) -> pd.DataFrame:
     key_prefix="h2s",
     group_name="h2s_prediction",
     required_resource_keys={"s3"},
+    kinds={"python", "s3"},
+    description="SBIWTP effluent operational data: try S3 feed, fall back to 30-day persistence defaults",
+    config_schema={
+        "sbiwtp_30d_mean_mgd": dg.Field(
+            float,
+            default_value=23.5,
+            description="30-day rolling mean SBIWTP flow (MGD) used for persistence fallback",
+        ),
+        "forecast_hours": dg.Field(
+            int,
+            default_value=240,
+            description="Number of forecast hours to generate (must match weather forecast window)",
+        ),
+    },
+)
+def sbiwtp_operational_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
+    """Load SBIWTP effluent flow data and compute hourly features.
+
+    Tries to load from S3: latest/tijuana/sbiwtp/latest.csv
+    Falls back to persistence (30-day rolling mean = ~23.5 MGD).
+
+    Hourly features computed:
+    - sbiwtp_flow_mgd: daily flow in MGD
+    - sbiwtp_hourly_mgd: diurnal distribution of daily flow
+    - sbiwtp_anomaly: (flow - mean) / mean
+    - sbiwtp_deficit: max(0, mean - flow)
+    - sbiwtp_flow_x_temp: flow × temperature (proxy for temperature available in forecast)
+    - sbiwtp_sli: simplified accumulation-decay index
+    """
+    s3 = context.resources.s3
+    mean_flow = context.op_config["sbiwtp_30d_mean_mgd"]
+    forecast_hours = context.op_config["forecast_hours"]
+
+    # Diurnal factors for distributing daily flow to hourly (from SBIWTP plan)
+    DIURNAL_FACTORS = [
+        0.72, 0.68, 0.65, 0.63, 0.65, 0.72, 0.88, 1.07,
+        1.18, 1.22, 1.23, 1.22, 1.18, 1.14, 1.11, 1.10,
+        1.09, 1.08, 1.06, 1.03, 0.98, 0.92, 0.85, 0.78,
+    ]
+
+    daily_flow_mgd = mean_flow
+    source = "persistence"
+
+    try:
+        stream = s3.get_stream(path="latest/tijuana/sbiwtp/latest.csv")
+        sbiwtp_raw = pd.read_csv(stream)
+        if 'flow_mgd' in sbiwtp_raw.columns and len(sbiwtp_raw) > 0:
+            daily_flow_mgd = float(sbiwtp_raw['flow_mgd'].iloc[-1])
+            source = "s3"
+            context.log.info(f"✓ Loaded SBIWTP flow from S3: {daily_flow_mgd:.1f} MGD")
+    except Exception as e:
+        context.log.info(f"SBIWTP S3 feed unavailable ({e}), using persistence ({mean_flow:.1f} MGD)")
+
+    anomaly = (daily_flow_mgd - mean_flow) / max(mean_flow, 0.01)
+    deficit = max(0.0, mean_flow - daily_flow_mgd)
+
+    # Build per-hour rows
+    now = pd.Timestamp.utcnow().floor("h").tz_localize(None)
+    rows = []
+    sli = 0.0  # accumulation-decay index
+    sli_decay = 0.9
+    sli_factor = daily_flow_mgd / max(mean_flow, 0.01)
+
+    for i in range(forecast_hours):
+        ts = now + pd.Timedelta(hours=i)
+        hour_factor = DIURNAL_FACTORS[ts.hour]
+        hourly_mgd = daily_flow_mgd * hour_factor / 24
+
+        # SLI: accumulates when above mean, decays otherwise
+        sli = sli * sli_decay + (sli_factor - 1.0) * 0.1
+        sli = max(-1.0, min(1.0, sli))
+
+        rows.append({
+            'time': ts,
+            'sbiwtp_flow_mgd': daily_flow_mgd,
+            'sbiwtp_hourly_mgd': hourly_mgd,
+            'sbiwtp_anomaly': anomaly,
+            'sbiwtp_deficit': deficit,
+            'sbiwtp_flow_x_temp': hourly_mgd,  # temperature multiplier applied in merge
+            'sbiwtp_sli': sli,
+        })
+
+    sbiwtp_df = pd.DataFrame(rows)
+    context.log.info(
+        f"✓ SBIWTP operational data: {len(sbiwtp_df)} hourly rows "
+        f"(source={source}, flow={daily_flow_mgd:.1f} MGD, anomaly={anomaly:+.2f})"
+    )
+    context.add_output_metadata({
+        "source": source,
+        "flow_mgd": daily_flow_mgd,
+        "anomaly": round(anomaly, 3),
+        "deficit": round(deficit, 2),
+        "rows": len(sbiwtp_df),
+    })
+    return sbiwtp_df
+
+
+@dg.asset(
+    key_prefix="h2s",
+    group_name="h2s_prediction",
+    required_resource_keys={"s3"},
     kinds={"csv", "s3"},
     description="Environmental data loaded from S3 or local test data",
     config_schema={
@@ -310,12 +411,14 @@ def tidal_forecast(context: dg.AssetExecutionContext) -> pd.DataFrame:
     ins={
         "streamflow_forecast": dg.AssetIn(key=_KEY("streamflow_forecast")),
         "tidal_forecast": dg.AssetIn(key=_KEY("tidal_forecast")),
+        "sbiwtp_operational_data": dg.AssetIn(key=_KEY("sbiwtp_operational_data")),
     },
 )
 def raw_environmental_data(
     context: dg.AssetExecutionContext,
     streamflow_forecast: pd.DataFrame,
     tidal_forecast: pd.DataFrame,
+    sbiwtp_operational_data: pd.DataFrame,
 ) -> pd.DataFrame:
     """Load environmental data from S3 or local test data.
 
@@ -442,6 +545,26 @@ def raw_environmental_data(
     context.log.info(f"✓ Tidal merged: {tide_matched}/{len(df)} rows matched")
     if tide_matched < len(df):
         context.log.warning(f"  {len(df) - tide_matched} rows have no tidal match — will default to 0.0 in preprocessor")
+
+    # --- Merge SBIWTP operational data ---
+    sbiwtp_cols = ['sbiwtp_flow_mgd', 'sbiwtp_anomaly', 'sbiwtp_deficit',
+                   'sbiwtp_flow_x_temp', 'sbiwtp_hourly_mgd', 'sbiwtp_sli']
+    available_sbiwtp_cols = [c for c in sbiwtp_cols if c in sbiwtp_operational_data.columns]
+    if available_sbiwtp_cols:
+        sbiwtp_t = sbiwtp_operational_data.copy()
+        sbiwtp_times = pd.to_datetime(sbiwtp_t["time"])
+        if sbiwtp_times.dt.tz is not None:
+            sbiwtp_times = sbiwtp_times.dt.tz_convert("UTC").dt.tz_localize(None)
+        sbiwtp_t["_merge_time"] = sbiwtp_times.dt.floor("h")
+        sbiwtp_merge = sbiwtp_t[["_merge_time"] + available_sbiwtp_cols].drop_duplicates("_merge_time")
+        df = df.merge(sbiwtp_merge, on="_merge_time", how="left")
+        # Apply temperature multiplier to sbiwtp_flow_x_temp if temperature available
+        if "sbiwtp_flow_x_temp" in df.columns and "temperature_2m" in df.columns:
+            df["sbiwtp_flow_x_temp"] = df["sbiwtp_hourly_mgd"] * df["temperature_2m"]
+        sbiwtp_matched = int(df[available_sbiwtp_cols[0]].notna().sum())
+        context.log.info(f"✓ SBIWTP merged: {sbiwtp_matched}/{len(df)} rows matched")
+    else:
+        context.log.warning("No SBIWTP columns found in sbiwtp_operational_data")
 
     df = df.drop(columns=["_merge_time"])
 
@@ -979,6 +1102,65 @@ def prediction_timeline_viz(
 
     context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
     context.log.info(f"✓ Uploaded to S3: {latest_path}")
+
+
+@dg.asset(
+    key_prefix="h2s",
+    group_name="h2s_visualization",
+    name="cross_correlation_viz",
+    required_resource_keys={"s3"},
+    description="Time-lagged cross-correlation between actual H2S and environmental drivers",
+    auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
+    ins={
+        "raw_environmental_data": dg.AssetIn(key=_KEY("raw_environmental_data")),
+    },
+)
+def cross_correlation_viz(
+    context: dg.AssetExecutionContext,
+    raw_environmental_data: pd.DataFrame,
+) -> None:
+    """Generate and upload cross-correlation plot to S3.
+
+    Requires actual H2S measurements in raw_environmental_data.
+    Computes corr(H2S(t), feature(t - lag)) for each environmental driver
+    at lags -24 h … +24 h, revealing which features *precede* H2S events.
+    Skipped gracefully if no H2S measurements are present.
+    """
+    from h2s.predictor.visualizations import generate_cross_correlation_viz
+
+    s3_resource = context.resources.s3
+
+    h2s_cols = [col for col in raw_environmental_data.columns
+                if col.upper() == "H2S" or "h2s" in col.lower()]
+
+    if not h2s_cols:
+        context.log.warning("⚠ No H2S measurements in raw_environmental_data — skipping cross-correlation")
+        context.add_output_metadata({"status": "skipped", "reason": "No H2S column"})
+        return
+
+    h2s_col = "H2S" if "H2S" in raw_environmental_data.columns else h2s_cols[0]
+    n_valid = int(raw_environmental_data[h2s_col].notna().sum())
+
+    if n_valid < 48:
+        context.log.warning(f"⚠ Only {n_valid} H2S measurements — need ≥48 for meaningful cross-correlation, skipping")
+        context.add_output_metadata({"status": "skipped", "reason": f"Insufficient H2S rows: {n_valid}"})
+        return
+
+    context.log.info(f"Computing cross-correlation over {n_valid} H2S measurements...")
+
+    plot_bytes = generate_cross_correlation_viz(raw_environmental_data, h2s_col=h2s_col)
+
+    timestamp = datetime.now().strftime("%Y-%m-%d")
+    timestamped_path = f"{VISUALIZATIONS_PATH}/{timestamp}/cross_correlation.png"
+    s3_resource.putFile(plot_bytes.read(), timestamped_path, bucket=s3_resource.S3_BUCKET, content_type="image/png")
+
+    plot_bytes.seek(0)
+    latest_path = f"latest/{LATEST_FORECAST_DATA}/visualizations/cross_correlation.png"
+    s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type="image/png")
+
+    context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
+    context.log.info(f"✓ Uploaded to S3: {latest_path}")
+    context.add_output_metadata({"status": "ok", "h2s_rows": n_valid, "s3_path": timestamped_path})
 
 
 @dg.asset(

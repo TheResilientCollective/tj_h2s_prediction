@@ -363,6 +363,170 @@ def generate_model_comparison(predictions: pd.DataFrame, actuals: pd.DataFrame,
     return buf
 
 
+def generate_cross_correlation_viz(
+    df: pd.DataFrame,
+    h2s_col: str = "H2S",
+    max_lag_hours: int = 24,
+    top_n: int = 6,
+) -> BytesIO:
+    """Compute and plot time-lagged cross-correlation between H2S and environmental features.
+
+    For each feature, computes corr(H2S(t), feature(t - lag)) for lags in
+    [-max_lag_hours, +max_lag_hours].  A positive lag means the feature *precedes* H2S
+    (feature at time t-lag predicts H2S at time t).
+
+    Args:
+        df: DataFrame with a datetime index (or 'time'/'date' column) and H2S + feature columns.
+        h2s_col: Column name for actual H2S measurements.
+        max_lag_hours: Maximum lag in hours to compute (both positive and negative).
+        top_n: Number of features to highlight in the line-plot panel.
+
+    Returns:
+        BytesIO PNG image.
+    """
+    CANDIDATE_FEATURES = [
+        "tide_height",
+        "Flow (m^3/s)--Border",
+        "wind_speed_10m",
+        "temperature_2m",
+        "relative_humidity_2m",
+        "precipitation",
+        "surface_pressure",
+        "cloud_cover",
+        "wind_direction_10m",
+    ]
+
+    # --- Prepare a clean, time-sorted series ---
+    data = df.copy()
+    if "time" in data.columns:
+        data = data.set_index(pd.to_datetime(data["time"])).sort_index()
+    elif "date" in data.columns:
+        data = data.set_index(pd.to_datetime(data["date"])).sort_index()
+
+    if h2s_col not in data.columns:
+        # Return empty plot
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.text(0.5, 0.5, f"Column '{h2s_col}' not found — cross-correlation unavailable",
+                ha="center", va="center", fontsize=12)
+        ax.axis("off")
+        buf = BytesIO()
+        plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+        buf.seek(0)
+        plt.close(fig)
+        return buf
+
+    h2s = data[h2s_col].dropna()
+    features = [f for f in CANDIDATE_FEATURES if f in data.columns]
+
+    if not features:
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.text(0.5, 0.5, "No environmental feature columns found for cross-correlation",
+                ha="center", va="center", fontsize=12)
+        ax.axis("off")
+        buf = BytesIO()
+        plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+        buf.seek(0)
+        plt.close(fig)
+        return buf
+
+    lags = list(range(-max_lag_hours, max_lag_hours + 1))
+    corr_matrix = {}
+
+    for feat in features:
+        series = data[feat].reindex(h2s.index)
+        corrs = []
+        for lag in lags:
+            # shift(lag) → feature(t - lag), so positive lag = feature leads H2S
+            shifted = series.shift(lag)
+            valid = pd.concat([h2s, shifted], axis=1).dropna()
+            if len(valid) >= 10:
+                corrs.append(valid.iloc[:, 0].corr(valid.iloc[:, 1]))
+            else:
+                corrs.append(float("nan"))
+        corr_matrix[feat] = corrs
+
+    corr_df = pd.DataFrame(corr_matrix, index=lags)
+
+    # Peak |correlation| for each feature — used to rank top_n and label the heatmap
+    peak_corr = corr_df.abs().max()
+    top_features = peak_corr.nlargest(top_n).index.tolist()
+
+    # --- Layout: heatmap (top) + line chart (bottom) ---
+    fig, (ax_heat, ax_line) = plt.subplots(
+        2, 1, figsize=(14, 10),
+        gridspec_kw={"height_ratios": [1.4, 1]}
+    )
+    fig.suptitle(
+        "Cross-Correlation: H2S vs Environmental Drivers\n"
+        f"(positive lag = feature precedes H2S by N hours)",
+        fontsize=13, fontweight="bold",
+    )
+
+    # Panel 1 — heatmap
+    short_names = {
+        "Flow (m^3/s)--Border": "Flow (m³/s)",
+        "wind_speed_10m": "Wind speed",
+        "temperature_2m": "Temperature",
+        "relative_humidity_2m": "Humidity",
+        "precipitation": "Precipitation",
+        "surface_pressure": "Pressure",
+        "cloud_cover": "Cloud cover",
+        "wind_direction_10m": "Wind dir.",
+        "tide_height": "Tide height",
+    }
+    display_cols = [short_names.get(f, f) for f in corr_df.columns]
+    heat_data = corr_df.T.copy()
+    heat_data.index = display_cols
+
+    # Subsample lag axis to keep heatmap readable
+    step = max(1, max_lag_hours // 12)
+    heat_lags = [l for l in lags if l % step == 0]
+    sns.heatmap(
+        heat_data[heat_lags],
+        ax=ax_heat,
+        cmap="RdBu_r",
+        center=0,
+        vmin=-1,
+        vmax=1,
+        annot=len(features) <= 6,
+        fmt=".2f",
+        linewidths=0.3,
+        cbar_kws={"label": "Pearson r", "shrink": 0.8},
+    )
+    ax_heat.set_xlabel("Lag (hours)", fontsize=10, fontweight="bold")
+    ax_heat.set_ylabel("")
+    ax_heat.set_title("Correlation Heatmap (all features)", fontsize=11)
+    ax_heat.tick_params(axis="x", rotation=0)
+
+    # Panel 2 — top-N line chart
+    palette = plt.get_cmap("tab10")(np.linspace(0, 1, len(top_features)))
+    for feat, color in zip(top_features, palette):
+        display_name = short_names.get(feat, feat)
+        ax_line.plot(lags, corr_df[feat], label=display_name, color=color, linewidth=2)
+        # Mark the lag of maximum absolute correlation
+        peak_lag = corr_df[feat].abs().idxmax()
+        peak_val = corr_df.loc[peak_lag, feat]
+        ax_line.axvline(peak_lag, color=color, linestyle=":", alpha=0.5, linewidth=1)
+        ax_line.scatter([peak_lag], [peak_val], color=color, s=60, zorder=5)
+
+    ax_line.axhline(0, color="black", linewidth=0.8, alpha=0.5)
+    ax_line.axvline(0, color="gray", linewidth=0.8, linestyle="--", alpha=0.5, label="Lag = 0")
+    ax_line.set_xlabel("Lag (hours) — positive = feature leads H2S", fontsize=10, fontweight="bold")
+    ax_line.set_ylabel("Pearson r", fontsize=10, fontweight="bold")
+    ax_line.set_title(f"Top {top_n} Features by Peak |r|", fontsize=11)
+    ax_line.legend(fontsize=8, loc="upper left", ncol=2)
+    ax_line.grid(True, alpha=0.3)
+    ax_line.set_xlim(lags[0], lags[-1])
+
+    plt.tight_layout()
+
+    buf = BytesIO()
+    plt.savefig(buf, format="png", dpi=300, bbox_inches="tight")
+    buf.seek(0)
+    plt.close(fig)
+    return buf
+
+
 def generate_prediction_timeline(predictions: pd.DataFrame, raw_environmental_data: Optional[pd.DataFrame] = None) -> BytesIO:
     """Generate timeline plot of predictions with environmental variables.
 

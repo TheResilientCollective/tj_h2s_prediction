@@ -55,6 +55,18 @@ from h2s.defs.h2s_training_pipeline import (
     model_run_partitions,
 )
 
+from h2s.defs.h2s_multi_station_training import (
+    multi_station_training_data,
+    per_station_trained_models,
+    station_training_report,
+    multi_station_training_job,
+    STATION_PARTITIONS,
+)
+
+from h2s.defs.h2s_daily_pipeline import (
+    daily_analysis_job,
+)
+
 
 # ============================================================================
 # JOB 1: Monthly Data Extraction (monthly partitioned)
@@ -267,4 +279,45 @@ def daily_validation_schedule(context: dg.ScheduleEvaluationContext):
     """Trigger daily validation report comparing predictions vs actuals."""
     return dg.RunRequest(
         run_key=f"validation_{context.scheduled_execution_time.strftime('%Y-%m-%d')}",
+    )
+
+
+# ============================================================================
+# SCHEDULE 5: Multi-Station Model Training (2 AM on 1st of month)
+# ============================================================================
+
+@dg.schedule(
+    job=multi_station_training_job,
+    cron_schedule="0 2 1 * *",
+    description="Monthly multi-station training — all 3 stations on 1st of month at 2 AM UTC",
+    default_status=dg.DefaultScheduleStatus.RUNNING,
+    tags={"environment": "production", "schedule_type": "multi_station_training"},
+)
+def multi_station_training_schedule(context: dg.ScheduleEvaluationContext):
+    """Train per-station models for all partitions (one RunRequest per station)."""
+    return [
+        dg.RunRequest(
+            partition_key=partition_key,
+            run_key=f"multi_station_training_{context.scheduled_execution_time.strftime('%Y-%m')}_{partition_key}",
+            tags={"training_month": context.scheduled_execution_time.strftime('%Y-%m')},
+        )
+        for partition_key in STATION_PARTITIONS.get_partition_keys()
+    ]
+
+
+# ============================================================================
+# SCHEDULE 6: Daily Analysis (14:00 UTC = 6 AM PST)
+# ============================================================================
+
+@dg.schedule(
+    job=daily_analysis_job,
+    cron_schedule="0 14 * * *",
+    description="Daily H2S source attribution + 48h forecast + dashboard (14:00 UTC / 6 AM PST)",
+    default_status=dg.DefaultScheduleStatus.RUNNING,
+    tags={"environment": "production", "schedule_type": "daily_analysis"},
+)
+def daily_analysis_schedule(context: dg.ScheduleEvaluationContext):
+    """Trigger daily H2S analysis pipeline."""
+    return dg.RunRequest(
+        run_key=f"daily_analysis_{context.scheduled_execution_time.strftime('%Y-%m-%d')}",
     )
