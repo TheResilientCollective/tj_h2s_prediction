@@ -203,6 +203,21 @@ def prepare_multi_station_features(df: pd.DataFrame, station: str = None) -> pd.
                     'h2s_rolling_24h', 'flow_lag_6h', 'flow_rolling_24h']:
             df.loc[m, col] = s[col].values
 
+    # SBIWTP defaults — fill NaN when feed is not yet connected
+    sbiwtp_defaults = {
+        'sbiwtp_flow_mgd': 23.5,
+        'sbiwtp_hourly_mgd': 23.5 / 24,
+        'sbiwtp_anomaly': 0.0,
+        'sbiwtp_deficit': 0.0,
+        'sbiwtp_flow_x_temp': 0.0,
+        'sbiwtp_sli': 0.0,
+    }
+    for col, val in sbiwtp_defaults.items():
+        if col in df.columns:
+            df[col] = df[col].fillna(val)
+        else:
+            df[col] = val
+
     # Target variables
     df['exceed_5'] = (df['H2S'] > 5).astype(int)
     df['exceed_10'] = (df['H2S'] > 10).astype(int)

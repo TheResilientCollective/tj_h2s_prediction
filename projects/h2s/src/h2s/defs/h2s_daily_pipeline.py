@@ -416,6 +416,8 @@ def daily_station_forecasts(
     try:
         fc_stream = s3.get_stream(path="latest/tijuana/weather_forecast/latest.csv")
         fc_df = pd.read_csv(fc_stream)
+        if 'time' not in fc_df.columns and 'date' in fc_df.columns:
+            fc_df = fc_df.rename(columns={'date': 'time'})
         fc_df['time'] = pd.to_datetime(fc_df['time'], utc=True)
         context.log.info(f"✓ Loaded weather forecast from S3: {len(fc_df)} rows")
     except Exception as e:
@@ -541,7 +543,7 @@ def _generate_synthetic_forecast(obs_df: pd.DataFrame, hours: int) -> pd.DataFra
     else:
         last_row = last.iloc[0].to_dict()
 
-    now = pd.Timestamp.utcnow().floor('h').tz_localize('UTC')
+    now = pd.Timestamp.now('UTC').floor('h')
     rows = []
     for i in range(hours):
         row = dict(last_row)
