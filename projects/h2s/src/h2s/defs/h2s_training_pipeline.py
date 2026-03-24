@@ -1211,16 +1211,37 @@ def model_comparison_report(
     ax4.axis('off')
     summary_text = "VALIDATION SUMMARY\n" + "=" * 40 + "\n\n"
     summary_text += f"Validation Samples: {validation_report['validation_samples']}\n\n"
-    summary_text += "BALANCED ACCURACY\n"
-    summary_text += f"  New:     {new_metrics['balanced_accuracy']:.3f}\n"
-    summary_text += f"  Current: {current_metrics['balanced_accuracy']:.3f}\n"
-    summary_text += f"  Delta:   {new_metrics['balanced_accuracy'] - current_metrics['balanced_accuracy']:+.3f}\n\n"
-    summary_text += "ORANGE RECALL (Critical Metric)\n"
-    nr = new_metrics.get('recall_orange', 0.0)
-    cr = current_metrics.get('recall_orange', 0.0)
-    summary_text += f"  New:     {nr:.3f}\n"
-    summary_text += f"  Current: {cr:.3f}\n"
-    summary_text += f"  Delta:   {nr - cr:+.3f}\n\n"
+
+    # Show field mismatch warning if present
+    if comparison_details.get('field_mismatch'):
+        summary_text += "⚠️  FIELD MISMATCH DETECTED\n"
+        if comparison_details.get('missing_in_new'):
+            summary_text += f"  Missing in new: {', '.join(comparison_details['missing_in_new'][:3])}\n"
+        if comparison_details.get('missing_in_current'):
+            summary_text += f"  Missing in current: {', '.join(comparison_details['missing_in_current'][:3])}\n"
+        summary_text += "  (Comparing common metrics only)\n\n"
+
+    # Balanced accuracy (or accuracy fallback)
+    if 'balanced_accuracy' in new_metrics and 'balanced_accuracy' in current_metrics:
+        summary_text += "BALANCED ACCURACY\n"
+        summary_text += f"  New:     {new_metrics['balanced_accuracy']:.3f}\n"
+        summary_text += f"  Current: {current_metrics['balanced_accuracy']:.3f}\n"
+        summary_text += f"  Delta:   {new_metrics['balanced_accuracy'] - current_metrics['balanced_accuracy']:+.3f}\n\n"
+    elif 'accuracy' in new_metrics and 'accuracy' in current_metrics:
+        summary_text += "ACCURACY\n"
+        summary_text += f"  New:     {new_metrics['accuracy']:.3f}\n"
+        summary_text += f"  Current: {current_metrics['accuracy']:.3f}\n"
+        summary_text += f"  Delta:   {new_metrics['accuracy'] - current_metrics['accuracy']:+.3f}\n\n"
+
+    # Orange recall if available
+    nr = new_metrics.get('recall_orange', None)
+    cr = current_metrics.get('recall_orange', None)
+    if nr is not None and cr is not None:
+        summary_text += "ORANGE RECALL (Critical Metric)\n"
+        summary_text += f"  New:     {nr:.3f}\n"
+        summary_text += f"  Current: {cr:.3f}\n"
+        summary_text += f"  Delta:   {nr - cr:+.3f}\n\n"
+
     summary_text += "QUALITY GATES\n"
     for gate_name, gate_info in comparison_details['quality_gates'].items():
         summary_text += f"  {'✓' if gate_info['passed'] else '✗'} {gate_name}\n"
@@ -1261,12 +1282,24 @@ def model_comparison_report(
         content_type='application/json',
     )
 
-    context.add_output_metadata({
+    metadata = {
         "s3_path": s3_path,
         "approval_recommended": approval_recommended,
-        "balanced_acc_delta": float(comparison_details['metric_differences']['balanced_accuracy']),
+        "balanced_acc_delta": float(comparison_details['metric_differences'].get('balanced_accuracy', 0.0)),
         "orange_recall_delta": float(comparison_details['metric_differences'].get('recall_orange', 0.0)),
-    })
+        "field_mismatch": comparison_details.get('field_mismatch', False),
+    }
+
+    if comparison_details.get('field_mismatch'):
+        metadata["missing_in_new"] = comparison_details.get('missing_in_new', [])
+        metadata["missing_in_current"] = comparison_details.get('missing_in_current', [])
+        context.log.warning(
+            f"⚠️  Field mismatch detected between models:\n"
+            f"   Missing in new model: {metadata['missing_in_new']}\n"
+            f"   Missing in current model: {metadata['missing_in_current']}"
+        )
+
+    context.add_output_metadata(metadata)
 
     return comparison_report_json
 

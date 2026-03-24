@@ -112,6 +112,9 @@ def compare_models(new_metrics: Dict, current_metrics: Dict,
                   min_orange_precision_delta: float = -0.10) -> Tuple[bool, Dict]:
     """Compare new model vs current model and recommend approval.
 
+    Compares only common metrics between models. If field sets differ,
+    comparison is limited to accuracy, recall, and precision.
+
     Args:
         new_metrics: Metrics dict from new model
         current_metrics: Metrics dict from current production model
@@ -129,52 +132,79 @@ def compare_models(new_metrics: Dict, current_metrics: Dict,
         >>> approved
         True
     """
-    # Calculate differences
-    balanced_acc_diff = new_metrics['balanced_accuracy'] - current_metrics['balanced_accuracy']
-    orange_recall_diff = new_metrics['recall_orange'] - current_metrics['recall_orange']
-    orange_precision_diff = new_metrics['precision_orange'] - current_metrics['precision_orange']
+    # Identify available metrics
+    new_keys = set(new_metrics.keys())
+    current_keys = set(current_metrics.keys())
+    common_keys = new_keys & current_keys
+    missing_in_new = current_keys - new_keys
+    missing_in_current = new_keys - current_keys
 
-    # Check quality gates
-    balanced_acc_ok = balanced_acc_diff >= min_balanced_acc_delta
-    orange_recall_ok = orange_recall_diff >= min_orange_recall_delta
-    orange_precision_ok = orange_precision_diff >= min_orange_precision_delta
+    field_mismatch = bool(missing_in_new or missing_in_current)
+
+    # Calculate differences for common metrics
+    metric_differences = {}
+    quality_gates = {}
+
+    # Balanced accuracy (primary metric)
+    balanced_acc_diff = 0.0
+    balanced_acc_ok = True
+    if 'balanced_accuracy' in common_keys:
+        balanced_acc_diff = new_metrics['balanced_accuracy'] - current_metrics['balanced_accuracy']
+        balanced_acc_ok = balanced_acc_diff >= min_balanced_acc_delta
+        metric_differences['balanced_accuracy'] = float(balanced_acc_diff)
+        quality_gates['balanced_accuracy_gate'] = {
+            'passed': balanced_acc_ok,
+            'threshold': min_balanced_acc_delta,
+            'actual': float(balanced_acc_diff)
+        }
+    elif 'accuracy' in common_keys:
+        # Fallback to regular accuracy
+        balanced_acc_diff = new_metrics['accuracy'] - current_metrics['accuracy']
+        balanced_acc_ok = balanced_acc_diff >= min_balanced_acc_delta
+        metric_differences['accuracy'] = float(balanced_acc_diff)
+        quality_gates['accuracy_gate'] = {
+            'passed': balanced_acc_ok,
+            'threshold': min_balanced_acc_delta,
+            'actual': float(balanced_acc_diff)
+        }
+
+    # Orange recall
+    orange_recall_diff = 0.0
+    orange_recall_ok = True
+    if 'recall_orange' in common_keys:
+        orange_recall_diff = new_metrics['recall_orange'] - current_metrics['recall_orange']
+        orange_recall_ok = orange_recall_diff >= min_orange_recall_delta
+        metric_differences['recall_orange'] = float(orange_recall_diff)
+        quality_gates['orange_recall_gate'] = {
+            'passed': orange_recall_ok,
+            'threshold': min_orange_recall_delta,
+            'actual': float(orange_recall_diff)
+        }
+
+    # Orange precision
+    orange_precision_diff = 0.0
+    orange_precision_ok = True
+    if 'precision_orange' in common_keys:
+        orange_precision_diff = new_metrics['precision_orange'] - current_metrics['precision_orange']
+        orange_precision_ok = orange_precision_diff >= min_orange_precision_delta
+        metric_differences['precision_orange'] = float(orange_precision_diff)
+        quality_gates['orange_precision_gate'] = {
+            'passed': orange_precision_ok,
+            'threshold': min_orange_precision_delta,
+            'actual': float(orange_precision_diff)
+        }
 
     approval_recommended = balanced_acc_ok and orange_recall_ok and orange_precision_ok
 
     comparison_details = {
-        'metric_differences': {
-            'balanced_accuracy': float(balanced_acc_diff),
-            'recall_orange': float(orange_recall_diff),
-            'precision_orange': float(orange_precision_diff),
-        },
-        'quality_gates': {
-            'balanced_accuracy_gate': {
-                'passed': balanced_acc_ok,
-                'threshold': min_balanced_acc_delta,
-                'actual': float(balanced_acc_diff)
-            },
-            'orange_recall_gate': {
-                'passed': orange_recall_ok,
-                'threshold': min_orange_recall_delta,
-                'actual': float(orange_recall_diff)
-            },
-            'orange_precision_gate': {
-                'passed': orange_precision_ok,
-                'threshold': min_orange_precision_delta,
-                'actual': float(orange_precision_diff)
-            }
-        },
+        'metric_differences': metric_differences,
+        'quality_gates': quality_gates,
         'approval_recommended': approval_recommended,
-        'new_model_metrics': {
-            'balanced_accuracy': float(new_metrics['balanced_accuracy']),
-            'recall_orange': float(new_metrics['recall_orange']),
-            'precision_orange': float(new_metrics['precision_orange']),
-        },
-        'current_model_metrics': {
-            'balanced_accuracy': float(current_metrics['balanced_accuracy']),
-            'recall_orange': float(current_metrics['recall_orange']),
-            'precision_orange': float(current_metrics['precision_orange']),
-        }
+        'field_mismatch': field_mismatch,
+        'missing_in_new': list(missing_in_new) if missing_in_new else [],
+        'missing_in_current': list(missing_in_current) if missing_in_current else [],
+        'new_model_metrics': {k: float(v) for k, v in new_metrics.items() if isinstance(v, (int, float))},
+        'current_model_metrics': {k: float(v) for k, v in current_metrics.items() if isinstance(v, (int, float))},
     }
 
     return approval_recommended, comparison_details
