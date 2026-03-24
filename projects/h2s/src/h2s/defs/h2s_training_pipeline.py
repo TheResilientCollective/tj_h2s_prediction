@@ -567,8 +567,6 @@ def trained_model_cv(
         'wind_gusts_10m_max_2h', 'wind_gusts_10m_max_3h', 'wind_gusts_10m_max_4h',
         # Tidal / flow
         'Flow (m^3/s)--Border', 'tide_height', 'tidal_state_encoded',
-        # Encoded categoricals
-        'wind_direction_categorical_encoded',
         # Interaction features
         'wind_temp_interaction', 'humidity_temp_interaction',
     ]
