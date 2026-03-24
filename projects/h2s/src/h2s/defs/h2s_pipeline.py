@@ -240,8 +240,8 @@ def sbiwtp_operational_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
     source = "persistence"
 
     try:
-        stream = s3.get_stream(path="latest/tijuana/sbiwtp/latest.csv")
-        sbiwtp_raw = pd.read_csv(stream)
+        sbiwtp_url = s3.get_presigned_url(path="latest/tijuana/sbiwtp/latest.csv")
+        sbiwtp_raw = pd.read_csv(sbiwtp_url)
         if 'flow_mgd' in sbiwtp_raw.columns and len(sbiwtp_raw) > 0:
             daily_flow_mgd = float(sbiwtp_raw['flow_mgd'].iloc[-1])
             source = "s3"
@@ -353,8 +353,8 @@ def raw_environmental_data(
         context.log.info("PRODUCTION MODE: Loading from S3...")
         s3_path = "latest/tijuana/weather_forecast/latest.csv"
         try:
-            stream = s3_resource.get_stream(path=s3_path)
-            df = pd.read_csv(stream)
+            csv_url = s3_resource.get_presigned_url(path=s3_path)
+            df = pd.read_csv(csv_url)
             context.log.info(f"✓ Loaded from S3: {s3_path}")
             source = "s3"
         except Exception as e:
@@ -372,37 +372,6 @@ def raw_environmental_data(
 
     # Check if H2S measurements are present
     h2s_cols = [col for col in df.columns if col.upper() == 'H2S' or ('h2s' in col.lower() and col.lower() != 'h2s_measured')]
-
-    # If no H2S measurements and we loaded from S3, try to merge from local modeldata_h2s.csv
-    if not h2s_cols and source == "s3":
-        try:
-            context.log.info("No H2S measurements in S3 data - attempting to merge from local modeldata_h2s.csv")
-            local_path = "data/latest.csv"
-            h2s_df = pd.read_parquet(local_path)
-
-            # Standardize time column in H2S data
-            if 'time' in h2s_df.columns:
-                h2s_df['merge_time'] = pd.to_datetime(h2s_df['time'])
-            elif 'date' in h2s_df.columns:
-                h2s_df['merge_time'] = pd.to_datetime(h2s_df['date'])
-
-            df['merge_time'] = df['date']
-
-            # Select only H2S columns from local file
-            h2s_measurement_cols = [col for col in h2s_df.columns if col.upper() == 'H2S' or col.lower() == 'h2s_measured']
-            if h2s_measurement_cols:
-                merge_cols = ['merge_time'] + h2s_measurement_cols
-                h2s_subset = h2s_df[merge_cols].copy()
-
-                # Merge on time
-                df = df.merge(h2s_subset, on='merge_time', how='left')
-                df = df.drop(columns=['merge_time'])
-
-                context.log.info(f"✓ Merged H2S measurements from local file")
-                h2s_cols = h2s_measurement_cols
-
-        except Exception as e:
-            context.log.warning(f"Could not merge H2S measurements from local file: {e}")
 
     # Log H2S column availability
     if h2s_cols:
@@ -691,8 +660,8 @@ def actual_h2s_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
     s3_resource = context.resources.s3
 
     try:
-        stream = s3_resource.get_stream(path="tijuana/forecast/actuals/latest.csv")
-        df = pd.read_csv(stream)
+        csv_url = s3_resource.get_presigned_url(path="tijuana/forecast/actuals/latest.csv")
+        df = pd.read_csv(csv_url)
         context.log.info(f"✓ Loaded actual H2S data from S3: {len(df)} rows")
 
         # Ensure time column is datetime
@@ -1162,8 +1131,8 @@ def daily_validation_report(context: dg.AssetExecutionContext) -> None:
     for hour in ["00", "06", "12", "18"]:
         s3_path = f"{PREDICTIONS_PATH}/{yesterday}_{hour}/h2s_predictions.csv"
         try:
-            stream = s3_resource.get_stream(path=s3_path)
-            df = pd.read_csv(stream)
+            csv_url = s3_resource.get_presigned_url(path=s3_path)
+            df = pd.read_csv(csv_url)
             df["run_hour"] = hour
             prediction_dfs.append(df)
             context.log.info(f"✓ Loaded predictions for {yesterday}_{hour}: {len(df)} rows")
@@ -1184,8 +1153,8 @@ def daily_validation_report(context: dg.AssetExecutionContext) -> None:
     # Load actual H2S measurements
     actuals_df = pd.DataFrame()
     try:
-        stream = s3_resource.get_stream(path="tijuana/forecast/actuals/latest.csv")
-        actuals_df = pd.read_csv(stream)
+        csv_url = s3_resource.get_presigned_url(path="tijuana/forecast/actuals/latest.csv")
+        actuals_df = pd.read_csv(csv_url)
         if 'time' in actuals_df.columns:
             actuals_df['time'] = pd.to_datetime(actuals_df['time'])
             # Filter to yesterday's date range

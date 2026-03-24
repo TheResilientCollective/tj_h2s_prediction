@@ -270,11 +270,6 @@ def multi_station_model_artifacts(context: dg.AssetExecutionContext) -> dict:
     description="Wind-bearing source attribution for last 7 days of H2S observations",
     config_schema={
         "lookback_days": dg.Field(int, default_value=7),
-        "local_obs_path": dg.Field(
-            str,
-            default_value="data/modeldata_h2s_nofill.parquet",
-            description="Local fallback path for observation data (relative to project root)",
-        ),
         "obs_bucket": dg.Field(str, default_value="resilentpublic"),
     },
 )
@@ -286,21 +281,13 @@ def source_attribution(context: dg.AssetExecutionContext) -> pd.DataFrame:
     """
     s3 = context.resources.s3
     lookback = context.op_config["lookback_days"]
-    local_path = context.op_config["local_obs_path"]
     bucket = context.op_config["obs_bucket"]
 
-    # Load observations
-    obs_df = None
-    try:
-        stream = s3.get_stream(
-            path="latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet",
-            bucket=bucket
-        )
-        obs_df = pd.read_parquet(stream)
-        context.log.info(f"✓ Loaded observations from S3: {len(obs_df)} rows")
-    except Exception as e:
-        context.log.warning(f"S3 obs load failed ({e}), using local: {local_path}")
-        obs_df = pd.read_parquet(local_path)
+    # Load observations from S3 via presigned URL
+    s3_path = "latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet"
+    parquet_url = s3.get_presigned_url(path=s3_path, bucket=bucket)
+    obs_df = pd.read_parquet(parquet_url)
+    context.log.info(f"✓ Loaded observations from S3: {len(obs_df)} rows")
 
     obs_df['time'] = pd.to_datetime(obs_df['time'], utc=True)
     obs_df = obs_df[(obs_df['h2s_measured'] == True) & (obs_df['H2S'] <= 500)].copy()
@@ -373,10 +360,6 @@ def source_attribution(context: dg.AssetExecutionContext) -> pd.DataFrame:
         "multi_station_model_artifacts": dg.AssetIn(key=_KEY("multi_station_model_artifacts")),
     },
     config_schema={
-        "local_obs_path": dg.Field(
-            str,
-            default_value="data/modeldata_h2s_nofill.parquet",
-        ),
         "obs_bucket": dg.Field(str, default_value="resilentpublic"),
         "forecast_hours": dg.Field(int, default_value=48),
     },
@@ -391,21 +374,14 @@ def daily_station_forecasts(
     the regression + classifier models to the environmental forecast data.
     """
     s3 = context.resources.s3
-    local_path = context.op_config["local_obs_path"]
     bucket = context.op_config["obs_bucket"]
     forecast_hours = context.op_config["forecast_hours"]
 
-    # Load recent observations (for initial lag state)
-    obs_df = None
-    try:
-        stream = s3.get_stream(
-            path="latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet",
-            bucket=bucket
-        )
-        obs_df = pd.read_parquet(stream)
-    except Exception as e:
-        context.log.warning(f"S3 obs load failed ({e}), using local")
-        obs_df = pd.read_parquet(local_path)
+    # Load recent observations from S3 via presigned URL
+    s3_path = "latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet"
+    parquet_url = s3.get_presigned_url(path=s3_path, bucket=bucket)
+    obs_df = pd.read_parquet(parquet_url)
+    context.log.info(f"✓ Loaded observations from S3: {len(obs_df)} rows")
 
     obs_df['time'] = pd.to_datetime(obs_df['time'], utc=True)
     obs_df = obs_df[(obs_df['h2s_measured'] == True) & (obs_df['H2S'] <= 500)].copy()
@@ -414,8 +390,8 @@ def daily_station_forecasts(
     # Load weather forecast from S3
     fc_df = None
     try:
-        fc_stream = s3.get_stream(path="latest/tijuana/weather_forecast/latest.csv")
-        fc_df = pd.read_csv(fc_stream)
+        fc_url = s3.get_presigned_url(path="latest/tijuana/weather_forecast/latest.csv")
+        fc_df = pd.read_csv(fc_url)
         if 'time' not in fc_df.columns and 'date' in fc_df.columns:
             fc_df = fc_df.rename(columns={'date': 'time'})
         fc_df['time'] = pd.to_datetime(fc_df['time'], utc=True)
@@ -426,8 +402,8 @@ def daily_station_forecasts(
 
     # Load tidal forecast
     try:
-        t_stream = s3.get_stream(path="latest/tijuana/tidal_forecast/latest.csv")
-        tidal_df = pd.read_csv(t_stream)
+        tidal_url = s3.get_presigned_url(path="latest/tijuana/tidal_forecast/latest.csv")
+        tidal_df = pd.read_csv(tidal_url)
         tidal_df['time'] = pd.to_datetime(tidal_df['time'], utc=True)
         tidal_df['_mtime'] = tidal_df['time'].dt.floor('h')
         fc_df['_mtime'] = pd.to_datetime(fc_df['time']).dt.floor('h')
@@ -560,10 +536,6 @@ def _generate_synthetic_forecast(obs_df: pd.DataFrame, hours: int) -> pd.DataFra
         "daily_station_forecasts": dg.AssetIn(key=_KEY("daily_station_forecasts")),
     },
     config_schema={
-        "local_obs_path": dg.Field(
-            str,
-            default_value="data/modeldata_h2s_nofill.parquet",
-        ),
         "obs_bucket": dg.Field(str, default_value="resilentpublic"),
     },
 )
@@ -580,18 +552,15 @@ def daily_dashboard_viz(
     import matplotlib.colors as mcolors
 
     s3 = context.resources.s3
-    local_path = context.op_config["local_obs_path"]
     bucket = context.op_config["obs_bucket"]
 
-    # Load observations for historical rows
-    try:
-        stream = s3.get_stream(
-            path="latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet",
-            bucket=bucket
-        )
-        obs_df = pd.read_parquet(stream)
-    except Exception:
-        obs_df = pd.read_parquet(local_path)
+    # Load observations from S3 for historical rows
+    parquet_url = s3.get_presigned_url(
+        path="latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet",
+        bucket=bucket
+    )
+    obs_df = pd.read_parquet(parquet_url)
+    context.log.info(f"✓ Loaded observations from S3: {len(obs_df)} rows")
 
     obs_df['time'] = pd.to_datetime(obs_df['time'], utc=True)
     obs_df = obs_df[(obs_df['h2s_measured'] == True) & (obs_df['H2S'] <= 500)].copy()
@@ -828,10 +797,6 @@ def _compute_source_probability_grid(obs_df: pd.DataFrame):
         "daily_station_forecasts": dg.AssetIn(key=_KEY("daily_station_forecasts")),
     },
     config_schema={
-        "local_obs_path": dg.Field(
-            str,
-            default_value="data/modeldata_h2s_nofill.parquet",
-        ),
         "obs_bucket": dg.Field(str, default_value="resilentpublic"),
     },
 )
@@ -842,18 +807,15 @@ def daily_summary_json(
 ) -> dict:
     """Generate and upload daily summary JSON to S3."""
     s3 = context.resources.s3
-    local_path = context.op_config["local_obs_path"]
     bucket = context.op_config["obs_bucket"]
 
-    # Load observations for recent stats
-    try:
-        stream = s3.get_stream(
-            path="latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet",
-            bucket=bucket
-        )
-        obs_df = pd.read_parquet(stream)
-    except Exception:
-        obs_df = pd.read_parquet(local_path)
+    # Load observations from S3 for recent stats
+    parquet_url = s3.get_presigned_url(
+        path="latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet",
+        bucket=bucket
+    )
+    obs_df = pd.read_parquet(parquet_url)
+    context.log.info(f"✓ Loaded observations from S3: {len(obs_df)} rows")
 
     obs_df['time'] = pd.to_datetime(obs_df['time'], utc=True)
     obs_df = obs_df[(obs_df['h2s_measured'] == True) & (obs_df['H2S'] <= 500)].copy()

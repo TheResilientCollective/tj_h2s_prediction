@@ -161,13 +161,11 @@ def monthly_training_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
         s3_path = context.op_config["s3_data_path"]
         context.log.info(f"Loading from S3: {s3_path}")
         try:
-            from io import BytesIO
-            data_bytes = s3_resource.getFile(s3_path)
+            data_url = s3_resource.get_presigned_url(path=s3_path)
             if s3_path.endswith('.parquet'):
-                df = pd.read_parquet(BytesIO(data_bytes))
+                df = pd.read_parquet(data_url)
             else:
-                import io
-                df = pd.read_csv(io.StringIO(data_bytes.decode('utf-8')))
+                df = pd.read_csv(data_url)
                 if 'D' in df.columns and 'time' not in df.columns:
                     df['time'] = pd.to_datetime(df['D'])
         except Exception as e:

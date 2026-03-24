@@ -240,3 +240,22 @@ class S3Resource(ResourceWithS3Configuration):
             raise Exception(
                 f"file {path} failed to push to {bucket} at {self.S3_ADDRESS} {ex}"
             )
+
+    def get_presigned_url(self, path, bucket=None, expires_seconds=3600):
+        """Get a presigned URL for reading an object (valid for 1 hour by default)."""
+        from datetime import timedelta
+        if bucket is None:
+            bucket = self.S3_BUCKET
+        try:
+            url = self.getClient().presigned_get_object(
+                bucket, path, expires=timedelta(seconds=expires_seconds)
+            )
+            get_dagster_logger().info(f"Generated presigned URL for {path}")
+            return url
+        except Exception as ex:
+            get_dagster_logger().error(
+                f"Failed to generate presigned URL for {path} in {bucket}: {ex}"
+            )
+            raise Exception(
+                f"Failed to generate presigned URL for {path} in {bucket}: {ex}"
+            )

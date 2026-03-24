@@ -45,11 +45,6 @@ _KEY = lambda name: dg.AssetKey(["h2s", name])
     kinds={"python", "s3"},
     description="Multi-station training dataset loaded from S3, filtered and feature-engineered",
     config_schema={
-        "local_fallback_path": dg.Field(
-            str,
-            default_value="data/modeldata_h2s_nofill.parquet",
-            description="Local fallback path when S3 is unavailable (relative to project root)",
-        ),
         "s3_bucket": dg.Field(
             str,
             default_value="resilentpublic",
@@ -60,19 +55,13 @@ _KEY = lambda name: dg.AssetKey(["h2s", name])
 def multi_station_training_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
     """Load training parquet from S3, filter to measured rows, engineer features."""
     s3 = context.resources.s3
-    local_path = context.op_config["local_fallback_path"]
     bucket = context.op_config["s3_bucket"]
     s3_path = "latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet"
 
-    raw_df = None
-    try:
-        stream = s3.get_stream(path=s3_path, bucket=bucket)
-        raw_df = pd.read_parquet(stream)
-        context.log.info(f"✓ Loaded training data from S3 ({bucket}/{s3_path}): {len(raw_df)} rows")
-    except Exception as e:
-        context.log.warning(f"S3 load failed ({e}), falling back to local: {local_path}")
-        raw_df = pd.read_parquet(local_path)
-        context.log.info(f"✓ Loaded from local file: {len(raw_df)} rows, {len(raw_df.columns)} cols")
+    # Load training data from S3 via presigned URL
+    parquet_url = s3.get_presigned_url(path=s3_path, bucket=bucket)
+    raw_df = pd.read_parquet(parquet_url)
+    context.log.info(f"✓ Loaded training data from S3 ({bucket}/{s3_path}): {len(raw_df)} rows")
 
     df = prepare_multi_station_features(raw_df)
 
