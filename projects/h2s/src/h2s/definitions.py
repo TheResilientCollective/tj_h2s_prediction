@@ -56,6 +56,12 @@ def defs():
         station_deployment_job,
     )
 
+    # Import seed models job
+    from h2s.defs.h2s_seed_models import (
+        seed_models,
+        seed_models_job,
+    )
+
     # Import daily analysis pipeline assets
     from h2s.defs.h2s_daily_pipeline import (
         multi_station_model_artifacts,
@@ -114,6 +120,8 @@ def defs():
             daily_station_forecasts,
             daily_dashboard_viz,
             daily_summary_json,
+            # Seed Models
+            seed_models,
         ],
         jobs=[
             # Prediction jobs
@@ -129,6 +137,8 @@ def defs():
             station_deployment_job,
             # Daily analysis job
             daily_analysis_job,
+            # Seed models job
+            seed_models_job,
         ],
         schedules=[
             forecast_prediction_schedule,
