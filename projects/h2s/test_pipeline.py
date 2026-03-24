@@ -23,6 +23,7 @@ import requests
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 from h2s.defs.h2s_pipeline import _derive_tidal_state
+from h2s.training.multi_station_trainer import MODEL_FEATURES, prepare_multi_station_features
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -56,18 +57,18 @@ LATITUDE = 32.545
 LONGITUDE = -117.128
 SITE = "NESTOR - BES"
 
-# Features for retrained models — weather + derived + tidal
-TRAIN_FEATURES = [
-    "temperature_2m", "relative_humidity_2m", "dewpoint_2m",
-    "precipitation", "surface_pressure", "cloud_cover",
-    "wind_speed_10m", "wind_direction_10m", "wind_gusts_10m",
-    "wind_direction_sin", "wind_direction_cos",
-    "wind_speed_10m_avg_2h", "wind_speed_10m_avg_3h", "wind_speed_10m_avg_4h",
-    "wind_gusts_10m_max_2h", "wind_gusts_10m_max_3h", "wind_gusts_10m_max_4h",
-    "Flow (m^3/s)--Border", "tide_height", "tidal_state_encoded",
-    "wind_direction_categorical_encoded",
-    "wind_temp_interaction", "humidity_temp_interaction",
-]
+# Features for retrained models — full 43-feature set from multi_station_trainer
+TRAIN_FEATURES = MODEL_FEATURES
+
+# SBIWTP defaults for forecast mode (feed not yet connected)
+_SBIWTP_DEFAULTS = {
+    "sbiwtp_flow_mgd": 23.5,
+    "sbiwtp_hourly_mgd": 23.5 / 24,
+    "sbiwtp_anomaly": 0.0,
+    "sbiwtp_deficit": 0.0,
+    "sbiwtp_flow_x_temp": 0.0,
+    "sbiwtp_sli": 0.0,
+}
 
 # NOAA CO-OPS station: San Diego, CA (closest to NESTOR-BES)
 NOAA_STATION = "9410170"
@@ -135,7 +136,7 @@ def fetch_tides(date_min, date_max) -> pd.DataFrame:
     Dagster pipeline (flood/ebb/slack high/slack low).
 
     Flow estimated using diurnal (month, hour) median from historical training
-    data — same approach as the streamflow_forecast Dagster asset.
+    data (streamflow is now included in the forecast data feed).
 
     Returns DataFrame with columns: date, tide_height, tidal_state,
     tidal_state_encoded, Flow (m^3/s)--Border.
@@ -170,7 +171,7 @@ def fetch_tides(date_min, date_max) -> pd.DataFrame:
     df["tidal_state_encoded"] = df["tidal_state"].map(TIDAL_ENCODING).fillna(-1).astype(int)
 
     # Flow: diurnal (month, hour) median from historical training data
-    # — same approach as the streamflow_forecast Dagster asset
+    # (streamflow is now included in the forecast data feed)
     flow_col = "Flow (m^3/s)--Border"
     flow_series = _flow_from_diurnal_median(df["date"])
     df[flow_col] = flow_series.values
@@ -182,7 +183,7 @@ def fetch_tides(date_min, date_max) -> pd.DataFrame:
 def _flow_from_diurnal_median(timestamps: pd.Series) -> pd.Series:
     """Estimate flow using (month, hour) median from historical training data.
 
-    Mirrors the streamflow_forecast Dagster asset logic.
+    Streamflow is now included in the forecast data feed.
     """
     flow_col = "Flow (m^3/s)--Border"
     global_fallback = 1.35
@@ -208,27 +209,76 @@ def _flow_from_diurnal_median(timestamps: pd.Series) -> pd.Series:
     )
 
 
-_CARDINAL_DIRS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+# Wind direction categorical mapping (kept for model metadata compatibility, not used in features)
 _WD_CAT_MAPPING = {"E": 0, "N": 1, "NE": 2, "NW": 3, "S": 4, "SE": 5, "SW": 6, "W": 7}
 
 
-def _degrees_to_cardinal(deg: float) -> str:
-    return _CARDINAL_DIRS[int((deg + 22.5) / 45.0) % 8]
-
-
 def _add_derived_features(df: pd.DataFrame, time_col: str = "date") -> pd.DataFrame:
-    """Compute wind sin/cos, rolling windows, interaction features, and wind_direction_categorical."""
+    """Compute all derived features needed for prediction on forecast data."""
     df = df.copy().sort_values(time_col).reset_index(drop=True)
+    ts = pd.to_datetime(df[time_col])
+
+    # Wind direction cyclicals
     rad = np.deg2rad(df["wind_direction_10m"].fillna(0))
     df["wind_direction_sin"] = np.sin(rad)
     df["wind_direction_cos"] = np.cos(rad)
-    df["wind_direction_categorical"] = df["wind_direction_10m"].fillna(0).apply(_degrees_to_cardinal)
-    df["wind_direction_categorical_encoded"] = df["wind_direction_categorical"].map(_WD_CAT_MAPPING).fillna(-1).astype(int)
+
+    # Rolling wind features
     for h in (2, 3, 4):
-        df[f"wind_speed_10m_avg_{h}h"]  = df["wind_speed_10m"].rolling(h, min_periods=1).mean()
-        df[f"wind_gusts_10m_max_{h}h"]  = df["wind_gusts_10m"].rolling(h, min_periods=1).max()
-    df["wind_temp_interaction"]      = df["wind_speed_10m"] * df["temperature_2m"]
-    df["humidity_temp_interaction"]  = df["relative_humidity_2m"] * df["temperature_2m"]
+        df[f"wind_speed_10m_avg_{h}h"] = df["wind_speed_10m"].rolling(h, min_periods=1).mean()
+        df[f"wind_gusts_10m_max_{h}h"] = df["wind_gusts_10m"].rolling(h, min_periods=1).max()
+
+    # Interaction features
+    df["wind_temp_interaction"]     = df["wind_speed_10m"] * df["temperature_2m"]
+    df["humidity_temp_interaction"] = df["relative_humidity_2m"] * df["temperature_2m"]
+
+    # Time cyclicals
+    df["hour_sin"]   = np.sin(2 * np.pi * ts.dt.hour / 24)
+    df["hour_cos"]   = np.cos(2 * np.pi * ts.dt.hour / 24)
+    df["month_sin"]  = np.sin(2 * np.pi * ts.dt.month / 12)
+    df["month_cos"]  = np.cos(2 * np.pi * ts.dt.month / 12)
+
+    # Night flag and source regime
+    hour = ts.dt.hour
+    df["is_night"] = ((hour < 6) | (hour >= 20)).astype(int)
+
+    def _source_regime(row):
+        if not row["is_night"]:
+            return 0
+        wd = row.get("wind_direction_10m", 0)
+        if 22.5 <= wd < 135:
+            return 1
+        elif wd >= 247.5 or wd < 22.5:
+            return 2
+        elif 135 <= wd < 247.5:
+            return 3
+        return 0
+    df["source_regime"] = df.apply(_source_regime, axis=1)
+
+    # Atmospheric stability
+    df["stable_atm"] = ((df["wind_speed_10m"] < 5) & (df["is_night"] == 1)).astype(int)
+
+    # Flow derivatives
+    flow_col = "Flow (m^3/s)--Border"
+    if flow_col in df.columns:
+        df["flow_log"]         = np.log1p(df[flow_col])
+        df["flow_low"]         = (df[flow_col] < 1).astype(int)
+        df["flow_high"]        = (df[flow_col] > 5).astype(int)
+        df["flow_lag_6h"]      = df[flow_col].shift(6).fillna(df[flow_col].median())
+        df["flow_rolling_24h"] = df[flow_col].rolling(24, min_periods=1).mean()
+    else:
+        df["flow_log"] = df["flow_low"] = df["flow_high"] = 0.0
+        df["flow_lag_6h"] = df["flow_rolling_24h"] = 0.0
+
+    # H2S lags — forecast mode, no measurements available
+    for col in ("h2s_lag_1h", "h2s_lag_3h", "h2s_lag_6h", "h2s_rolling_6h", "h2s_rolling_24h"):
+        df[col] = 0.0
+
+    # SBIWTP defaults — feed not yet connected
+    for col, val in _SBIWTP_DEFAULTS.items():
+        if col not in df.columns:
+            df[col] = val
+
     return df
 
 
@@ -239,14 +289,17 @@ def _add_derived_features(df: pd.DataFrame, time_col: str = "date") -> pd.DataFr
 def load_training_data(filter_zero_h2s: bool = True) -> pd.DataFrame:
     from h2s.training.relabeling import apply_categorization
 
-    df = pd.read_parquet(TRAINING_CSV)
-    df = df[df["site_name"] == SITE].copy()
-    df["time"] = pd.to_datetime(df["time"]).dt.tz_convert(None)
+    raw = pd.read_parquet(TRAINING_CSV)
 
     if filter_zero_h2s:
-        before = len(df)
-        df = df[df["H2S"].notna() & (df["H2S"] > 0)].copy()
-        print(f"  --filter-zero-h2s: dropped {before - len(df)} rows with H2S=0 or NaN")
+        before = len(raw[raw["site_name"] == SITE])
+        raw = raw[~((raw["site_name"] == SITE) & (raw["H2S"].isna() | (raw["H2S"] == 0)))]
+        after = len(raw[raw["site_name"] == SITE])
+        print(f"  --filter-zero-h2s: dropped {before - after} rows with H2S=0 or NaN")
+
+    # Use shared feature engineering (handles SBIWTP defaults, lags, cyclicals, etc.)
+    df = prepare_multi_station_features(raw, station=SITE)
+    df["time"] = df["time"].dt.tz_convert(None) if df["time"].dt.tz is not None else df["time"]
 
     df = apply_categorization(df, h2s_column="H2S")
 

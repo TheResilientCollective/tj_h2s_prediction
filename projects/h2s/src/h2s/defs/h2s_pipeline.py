@@ -17,7 +17,7 @@ from h2s.constants import (
     MODEL_PATH,
     PREDICTIONS_PATH,
     VISUALIZATIONS_PATH,
-    LATEST_FORECAST_DATA,
+    LATEST_FORECAST,
     VALIDATION_PATH,
 )
 
@@ -99,103 +99,6 @@ def h2s_model_artifacts(context: dg.AssetExecutionContext):
 # ==============================================================================
 # Asset Group: Data Ingestion
 # ==============================================================================
-
-@dg.asset(
-    key_prefix="h2s",
-    group_name="h2s_prediction",
-    required_resource_keys={"s3"},
-    kinds={"python", "s3"},
-    description="Streamflow forecast using diurnal (month, hour) median profile from historical data",
-    config_schema={
-        "local_fallback_path": dg.Field(
-            str,
-            default_value="/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/modeldata_h2s_nofill.parquet",
-            description="Local fallback path if S3 historical data is unavailable",
-        ),
-        "forecast_days": dg.Field(
-            int,
-            default_value=10,
-            description="Number of days forward to generate streamflow forecast",
-        ),
-    },
-)
-def streamflow_forecast(context: dg.AssetExecutionContext) -> pd.DataFrame:
-    """Generate flow rate forecast using historical diurnal (month, hour) median profile.
-
-    Loads historical training data, computes median Flow (m^3/s)--Border per (month, hour)
-    bucket, and projects that profile over the upcoming forecast window.
-    Returns columns: time, Flow (m^3/s)--Border
-    """
-    s3_resource = context.resources.s3
-    local_fallback = context.op_config["local_fallback_path"]
-    forecast_days = context.op_config["forecast_days"]
-    flow_col = "Flow (m^3/s)--Border"
-
-    # --- Load historical data (S3 with local fallback) ---
-    hist_df = None
-    s3_path = "latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet"
-    try:
-        stream = s3_resource.get_stream(path=s3_path)
-        hist_df = pd.read_parquet(stream)
-        context.log.info(f"✓ Loaded historical data from S3: {s3_path} ({len(hist_df)} rows)")
-    except Exception as e:
-        context.log.warning(f"S3 load failed ({e}), falling back to local: {local_fallback}")
-        hist_df = pd.read_parquet(local_fallback)
-        context.log.info(f"✓ Loaded historical data from local file ({len(hist_df)} rows)")
-
-    # --- Parse time column ---
-    time_col = next((c for c in ["time", "date", "Time", "Date"] if c in hist_df.columns), None)
-    if time_col is None:
-        raise ValueError(f"No time column found in historical data. Columns: {list(hist_df.columns)}")
-    if flow_col not in hist_df.columns:
-        raise ValueError(f"Column '{flow_col}' not found. Available: {list(hist_df.columns)}")
-
-    hist_df["_time"] = pd.to_datetime(hist_df[time_col])
-    hist_valid = hist_df[hist_df[flow_col].notna()].copy()
-    hist_valid["_month"] = hist_valid["_time"].dt.month
-    hist_valid["_hour"] = hist_valid["_time"].dt.hour
-
-    # --- Compute (month, hour) median profile ---
-    profile = hist_valid.groupby(["_month", "_hour"])[flow_col].median()
-    global_median = hist_valid[flow_col].median()
-
-    context.log.info(f"✓ Computed flow profile from {len(hist_valid)} rows")
-    context.log.info(f"  Date range: {hist_valid['_time'].min()} → {hist_valid['_time'].max()}")
-    context.log.info(f"  Flow range: {hist_valid[flow_col].min():.2f} – {hist_valid[flow_col].max():.2f} m³/s")
-    context.log.info(f"  Global median: {global_median:.3f} m³/s")
-
-    # --- Generate forecast timestamps (hourly from now) ---
-    now_utc = pd.Timestamp.utcnow().floor("h").tz_localize(None)
-    forecast_times = pd.date_range(start=now_utc, periods=forecast_days * 24, freq="h")
-
-    rows = [
-        {"time": ts, flow_col: profile.get((ts.month, ts.hour), global_median)}
-        for ts in forecast_times
-    ]
-    forecast_df = pd.DataFrame(rows)
-
-    context.log.info(f"✓ Generated {len(forecast_df)} hourly streamflow forecast rows")
-    context.log.info(f"  Flow range: {forecast_df[flow_col].min():.3f} – {forecast_df[flow_col].max():.3f} m³/s")
-
-    # --- Upload to S3 ---
-    csv_path = "latest/tijuana/streamflow_forecast/latest.csv"
-    try:
-        csv_bytes = forecast_df.to_csv(index=False).encode("utf-8")
-        s3_resource.putFile(csv_bytes, csv_path, bucket=s3_resource.S3_BUCKET, content_type="text/csv")
-        context.log.info(f"✓ Uploaded streamflow forecast to S3: {csv_path}")
-    except Exception as e:
-        context.log.warning(f"Could not upload streamflow forecast to S3: {e}")
-
-    context.add_output_metadata({
-        "row_count": len(forecast_df),
-        "flow_min": float(forecast_df[flow_col].min()),
-        "flow_max": float(forecast_df[flow_col].max()),
-        "flow_median": float(forecast_df[flow_col].median()),
-        "profile_buckets": int(len(profile)),
-        "historical_rows": int(len(hist_valid)),
-    })
-    return forecast_df
-
 
 @dg.asset(
     key_prefix="h2s",
@@ -293,6 +196,107 @@ def tidal_forecast(context: dg.AssetExecutionContext) -> pd.DataFrame:
     key_prefix="h2s",
     group_name="h2s_prediction",
     required_resource_keys={"s3"},
+    kinds={"python", "s3"},
+    description="SBIWTP effluent operational data: try S3 feed, fall back to 30-day persistence defaults",
+    config_schema={
+        "sbiwtp_30d_mean_mgd": dg.Field(
+            float,
+            default_value=23.5,
+            description="30-day rolling mean SBIWTP flow (MGD) used for persistence fallback",
+        ),
+        "forecast_hours": dg.Field(
+            int,
+            default_value=240,
+            description="Number of forecast hours to generate (must match weather forecast window)",
+        ),
+    },
+)
+def sbiwtp_operational_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
+    """Load SBIWTP effluent flow data and compute hourly features.
+
+    Tries to load from S3: latest/tijuana/sbiwtp/latest.csv
+    Falls back to persistence (30-day rolling mean = ~23.5 MGD).
+
+    Hourly features computed:
+    - sbiwtp_flow_mgd: daily flow in MGD
+    - sbiwtp_hourly_mgd: diurnal distribution of daily flow
+    - sbiwtp_anomaly: (flow - mean) / mean
+    - sbiwtp_deficit: max(0, mean - flow)
+    - sbiwtp_flow_x_temp: flow × temperature (proxy for temperature available in forecast)
+    - sbiwtp_sli: simplified accumulation-decay index
+    """
+    s3 = context.resources.s3
+    mean_flow = context.op_config["sbiwtp_30d_mean_mgd"]
+    forecast_hours = context.op_config["forecast_hours"]
+
+    # Diurnal factors for distributing daily flow to hourly (from SBIWTP plan)
+    DIURNAL_FACTORS = [
+        0.72, 0.68, 0.65, 0.63, 0.65, 0.72, 0.88, 1.07,
+        1.18, 1.22, 1.23, 1.22, 1.18, 1.14, 1.11, 1.10,
+        1.09, 1.08, 1.06, 1.03, 0.98, 0.92, 0.85, 0.78,
+    ]
+
+    daily_flow_mgd = mean_flow
+    source = "persistence"
+
+    try:
+        stream = s3.get_stream(path="latest/tijuana/sbiwtp/latest.csv")
+        sbiwtp_raw = pd.read_csv(stream)
+        if 'flow_mgd' in sbiwtp_raw.columns and len(sbiwtp_raw) > 0:
+            daily_flow_mgd = float(sbiwtp_raw['flow_mgd'].iloc[-1])
+            source = "s3"
+            context.log.info(f"✓ Loaded SBIWTP flow from S3: {daily_flow_mgd:.1f} MGD")
+    except Exception as e:
+        context.log.info(f"SBIWTP S3 feed unavailable ({e}), using persistence ({mean_flow:.1f} MGD)")
+
+    anomaly = (daily_flow_mgd - mean_flow) / max(mean_flow, 0.01)
+    deficit = max(0.0, mean_flow - daily_flow_mgd)
+
+    # Build per-hour rows
+    now = pd.Timestamp.utcnow().floor("h").tz_localize(None)
+    rows = []
+    sli = 0.0  # accumulation-decay index
+    sli_decay = 0.9
+    sli_factor = daily_flow_mgd / max(mean_flow, 0.01)
+
+    for i in range(forecast_hours):
+        ts = now + pd.Timedelta(hours=i)
+        hour_factor = DIURNAL_FACTORS[ts.hour]
+        hourly_mgd = daily_flow_mgd * hour_factor / 24
+
+        # SLI: accumulates when above mean, decays otherwise
+        sli = sli * sli_decay + (sli_factor - 1.0) * 0.1
+        sli = max(-1.0, min(1.0, sli))
+
+        rows.append({
+            'time': ts,
+            'sbiwtp_flow_mgd': daily_flow_mgd,
+            'sbiwtp_hourly_mgd': hourly_mgd,
+            'sbiwtp_anomaly': anomaly,
+            'sbiwtp_deficit': deficit,
+            'sbiwtp_flow_x_temp': hourly_mgd,  # temperature multiplier applied in merge
+            'sbiwtp_sli': sli,
+        })
+
+    sbiwtp_df = pd.DataFrame(rows)
+    context.log.info(
+        f"✓ SBIWTP operational data: {len(sbiwtp_df)} hourly rows "
+        f"(source={source}, flow={daily_flow_mgd:.1f} MGD, anomaly={anomaly:+.2f})"
+    )
+    context.add_output_metadata({
+        "source": source,
+        "flow_mgd": daily_flow_mgd,
+        "anomaly": round(anomaly, 3),
+        "deficit": round(deficit, 2),
+        "rows": len(sbiwtp_df),
+    })
+    return sbiwtp_df
+
+
+@dg.asset(
+    key_prefix="h2s",
+    group_name="h2s_prediction",
+    required_resource_keys={"s3"},
     kinds={"csv", "s3"},
     description="Environmental data loaded from S3 or local test data",
     config_schema={
@@ -303,19 +307,19 @@ def tidal_forecast(context: dg.AssetExecutionContext) -> pd.DataFrame:
         ),
         "local_data_path": dg.Field(
             str,
-            default_value="/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/modeldata_h2s_nofill.parquet",
-            description="Path to local test data file (used when use_local_data=True)"
+            default_value="data/modeldata_h2s_nofill.parquet",
+            description="Path to local test data file (used when use_local_data=True, relative to project root)"
         ),
     },
     ins={
-        "streamflow_forecast": dg.AssetIn(key=_KEY("streamflow_forecast")),
         "tidal_forecast": dg.AssetIn(key=_KEY("tidal_forecast")),
+        "sbiwtp_operational_data": dg.AssetIn(key=_KEY("sbiwtp_operational_data")),
     },
 )
 def raw_environmental_data(
     context: dg.AssetExecutionContext,
-    streamflow_forecast: pd.DataFrame,
     tidal_forecast: pd.DataFrame,
+    sbiwtp_operational_data: pd.DataFrame,
 ) -> pd.DataFrame:
     """Load environmental data from S3 or local test data.
 
@@ -373,7 +377,7 @@ def raw_environmental_data(
     if not h2s_cols and source == "s3":
         try:
             context.log.info("No H2S measurements in S3 data - attempting to merge from local modeldata_h2s.csv")
-            local_path = "/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/latest.csv"
+            local_path = "data/latest.csv"
             h2s_df = pd.read_parquet(local_path)
 
             # Standardize time column in H2S data
@@ -411,26 +415,13 @@ def raw_environmental_data(
         else:
             context.log.warning(f"  ⚠ H2S column exists but has no values")
 
-    # --- Merge streamflow forecast ---
-    flow_col = "Flow (m^3/s)--Border"
+    # --- Merge tidal forecast ---
     merge_times = df["date"].dt.floor("h")
     if merge_times.dt.tz is not None:
         merge_times = merge_times.dt.tz_convert("UTC").dt.tz_localize(None)
     df["_merge_time"] = merge_times
 
-    sf = streamflow_forecast[[c for c in ["time", flow_col] if c in streamflow_forecast.columns]].copy()
-    sf_times = pd.to_datetime(sf["time"])
-    if sf_times.dt.tz is not None:
-        sf_times = sf_times.dt.tz_convert("UTC").dt.tz_localize(None)
-    sf["_merge_time"] = sf_times.dt.floor("h")
-    flow_merge = sf[["_merge_time", flow_col]].drop_duplicates("_merge_time")
-    df = df.merge(flow_merge, on="_merge_time", how="left")
-    flow_matched = int(df[flow_col].notna().sum())
-    context.log.info(f"✓ Streamflow merged: {flow_matched}/{len(df)} rows matched")
-    if flow_matched < len(df):
-        context.log.warning(f"  {len(df) - flow_matched} rows have no streamflow match — will default to 0.0 in preprocessor")
 
-    # --- Merge tidal forecast ---
     tf = tidal_forecast[["time", "tide_height", "tidal_state"]].copy()
     tf_times = pd.to_datetime(tf["time"])
     if tf_times.dt.tz is not None:
@@ -442,6 +433,26 @@ def raw_environmental_data(
     context.log.info(f"✓ Tidal merged: {tide_matched}/{len(df)} rows matched")
     if tide_matched < len(df):
         context.log.warning(f"  {len(df) - tide_matched} rows have no tidal match — will default to 0.0 in preprocessor")
+
+    # --- Merge SBIWTP operational data ---
+    sbiwtp_cols = ['sbiwtp_flow_mgd', 'sbiwtp_anomaly', 'sbiwtp_deficit',
+                   'sbiwtp_flow_x_temp', 'sbiwtp_hourly_mgd', 'sbiwtp_sli']
+    available_sbiwtp_cols = [c for c in sbiwtp_cols if c in sbiwtp_operational_data.columns]
+    if available_sbiwtp_cols:
+        sbiwtp_t = sbiwtp_operational_data.copy()
+        sbiwtp_times = pd.to_datetime(sbiwtp_t["time"])
+        if sbiwtp_times.dt.tz is not None:
+            sbiwtp_times = sbiwtp_times.dt.tz_convert("UTC").dt.tz_localize(None)
+        sbiwtp_t["_merge_time"] = sbiwtp_times.dt.floor("h")
+        sbiwtp_merge = sbiwtp_t[["_merge_time"] + available_sbiwtp_cols].drop_duplicates("_merge_time")
+        df = df.merge(sbiwtp_merge, on="_merge_time", how="left")
+        # Apply temperature multiplier to sbiwtp_flow_x_temp if temperature available
+        if "sbiwtp_flow_x_temp" in df.columns and "temperature_2m" in df.columns:
+            df["sbiwtp_flow_x_temp"] = df["sbiwtp_hourly_mgd"] * df["temperature_2m"]
+        sbiwtp_matched = int(df[available_sbiwtp_cols[0]].notna().sum())
+        context.log.info(f"✓ SBIWTP merged: {sbiwtp_matched}/{len(df)} rows matched")
+    else:
+        context.log.warning("No SBIWTP columns found in sbiwtp_operational_data")
 
     df = df.drop(columns=["_merge_time"])
 
@@ -733,7 +744,7 @@ def feature_importance_viz(
 
     # Upload to latest path
     plot_bytes.seek(0)
-    latest_path = f"latest/{LATEST_FORECAST_DATA}/visualizations/feature_importance.png"
+    latest_path = f"latest/{LATEST_FORECAST}/visualizations/feature_importance.png"
     s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
@@ -832,7 +843,7 @@ def confusion_matrix_viz(
 
     # Upload to latest path
     plot_bytes.seek(0)
-    latest_path = f"latest/{LATEST_FORECAST_DATA}/visualizations/confusion_matrix.png"
+    latest_path = f"latest/{LATEST_FORECAST}/visualizations/confusion_matrix.png"
     s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
@@ -920,7 +931,7 @@ def model_comparison_viz(
 
     # Upload to latest path
     plot_bytes.seek(0)
-    latest_path = f"latest/{LATEST_FORECAST_DATA}/visualizations/model_comparison.png"
+    latest_path = f"latest/{LATEST_FORECAST}/visualizations/model_comparison.png"
     s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
@@ -974,11 +985,70 @@ def prediction_timeline_viz(
 
     # Upload to latest path
     plot_bytes.seek(0)
-    latest_path = f"latest/{LATEST_FORECAST_DATA}/visualizations/prediction_timeline.png"
+    latest_path = f"latest/{LATEST_FORECAST}/visualizations/prediction_timeline.png"
     s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
     context.log.info(f"✓ Uploaded to S3: {latest_path}")
+
+
+@dg.asset(
+    key_prefix="h2s",
+    group_name="h2s_visualization",
+    name="cross_correlation_viz",
+    required_resource_keys={"s3"},
+    description="Time-lagged cross-correlation between actual H2S and environmental drivers",
+    auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
+    ins={
+        "raw_environmental_data": dg.AssetIn(key=_KEY("raw_environmental_data")),
+    },
+)
+def cross_correlation_viz(
+    context: dg.AssetExecutionContext,
+    raw_environmental_data: pd.DataFrame,
+) -> None:
+    """Generate and upload cross-correlation plot to S3.
+
+    Requires actual H2S measurements in raw_environmental_data.
+    Computes corr(H2S(t), feature(t - lag)) for each environmental driver
+    at lags -24 h … +24 h, revealing which features *precede* H2S events.
+    Skipped gracefully if no H2S measurements are present.
+    """
+    from h2s.predictor.visualizations import generate_cross_correlation_viz
+
+    s3_resource = context.resources.s3
+
+    h2s_cols = [col for col in raw_environmental_data.columns
+                if col.upper() == "H2S" or "h2s" in col.lower()]
+
+    if not h2s_cols:
+        context.log.warning("⚠ No H2S measurements in raw_environmental_data — skipping cross-correlation")
+        context.add_output_metadata({"status": "skipped", "reason": "No H2S column"})
+        return
+
+    h2s_col = "H2S" if "H2S" in raw_environmental_data.columns else h2s_cols[0]
+    n_valid = int(raw_environmental_data[h2s_col].notna().sum())
+
+    if n_valid < 48:
+        context.log.warning(f"⚠ Only {n_valid} H2S measurements — need ≥48 for meaningful cross-correlation, skipping")
+        context.add_output_metadata({"status": "skipped", "reason": f"Insufficient H2S rows: {n_valid}"})
+        return
+
+    context.log.info(f"Computing cross-correlation over {n_valid} H2S measurements...")
+
+    plot_bytes = generate_cross_correlation_viz(raw_environmental_data, h2s_col=h2s_col)
+
+    timestamp = datetime.now().strftime("%Y-%m-%d")
+    timestamped_path = f"{VISUALIZATIONS_PATH}/{timestamp}/cross_correlation.png"
+    s3_resource.putFile(plot_bytes.read(), timestamped_path, bucket=s3_resource.S3_BUCKET, content_type="image/png")
+
+    plot_bytes.seek(0)
+    latest_path = f"latest/{LATEST_FORECAST}/visualizations/cross_correlation.png"
+    s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type="image/png")
+
+    context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
+    context.log.info(f"✓ Uploaded to S3: {latest_path}")
+    context.add_output_metadata({"status": "ok", "h2s_rows": n_valid, "s3_path": timestamped_path})
 
 
 @dg.asset(
@@ -1024,20 +1094,20 @@ def predictions_export(
         dataset_identifier="h2s_predictions",
         s3_resource=s3_resource,
         metadata=metadata,
-        latestdatasetpath=LATEST_FORECAST_DATA,
+        latestdatasetpath=LATEST_FORECAST,
         enable_latest_path=True,
         formats=['csv', 'json']
     )
 
     context.log.info(f"✓ Exported predictions to {timestamped_path}")
-    context.log.info(f"✓ Latest path: latest/{LATEST_FORECAST_DATA}")
+    context.log.info(f"✓ Latest path: latest/{LATEST_FORECAST}")
 
     # === PER-VARIANT PREDICTIONS ===
     for variant, variant_df in h2s_variant_predictions.items():
         variant_csv = variant_df.to_csv(index=False)
         s3_resource.putFile_text(
             variant_csv,
-            path=f"latest/{LATEST_FORECAST_DATA}/h2s_predictions_{variant}.csv",
+            path=f"latest/{LATEST_FORECAST}/h2s_predictions_{variant}.csv",
             bucket=s3_resource.S3_BUCKET,
             content_type='text/csv',
         )
@@ -1047,7 +1117,7 @@ def predictions_export(
     ensemble_csv = h2s_ensemble_predictions.to_csv(index=False)
     s3_resource.putFile_text(
         ensemble_csv,
-        path=f"latest/{LATEST_FORECAST_DATA}/h2s_predictions_ensemble.csv",
+        path=f"latest/{LATEST_FORECAST}/h2s_predictions_ensemble.csv",
         bucket=s3_resource.S3_BUCKET,
         content_type='text/csv',
     )

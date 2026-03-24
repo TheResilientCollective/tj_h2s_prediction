@@ -28,8 +28,8 @@ def defs():
     # Import prediction pipeline assets
     from h2s.defs.h2s_pipeline import (
         h2s_model_artifacts,
-        streamflow_forecast,
         tidal_forecast,
+        sbiwtp_operational_data,
         raw_environmental_data,
         actual_h2s_data,
         preprocessed_features,
@@ -41,29 +41,29 @@ def defs():
         confusion_matrix_viz,
         model_comparison_viz,
         prediction_timeline_viz,
+        cross_correlation_viz,
         predictions_export,
         daily_validation_report,
     )
 
-    # Import training pipeline assets
-    from h2s.defs.h2s_training_pipeline import (
-        # Phase 1: Data Extraction
-        monthly_training_data,
-        relabeled_training_data,
-        data_quality_report,
-        training_data,
-        validation_data,
-        # Phase 2: Training
-        trained_model_cv,
-        model_training_metrics,
-        feature_importance_analysis,
-        # Phase 3: Validation
-        validation_predictions,
-        validation_report,
-        model_comparison_report,
-        # Phase 4: Deployment
-        deployment_approval,
-        production_model_deployment,
+    # Import multi-station training pipeline assets
+    from h2s.defs.h2s_multi_station_training import (
+        multi_station_training_data,
+        per_station_trained_models,
+        station_training_report,
+        station_model_deployment,
+        multi_station_training_job,
+        station_deployment_job,
+    )
+
+    # Import daily analysis pipeline assets
+    from h2s.defs.h2s_daily_pipeline import (
+        multi_station_model_artifacts,
+        source_attribution,
+        daily_station_forecasts,
+        daily_dashboard_viz,
+        daily_summary_json,
+        daily_analysis_job,
     )
 
     # Import schedules and jobs
@@ -78,15 +78,17 @@ def defs():
         forecast_prediction_schedule,
         daily_validation_job,
         daily_validation_schedule,
+        multi_station_training_schedule,
+        daily_analysis_schedule,
     )
 
     # Create definitions with assets, jobs, schedules, and resources
     all_defs = Definitions(
         assets=[
-            # Prediction Pipeline Assets (16 assets)
+            # Prediction Pipeline Assets
             h2s_model_artifacts,
-            streamflow_forecast,
             tidal_forecast,
+            sbiwtp_operational_data,
             raw_environmental_data,
             actual_h2s_data,
             preprocessed_features,
@@ -98,40 +100,43 @@ def defs():
             confusion_matrix_viz,
             model_comparison_viz,
             prediction_timeline_viz,
+            cross_correlation_viz,
             predictions_export,
             daily_validation_report,
-            # Training Pipeline Assets (14 assets)
-            # Phase 1: Data Extraction
-            monthly_training_data,
-            relabeled_training_data,
-            data_quality_report,
-            training_data,
-            validation_data,
-            # Phase 2: Training
-            trained_model_cv,
-            model_training_metrics,
-            feature_importance_analysis,
-            # Phase 3: Validation
-            validation_predictions,
-            validation_report,
-            model_comparison_report,
-            # Phase 4: Deployment
-            deployment_approval,
-            production_model_deployment,
+            # Multi-Station Training Pipeline Assets
+            multi_station_training_data,
+            per_station_trained_models,
+            station_training_report,
+            station_model_deployment,
+            # Daily Analysis Pipeline Assets
+            multi_station_model_artifacts,
+            source_attribution,
+            daily_station_forecasts,
+            daily_dashboard_viz,
+            daily_summary_json,
         ],
         jobs=[
+            # Prediction jobs
+            forecast_prediction_job,
+            daily_validation_job,
+            # Training jobs (old single-model pipeline — kept for reference)
             monthly_data_extraction_job,
             monthly_model_training_job,
             deploy_approved_model_job,
             approve_and_deploy_job,
-            forecast_prediction_job,
-            daily_validation_job,
+            # New multi-station training jobs
+            multi_station_training_job,
+            station_deployment_job,
+            # Daily analysis job
+            daily_analysis_job,
         ],
         schedules=[
-            monthly_data_schedule,
-            monthly_model_training_schedule,
             forecast_prediction_schedule,
             daily_validation_schedule,
+            monthly_data_schedule,
+            monthly_model_training_schedule,
+            multi_station_training_schedule,
+            daily_analysis_schedule,
         ],
         resources=resources[deployment_name]
     )

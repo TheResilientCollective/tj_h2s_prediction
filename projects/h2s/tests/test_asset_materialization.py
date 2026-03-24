@@ -54,6 +54,40 @@ def mock_s3_resource():
 
 
 @pytest.fixture
+def tidal_stub():
+    """Stub tidal_forecast asset — no S3 calls."""
+    @dg.asset(key_prefix="h2s", group_name="h2s_prediction")
+    def tidal_forecast():
+        now = pd.Timestamp.utcnow().floor("h").tz_localize(None)
+        times = pd.date_range(start=now, periods=240, freq="h")
+        return pd.DataFrame({
+            'time': times,
+            'tide_height': 1.0,
+            'tidal_state': 'flood',
+        })
+    return tidal_forecast
+
+
+@pytest.fixture
+def sbiwtp_stub():
+    """Stub sbiwtp_operational_data asset — no S3 calls, returns persistence defaults."""
+    @dg.asset(key_prefix="h2s", group_name="h2s_prediction")
+    def sbiwtp_operational_data():
+        now = pd.Timestamp.utcnow().floor("h").tz_localize(None)
+        times = pd.date_range(start=now, periods=240, freq="h")
+        return pd.DataFrame({
+            'time': times,
+            'sbiwtp_flow_mgd': 23.5,
+            'sbiwtp_hourly_mgd': 23.5 / 24,
+            'sbiwtp_anomaly': 0.0,
+            'sbiwtp_deficit': 0.0,
+            'sbiwtp_flow_x_temp': 0.0,
+            'sbiwtp_sli': 0.0,
+        })
+    return sbiwtp_operational_data
+
+
+@pytest.fixture
 def sample_environmental_data():
     """Sample environmental data CSV for testing."""
     df = pd.DataFrame({
@@ -77,7 +111,7 @@ def sample_environmental_data():
 class TestRawEnvironmentalDataMaterialization:
     """Test raw_environmental_data asset materialization."""
 
-    def test_materializes_from_s3(self, sample_environmental_data, mock_s3_resource):
+    def test_materializes_from_s3(self, sample_environmental_data, mock_s3_resource, tidal_stub, sbiwtp_stub):
         """Test that raw_environmental_data materializes from S3."""
         # Create CSV stream
         csv_buffer = io.StringIO()
@@ -88,7 +122,7 @@ class TestRawEnvironmentalDataMaterialization:
         mock_s3_resource._get_stream_mock.return_value = csv_buffer
 
         result = dg.materialize(
-            assets=[raw_environmental_data],
+            assets=[tidal_stub, sbiwtp_stub, raw_environmental_data],
             resources={"s3": mock_s3_resource},
         )
 
@@ -99,7 +133,7 @@ class TestRawEnvironmentalDataMaterialization:
         assert 'time' in output.columns
         assert pd.api.types.is_datetime64_any_dtype(output['time'])
 
-    def test_materializes_with_correct_columns(self, sample_environmental_data, mock_s3_resource):
+    def test_materializes_with_correct_columns(self, sample_environmental_data, mock_s3_resource, tidal_stub, sbiwtp_stub):
         """Test that materialized data has all expected columns."""
         csv_buffer = io.StringIO()
         sample_environmental_data.to_csv(csv_buffer, index=False)
@@ -107,7 +141,7 @@ class TestRawEnvironmentalDataMaterialization:
         mock_s3_resource._get_stream_mock.return_value = csv_buffer
 
         result = dg.materialize(
-            assets=[raw_environmental_data],
+            assets=[tidal_stub, sbiwtp_stub, raw_environmental_data],
             resources={"s3": mock_s3_resource},
         )
 
@@ -125,7 +159,7 @@ class TestRawEnvironmentalDataMaterialization:
 class TestPreprocessedFeaturesMaterialization:
     """Test preprocessed_features asset materialization with mocked predictor."""
 
-    def test_materializes_with_mocked_predictor(self, sample_environmental_data, mock_s3_resource):
+    def test_materializes_with_mocked_predictor(self, sample_environmental_data, mock_s3_resource, tidal_stub, sbiwtp_stub):
         """Test that preprocessed_features materializes when predictor is mocked."""
         # Create CSV stream for raw data
         csv_buffer = io.StringIO()
@@ -155,7 +189,7 @@ class TestPreprocessedFeaturesMaterialization:
                 return mock_predictor
 
             result = dg.materialize(
-                assets=[test_h2s_model_artifacts, raw_environmental_data, preprocessed_features],
+                assets=[tidal_stub, sbiwtp_stub, test_h2s_model_artifacts, raw_environmental_data, preprocessed_features],
                 resources={"s3": mock_s3_resource},
             )
 
@@ -170,7 +204,7 @@ class TestPreprocessedFeaturesMaterialization:
 class TestH2SPredictionsMaterialization:
     """Test h2s_predictions asset materialization with mocked predictor."""
 
-    def test_materializes_with_mocked_predictions(self, sample_environmental_data, mock_s3_resource):
+    def test_materializes_with_mocked_predictions(self, sample_environmental_data, mock_s3_resource, sbiwtp_stub):
         """Test that predictions materialize with mocked predictor."""
         # Create CSV stream for raw data
         csv_buffer = io.StringIO()
@@ -205,7 +239,7 @@ class TestH2SPredictionsMaterialization:
                 return mock_predictor
 
             result = dg.materialize(
-                assets=[test_h2s_model_artifacts, raw_environmental_data, preprocessed_features, h2s_predictions],
+                assets=[sbiwtp_stub, test_h2s_model_artifacts, raw_environmental_data, preprocessed_features, h2s_predictions],
                 resources={"s3": mock_s3_resource},
             )
 
@@ -221,7 +255,7 @@ class TestH2SPredictionsMaterialization:
 class TestH2SAlertsMaterialization:
     """Test h2s_alerts asset materialization."""
 
-    def test_materializes_and_filters_alerts(self, sample_environmental_data, mock_s3_resource):
+    def test_materializes_and_filters_alerts(self, sample_environmental_data, mock_s3_resource, sbiwtp_stub):
         """Test that alerts materialize and filter correctly."""
         # Create CSV stream for raw data
         csv_buffer = io.StringIO()
@@ -257,6 +291,7 @@ class TestH2SAlertsMaterialization:
 
             result = dg.materialize(
                 assets=[
+                    sbiwtp_stub,
                     test_h2s_model_artifacts,
                     raw_environmental_data,
                     preprocessed_features,
@@ -283,7 +318,7 @@ class TestH2SAlertsMaterialization:
 class TestPipelineDataFlow:
     """Test data flow through the pipeline."""
 
-    def test_data_continuity_through_pipeline(self, sample_environmental_data, mock_s3_resource):
+    def test_data_continuity_through_pipeline(self, sample_environmental_data, mock_s3_resource, sbiwtp_stub):
         """Test that same number of rows flows through entire pipeline."""
         # Create CSV stream for raw data
         csv_buffer = io.StringIO()
@@ -318,6 +353,7 @@ class TestPipelineDataFlow:
 
             result = dg.materialize(
                 assets=[
+                    sbiwtp_stub,
                     test_h2s_model_artifacts,
                     raw_environmental_data,
                     preprocessed_features,
@@ -344,7 +380,7 @@ class TestPipelineDataFlow:
 class TestAssetFailureScenarios:
     """Test asset behavior in failure scenarios."""
 
-    def test_raw_data_fails_without_s3(self, mock_s3_resource):
+    def test_raw_data_fails_without_s3(self, mock_s3_resource, sbiwtp_stub):
         """Test that raw_environmental_data fails when S3 unavailable and no local data."""
         # Mock S3 to fail
         mock_s3_resource._get_stream_mock.side_effect = Exception("S3 connection failed")
@@ -352,14 +388,14 @@ class TestAssetFailureScenarios:
         # Mock local read to also fail
         with patch('pandas.read_csv', side_effect=FileNotFoundError("Local file not found")):
             result = dg.materialize(
-                assets=[raw_environmental_data],
+                assets=[sbiwtp_stub, raw_environmental_data],
                 resources={"s3": mock_s3_resource},
                 raise_on_error=False,
             )
 
             assert not result.success
 
-    def test_asset_reports_metadata(self, sample_environmental_data, mock_s3_resource):
+    def test_asset_reports_metadata(self, sample_environmental_data, mock_s3_resource, sbiwtp_stub):
         """Test that assets include metadata in their outputs."""
         csv_buffer = io.StringIO()
         sample_environmental_data.to_csv(csv_buffer, index=False)
@@ -367,7 +403,7 @@ class TestAssetFailureScenarios:
         mock_s3_resource._get_stream_mock.return_value = csv_buffer
 
         result = dg.materialize(
-            assets=[raw_environmental_data],
+            assets=[sbiwtp_stub, raw_environmental_data],
             resources={"s3": mock_s3_resource},
         )
 
