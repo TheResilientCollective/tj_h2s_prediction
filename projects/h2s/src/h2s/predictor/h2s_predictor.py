@@ -258,14 +258,7 @@ class H2SPredictor:
                 if col not in df.columns:
                     df[col] = 0.0
 
-        # ---- Encode categorical variables ----
-        if 'wind_direction_categorical' in df.columns and self.wind_cat_mapping:
-            df['wind_direction_categorical_encoded'] = (
-                df['wind_direction_categorical'].map(self.wind_cat_mapping).fillna(-1).astype(int)
-            )
-        else:
-            df['wind_direction_categorical_encoded'] = -1
-
+        # ---- Encode tidal state ----
         if 'tidal_state' in df.columns and self.tidal_mapping:
             df['tidal_state_encoded'] = df['tidal_state'].map(self.tidal_mapping).fillna(-1).astype(int)
         elif 'tidal_state_encoded' not in df.columns:
@@ -293,7 +286,17 @@ class H2SPredictor:
         for col in missing_cols:
             df[col] = 0.0
 
-        return df
+        # ---- Return only model features + essential metadata ----
+        # Keep time/date column for tracking, site_name if present
+        keep_cols = self.feature_cols.copy()
+        time_col = next((c for c in ['date', 'time'] if c in df.columns), None)
+        if time_col and time_col not in keep_cols:
+            keep_cols.append(time_col)
+        if 'site_name' in df.columns and 'site_name' not in keep_cols:
+            keep_cols.append('site_name')
+
+        # Only return columns that exist in the dataframe
+        return df[[col for col in keep_cols if col in df.columns]]
 
     def predict(self, df: pd.DataFrame, orange_threshold: Optional[float] = None,
                 yellow_threshold: Optional[float] = None) -> pd.DataFrame:

@@ -209,12 +209,8 @@ def _flow_from_diurnal_median(timestamps: pd.Series) -> pd.Series:
     )
 
 
-_CARDINAL_DIRS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+# Wind direction categorical mapping (kept for model metadata compatibility, not used in features)
 _WD_CAT_MAPPING = {"E": 0, "N": 1, "NE": 2, "NW": 3, "S": 4, "SE": 5, "SW": 6, "W": 7}
-
-
-def _degrees_to_cardinal(deg: float) -> str:
-    return _CARDINAL_DIRS[int((deg + 22.5) / 45.0) % 8]
 
 
 def _add_derived_features(df: pd.DataFrame, time_col: str = "date") -> pd.DataFrame:
@@ -222,12 +218,10 @@ def _add_derived_features(df: pd.DataFrame, time_col: str = "date") -> pd.DataFr
     df = df.copy().sort_values(time_col).reset_index(drop=True)
     ts = pd.to_datetime(df[time_col])
 
-    # Wind direction cyclicals + categorical
+    # Wind direction cyclicals
     rad = np.deg2rad(df["wind_direction_10m"].fillna(0))
     df["wind_direction_sin"] = np.sin(rad)
     df["wind_direction_cos"] = np.cos(rad)
-    df["wind_direction_categorical"] = df["wind_direction_10m"].fillna(0).apply(_degrees_to_cardinal)
-    df["wind_direction_categorical_encoded"] = df["wind_direction_categorical"].map(_WD_CAT_MAPPING).fillna(-1).astype(int)
 
     # Rolling wind features
     for h in (2, 3, 4):
