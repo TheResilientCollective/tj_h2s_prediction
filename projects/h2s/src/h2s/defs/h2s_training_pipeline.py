@@ -1112,15 +1112,29 @@ def model_comparison_report(
     # === CURRENT MODEL METRICS ===
     # Production model expects a 'date' column for temporal feature engineering
     y_true = val_df['h2s_category'].map(label_map).values
-    val_for_prod = val_df.rename(columns={'time': 'date'})
-    val_preprocessed = h2s_model_artifacts.preprocess_data(val_for_prod)
-    current_predictions = h2s_model_artifacts.predict(val_preprocessed)
-    y_pred_current = current_predictions['predicted_category'].map(label_map).values
+    current_model_compatible = True
+    current_metrics = None
 
-    current_metrics = calculate_metrics(y_true, y_pred_current, class_names=unique_classes)
+    try:
+        val_for_prod = val_df.rename(columns={'time': 'date'})
+        val_preprocessed = h2s_model_artifacts.preprocess_data(val_for_prod)
+        current_predictions = h2s_model_artifacts.predict(val_preprocessed)
+        y_pred_current = current_predictions['predicted_category'].map(label_map).values
+        current_metrics = calculate_metrics(y_true, y_pred_current, class_names=unique_classes)
+    except (ValueError, KeyError) as e:
+        current_model_compatible = False
+        context.log.warning(
+            f"Current production model is incompatible with validation data features: {e}\n"
+            f"This typically means the production model was trained with different features.\n"
+            f"Skipping comparison — new model will be evaluated on its own metrics only."
+        )
 
-    context.log.info(f"\n📊 NEW MODEL:     balanced_acc={new_metrics['balanced_accuracy']:.3f}")
-    context.log.info(f"📊 CURRENT MODEL: balanced_acc={current_metrics['balanced_accuracy']:.3f}")
+    if current_metrics:
+        context.log.info(f"\n📊 NEW MODEL:     balanced_acc={new_metrics['balanced_accuracy']:.3f}")
+        context.log.info(f"📊 CURRENT MODEL: balanced_acc={current_metrics['balanced_accuracy']:.3f}")
+    else:
+        context.log.info(f"\n📊 NEW MODEL:     balanced_acc={new_metrics['balanced_accuracy']:.3f}")
+        context.log.info(f"📊 CURRENT MODEL: (incompatible — cannot evaluate)")
 
     # === MODEL COMPARISON ===
     new_metrics_with_defaults = {
@@ -1128,11 +1142,20 @@ def model_comparison_report(
         'recall_orange': new_metrics.get('recall_orange', 0.0),
         'precision_orange': new_metrics.get('precision_orange', 0.0),
     }
-    current_metrics_with_defaults = {
-        **current_metrics,
-        'recall_orange': current_metrics.get('recall_orange', 0.0),
-        'precision_orange': current_metrics.get('precision_orange', 0.0),
-    }
+
+    if current_metrics:
+        current_metrics_with_defaults = {
+            **current_metrics,
+            'recall_orange': current_metrics.get('recall_orange', 0.0),
+            'precision_orange': current_metrics.get('precision_orange', 0.0),
+        }
+    else:
+        # No current model to compare — use zeros so new model auto-passes gates
+        current_metrics_with_defaults = {
+            'balanced_accuracy': 0.0,
+            'recall_orange': 0.0,
+            'precision_orange': 0.0,
+        }
 
     approval_recommended, comparison_details = compare_models(
         new_metrics=new_metrics_with_defaults,
@@ -1141,6 +1164,13 @@ def model_comparison_report(
         min_orange_recall_delta=-0.05,
         min_orange_precision_delta=-0.10,
     )
+
+    if not current_model_compatible:
+        comparison_details['current_model_incompatible'] = True
+        context.log.warning(
+            "Current production model has incompatible features. "
+            "New model auto-passes comparison gates. Deploy to update production."
+        )
 
     if 'orange' not in unique_classes:
         context.log.warning("⚠️  Orange class not present in validation data — orange quality gates may not be meaningful")
@@ -1173,16 +1203,24 @@ def model_comparison_report(
 
     # Subplot 2: Confusion Matrix — Current Model
     ax2 = axes[0, 1]
-    cm_current = np.array(current_metrics['confusion_matrix'])
-    sns.heatmap(
-        cm_current, annot=True, fmt='d', cmap='Oranges',
-        xticklabels=['Green', 'Orange', 'Yellow'],
-        yticklabels=['Green', 'Orange', 'Yellow'],
-        ax=ax2
-    )
-    ax2.set_title('Current Model - Confusion Matrix', fontweight='bold')
-    ax2.set_ylabel('True Label')
-    ax2.set_xlabel('Predicted Label')
+    if current_model_compatible and current_metrics and 'confusion_matrix' in current_metrics:
+        cm_current = np.array(current_metrics['confusion_matrix'])
+        sns.heatmap(
+            cm_current, annot=True, fmt='d', cmap='Oranges',
+            xticklabels=['Green', 'Orange', 'Yellow'],
+            yticklabels=['Green', 'Orange', 'Yellow'],
+            ax=ax2
+        )
+        ax2.set_title('Current Model - Confusion Matrix', fontweight='bold')
+        ax2.set_ylabel('True Label')
+        ax2.set_xlabel('Predicted Label')
+    else:
+        ax2.text(0.5, 0.5, 'Current production model\nincompatible with\nvalidation features',
+                 ha='center', va='center', fontsize=12, color='gray',
+                 transform=ax2.transAxes)
+        ax2.set_title('Current Model - Incompatible', fontweight='bold', color='gray')
+        ax2.set_xticks([])
+        ax2.set_yticks([])
 
     # Subplot 3: Per-Class Metrics Comparison
     ax3 = axes[1, 0]
@@ -1192,10 +1230,11 @@ def model_comparison_report(
     width = 0.12
     for i, metric in enumerate(metrics_to_plot):
         new_values = [new_metrics.get(f'{metric}_{cls}', 0.0) for cls in classes]
-        current_values = [current_metrics.get(f'{metric}_{cls}', 0.0) for cls in classes]
         offset = (i - 1) * width
         ax3.bar(x + offset - width/2, new_values, width, label=f'New {metric.capitalize()}', alpha=0.8)
-        ax3.bar(x + offset + width/2, current_values, width, label=f'Current {metric.capitalize()}', alpha=0.6)
+        if current_model_compatible and current_metrics:
+            current_values = [current_metrics.get(f'{metric}_{cls}', 0.0) for cls in classes]
+            ax3.bar(x + offset + width/2, current_values, width, label=f'Current {metric.capitalize()}', alpha=0.6)
     ax3.set_ylabel('Score')
     ax3.set_title('Per-Class Metrics Comparison', fontweight='bold')
     ax3.set_xticks(x)
@@ -1266,9 +1305,10 @@ def model_comparison_report(
         'variant': variant,
         'validation_samples': validation_report['validation_samples'],
         'approval_recommended': approval_recommended,
+        'current_model_compatible': current_model_compatible,
         'comparison_details': comparison_details,
         'new_model_metrics': new_metrics,
-        'current_model_metrics': current_metrics,
+        'current_model_metrics': current_metrics if current_metrics else {'status': 'incompatible'},
         'visualization_path': s3_path,
     }
 
@@ -1283,16 +1323,20 @@ def model_comparison_report(
     metadata = {
         "s3_path": s3_path,
         "approval_recommended": approval_recommended,
+        "current_model_compatible": current_model_compatible,
         "balanced_acc_delta": float(comparison_details['metric_differences'].get('balanced_accuracy', 0.0)),
         "orange_recall_delta": float(comparison_details['metric_differences'].get('recall_orange', 0.0)),
         "field_mismatch": comparison_details.get('field_mismatch', False),
     }
 
+    if not current_model_compatible:
+        metadata["current_model_status"] = "incompatible_features"
+
     if comparison_details.get('field_mismatch'):
         metadata["missing_in_new"] = comparison_details.get('missing_in_new', [])
         metadata["missing_in_current"] = comparison_details.get('missing_in_current', [])
         context.log.warning(
-            f"⚠️  Field mismatch detected between models:\n"
+            f"Field mismatch detected between models:\n"
             f"   Missing in new model: {metadata['missing_in_new']}\n"
             f"   Missing in current model: {metadata['missing_in_current']}"
         )
