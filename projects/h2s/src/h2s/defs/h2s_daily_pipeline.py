@@ -272,8 +272,8 @@ def multi_station_model_artifacts(context: dg.AssetExecutionContext) -> dict:
         "lookback_days": dg.Field(int, default_value=7),
         "local_obs_path": dg.Field(
             str,
-            default_value="/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/modeldata_h2s_nofill.parquet",
-            description="Local fallback path for observation data",
+            default_value="data/modeldata_h2s_nofill.parquet",
+            description="Local fallback path for observation data (relative to project root)",
         ),
         "obs_bucket": dg.Field(str, default_value="resilentpublic"),
     },
@@ -375,7 +375,7 @@ def source_attribution(context: dg.AssetExecutionContext) -> pd.DataFrame:
     config_schema={
         "local_obs_path": dg.Field(
             str,
-            default_value="/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/modeldata_h2s_nofill.parquet",
+            default_value="data/modeldata_h2s_nofill.parquet",
         ),
         "obs_bucket": dg.Field(str, default_value="resilentpublic"),
         "forecast_hours": dg.Field(int, default_value=48),
@@ -440,21 +440,14 @@ def daily_station_forecasts(
         fc_df['tide_height'] = 0.5
         fc_df['tidal_state'] = 'ebb'
 
-    # Load streamflow forecast
-    try:
-        sf_stream = s3.get_stream(path="latest/tijuana/streamflow_forecast/latest.csv")
-        sf_df = pd.read_csv(sf_stream)
-        sf_df['_mtime'] = pd.to_datetime(sf_df['time']).dt.floor('h')
-        fc_df['_mtime'] = pd.to_datetime(fc_df['time']).dt.floor('h')
-        fc_df = fc_df.merge(
-            sf_df[['_mtime', FLOW_COL]].drop_duplicates('_mtime') if FLOW_COL in sf_df.columns
-            else sf_df[['_mtime']].assign(**{FLOW_COL: 2.0}).drop_duplicates('_mtime'),
-            on='_mtime', how='left'
-        ).drop(columns=['_mtime'])
-    except Exception:
+    # Streamflow is now included in the forecast data feed
+    # Default to 2.0 m³/s if not present
+    if FLOW_COL not in fc_df.columns:
         fc_df[FLOW_COL] = 2.0
-
-    fc_df[FLOW_COL] = fc_df.get(FLOW_COL, pd.Series(2.0, index=fc_df.index)).fillna(2.0)
+        context.log.info(f"⚠ {FLOW_COL} not in forecast data, using default 2.0 m³/s")
+    else:
+        fc_df[FLOW_COL] = fc_df[FLOW_COL].fillna(2.0)
+        context.log.info(f"✓ {FLOW_COL} loaded from forecast data")
 
     results = []
     for site, info in STATION_META.items():
@@ -569,7 +562,7 @@ def _generate_synthetic_forecast(obs_df: pd.DataFrame, hours: int) -> pd.DataFra
     config_schema={
         "local_obs_path": dg.Field(
             str,
-            default_value="/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/modeldata_h2s_nofill.parquet",
+            default_value="data/modeldata_h2s_nofill.parquet",
         ),
         "obs_bucket": dg.Field(str, default_value="resilentpublic"),
     },
@@ -837,7 +830,7 @@ def _compute_source_probability_grid(obs_df: pd.DataFrame):
     config_schema={
         "local_obs_path": dg.Field(
             str,
-            default_value="/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/modeldata_h2s_nofill.parquet",
+            default_value="data/modeldata_h2s_nofill.parquet",
         ),
         "obs_bucket": dg.Field(str, default_value="resilentpublic"),
     },

@@ -136,7 +136,7 @@ def fetch_tides(date_min, date_max) -> pd.DataFrame:
     Dagster pipeline (flood/ebb/slack high/slack low).
 
     Flow estimated using diurnal (month, hour) median from historical training
-    data — same approach as the streamflow_forecast Dagster asset.
+    data (streamflow is now included in the forecast data feed).
 
     Returns DataFrame with columns: date, tide_height, tidal_state,
     tidal_state_encoded, Flow (m^3/s)--Border.
@@ -171,7 +171,7 @@ def fetch_tides(date_min, date_max) -> pd.DataFrame:
     df["tidal_state_encoded"] = df["tidal_state"].map(TIDAL_ENCODING).fillna(-1).astype(int)
 
     # Flow: diurnal (month, hour) median from historical training data
-    # — same approach as the streamflow_forecast Dagster asset
+    # (streamflow is now included in the forecast data feed)
     flow_col = "Flow (m^3/s)--Border"
     flow_series = _flow_from_diurnal_median(df["date"])
     df[flow_col] = flow_series.values
@@ -183,7 +183,7 @@ def fetch_tides(date_min, date_max) -> pd.DataFrame:
 def _flow_from_diurnal_median(timestamps: pd.Series) -> pd.Series:
     """Estimate flow using (month, hour) median from historical training data.
 
-    Mirrors the streamflow_forecast Dagster asset logic.
+    Streamflow is now included in the forecast data feed.
     """
     flow_col = "Flow (m^3/s)--Border"
     global_fallback = 1.35

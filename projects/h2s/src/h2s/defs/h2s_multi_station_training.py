@@ -47,8 +47,8 @@ _KEY = lambda name: dg.AssetKey(["h2s", name])
     config_schema={
         "local_fallback_path": dg.Field(
             str,
-            default_value="/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/modeldata_h2s_nofill.parquet",
-            description="Local fallback path when S3 is unavailable",
+            default_value="data/modeldata_h2s_nofill.parquet",
+            description="Local fallback path when S3 is unavailable (relative to project root)",
         ),
         "s3_bucket": dg.Field(
             str,
