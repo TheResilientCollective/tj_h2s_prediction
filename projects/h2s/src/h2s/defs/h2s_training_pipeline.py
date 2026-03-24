@@ -1259,20 +1259,24 @@ def model_comparison_report(
         summary_text += "  (Comparing common metrics only)\n\n"
 
     # Balanced accuracy (or accuracy fallback)
-    if 'balanced_accuracy' in new_metrics and 'balanced_accuracy' in current_metrics:
+    if current_metrics and 'balanced_accuracy' in new_metrics and 'balanced_accuracy' in current_metrics:
         summary_text += "BALANCED ACCURACY\n"
         summary_text += f"  New:     {new_metrics['balanced_accuracy']:.3f}\n"
         summary_text += f"  Current: {current_metrics['balanced_accuracy']:.3f}\n"
         summary_text += f"  Delta:   {new_metrics['balanced_accuracy'] - current_metrics['balanced_accuracy']:+.3f}\n\n"
-    elif 'accuracy' in new_metrics and 'accuracy' in current_metrics:
+    elif current_metrics and 'accuracy' in new_metrics and 'accuracy' in current_metrics:
         summary_text += "ACCURACY\n"
         summary_text += f"  New:     {new_metrics['accuracy']:.3f}\n"
         summary_text += f"  Current: {current_metrics['accuracy']:.3f}\n"
         summary_text += f"  Delta:   {new_metrics['accuracy'] - current_metrics['accuracy']:+.3f}\n\n"
+    elif 'balanced_accuracy' in new_metrics:
+        summary_text += "BALANCED ACCURACY (new model only)\n"
+        summary_text += f"  New:     {new_metrics['balanced_accuracy']:.3f}\n"
+        summary_text += f"  Current: N/A (incompatible)\n\n"
 
     # Orange recall if available
     nr = new_metrics.get('recall_orange', None)
-    cr = current_metrics.get('recall_orange', None)
+    cr = current_metrics.get('recall_orange', None) if current_metrics else None
     if nr is not None and cr is not None:
         summary_text += "ORANGE RECALL (Critical Metric)\n"
         summary_text += f"  New:     {nr:.3f}\n"
