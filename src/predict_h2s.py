@@ -1,316 +1,358 @@
 #!/usr/bin/env python3
 """
-H2S Prediction System for NESTOR - BES
-=======================================
+H2S Prediction System
+=====================
 
-This script generates H2S predictions from new data using the trained XGBoost model.
+Generates H2S predictions from CSV data using trained models produced by
+train_models_auto.py. Uses regression + binary classifiers to assign risk tiers
+(GREEN/YELLOW/ORANGE/RED), consistent with h2s_daily_analysis.py.
 
 Usage:
-    python predict_h2s.py --input new_data.csv --output predictions.csv
-    python predict_h2s.py --input new_data.csv --output predictions.csv --threshold 0.25
-    python predict_h2s.py --input new_data.csv --output predictions.csv --filter-alerts
+    python predict_h2s.py --input data.csv --models ./models
+    python predict_h2s.py --input data.csv --models ./models --output ./results
+    python predict_h2s.py --input data.csv --models ./models --filter-alerts
+    python predict_h2s.py --input data.csv --models ./models --site "IB CIVIC CTR"
 
 Requirements:
-    - nestor_xgboost_weighted_model.json
-    - nestor_preprocessing_info.pkl
-    - pandas, numpy, xgboost, scikit-learn
+    - Model .pkl files from train_models_auto.py (best_reg_*, best_clf_5ppb_*, best_clf_10ppb_*)
+    - pandas, numpy, scikit-learn
 """
 
-import pandas as pd
-import numpy as np
-import xgboost as xgb
+import os
 import pickle
 import argparse
 from datetime import datetime
+
+import numpy as np
+import pandas as pd
 import warnings
 warnings.filterwarnings('ignore')
 
 
-class H2SPredictor:
-    """
-    H2S Forecasting Model for NESTOR - BES
-    
-    Predicts H2S levels in three categories:
-    - Green: H2S < 5 ppb (safe)
-    - Yellow: 5 ≤ H2S < 30 ppb (caution)
-    - Orange: H2S ≥ 30 ppb (alert)
-    """
-    
-    def __init__(self, model_path, preprocessing_path):
-        """
-        Load the trained model and preprocessing information.
-        
-        Args:
-            model_path: Path to XGBoost model file (.json)
-            preprocessing_path: Path to preprocessing info file (.pkl)
-        """
-        print("Loading H2S prediction model...")
-        
-        # Load XGBoost model
-        self.model = xgb.XGBClassifier()
-        self.model.load_model(model_path)
-        print(f"✓ Model loaded from {model_path}")
-        
-        # Load preprocessing info
-        with open(preprocessing_path, 'rb') as f:
-            self.prep_info = pickle.load(f)
-        
-        self.feature_cols = self.prep_info['feature_cols']
-        self.class_names = self.prep_info['class_names']
-        self.le_wind_cat = self.prep_info.get('le_wind_cat')
-        self.le_tidal = self.prep_info.get('le_tidal')
-        
-        print(f"✓ Preprocessing info loaded")
-        print(f"  Features: {len(self.feature_cols)}")
-        print(f"  Classes: {self.class_names}")
-        print()
-    
-    def preprocess_data(self, df):
-        """
-        Preprocess raw data to match model training format.
-        
-        Args:
-            df: DataFrame with raw sensor data
-            
-        Returns:
-            DataFrame with engineered features ready for prediction
-        """
-        print("Preprocessing data...")
-        df = df.copy()
-        
-        # Convert time to datetime
-        if 'time' in df.columns:
-            df['time'] = pd.to_datetime(df['time'])
-            
-            # Extract temporal features
-            df['hour'] = df['time'].dt.hour
-            df['day_of_week'] = df['time'].dt.dayofweek
-            df['month'] = df['time'].dt.month
-            
-            # Cyclical encoding for hour
-            df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
-            df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
-        
-        # Wind direction cyclical encoding
-        if 'wind_direction_10m' in df.columns:
-            df['wind_direction_sin'] = np.sin(np.radians(df['wind_direction_10m']))
-            df['wind_direction_cos'] = np.cos(np.radians(df['wind_direction_10m']))
-        
-        # Interaction features
-        if 'wind_speed_10m' in df.columns and 'temperature_2m' in df.columns:
-            df['wind_temp_interaction'] = df['wind_speed_10m'] * df['temperature_2m']
-        
-        if 'relative_humidity_2m' in df.columns and 'temperature_2m' in df.columns:
-            df['humidity_temp_interaction'] = df['relative_humidity_2m'] * df['temperature_2m']
-        
-        # Encode categorical variables
-        if 'wind_direction_categorical' in df.columns and self.le_wind_cat is not None:
-            df['wind_direction_cat_encoded'] = self.le_wind_cat.transform(df['wind_direction_categorical'])
-        
-        if 'tidal_state' in df.columns and self.le_tidal is not None:
-            df['tidal_state_encoded'] = self.le_tidal.transform(df['tidal_state'])
-        
-        print(f"✓ Preprocessed {len(df)} samples")
-        return df
-    
-    def predict(self, df, orange_threshold=None, yellow_threshold=None):
-        """
-        Generate predictions for new data.
-        
-        Args:
-            df: DataFrame with preprocessed features
-            orange_threshold: Custom threshold for orange prediction (default: 0.33)
-            yellow_threshold: Custom threshold for yellow prediction (default: 0.33)
-            
-        Returns:
-            DataFrame with original data plus predictions
-        """
-        print("\nGenerating predictions...")
-        
-        # Extract features in correct order
-        X = df[self.feature_cols].copy()
-        
-        # Handle missing values
-        X = X.fillna(X.median())
-        
-        # Get predictions
-        predictions = self.model.predict(X)
-        probabilities = self.model.predict_proba(X)
-        
-        # Apply custom thresholds if provided
-        if orange_threshold is not None or yellow_threshold is not None:
-            ot = orange_threshold if orange_threshold is not None else 0.33
-            yt = yellow_threshold if yellow_threshold is not None else 0.33
-            
-            predictions = self._apply_custom_thresholds(probabilities, ot, yt)
-        
-        # Add predictions to dataframe
-        result = df.copy()
-        result['predicted_category'] = [self.class_names[p] for p in predictions]
-        result['probability_green'] = probabilities[:, 0]
-        result['probability_orange'] = probabilities[:, 1]
-        result['probability_yellow'] = probabilities[:, 2]
-        result['confidence'] = probabilities.max(axis=1)
-        
-        # Add alert flag
-        result['alert'] = result['predicted_category'].isin(['orange', 'yellow'])
-        
-        print(f"✓ Generated {len(result)} predictions")
-        print("\nPrediction Summary:")
-        print(result['predicted_category'].value_counts().to_string())
-        print()
-        
-        return result
-    
-    def _apply_custom_thresholds(self, probabilities, orange_threshold, yellow_threshold):
-        """Apply custom decision thresholds."""
-        predictions = []
-        
-        for prob in probabilities:
-            if prob[1] >= orange_threshold:  # orange probability
-                predictions.append(1)  # orange
-            elif prob[2] >= yellow_threshold:  # yellow probability
-                predictions.append(2)  # yellow
-            else:
-                predictions.append(0)  # green
-        
-        return np.array(predictions)
-    
-    def predict_with_alerts(self, df, orange_threshold=None, yellow_threshold=None):
-        """
-        Generate predictions and return only alerts (orange/yellow).
-        
-        Args:
-            df: DataFrame with preprocessed features
-            orange_threshold: Custom threshold for orange prediction
-            yellow_threshold: Custom threshold for yellow prediction
-            
-        Returns:
-            DataFrame with only orange and yellow predictions
-        """
-        results = self.predict(df, orange_threshold, yellow_threshold)
-        alerts = results[results['alert'] == True].copy()
-        
-        print(f"Found {len(alerts)} alerts ({(alerts['predicted_category']=='orange').sum()} orange, {(alerts['predicted_category']=='yellow').sum()} yellow)")
-        
-        return alerts
+# Ensemble classes must be importable for pickle to load models saved by train_models_auto.py
+class EnsembleRegressor:
+    """Simple averaging ensemble of two regressors."""
+    def __init__(self, model_a, model_b, weight_a=0.5):
+        self.model_a, self.model_b = model_a, model_b
+        self.weight_a, self.weight_b = weight_a, 1.0 - weight_a
+    def predict(self, X):
+        return self.weight_a * self.model_a.predict(X) + self.weight_b * self.model_b.predict(X)
+
+
+class EnsembleClassifier:
+    """Simple probability-averaging ensemble of two classifiers."""
+    def __init__(self, model_a, model_b, weight_a=0.5):
+        self.model_a, self.model_b = model_a, model_b
+        self.weight_a, self.weight_b = weight_a, 1.0 - weight_a
+    def predict_proba(self, X):
+        return self.weight_a * self.model_a.predict_proba(X) + self.weight_b * self.model_b.predict_proba(X)
+    def predict(self, X):
+        return (self.predict_proba(X)[:, 1] > 0.5).astype(int)
+
+
+# Same feature list as train_models_auto.py and h2s_daily_analysis.py
+MODEL_FEATURES = [
+    'temperature_2m', 'wind_speed_10m', 'wind_direction_sin', 'wind_direction_cos',
+    'wind_gusts_10m', 'precipitation', 'relative_humidity_2m', 'surface_pressure',
+    'cloud_cover', 'dewpoint_2m',
+    'wind_speed_10m_avg_2h', 'wind_speed_10m_avg_3h', 'wind_speed_10m_avg_4h',
+    'wind_gusts_10m_max_2h', 'wind_gusts_10m_max_3h', 'wind_gusts_10m_max_4h',
+    'tide_height', 'tidal_state_encoded',
+    'hour_sin', 'hour_cos', 'month_sin', 'month_cos',
+    'is_night', 'source_regime',
+    'flow_log', 'flow_low', 'flow_high',
+    'wind_temp_interaction', 'humidity_temp_interaction',
+    'stable_atm',
+    'h2s_lag_1h', 'h2s_lag_3h', 'h2s_lag_6h',
+    'h2s_rolling_6h', 'h2s_rolling_24h',
+    'flow_lag_6h', 'flow_rolling_24h',
+]
+
+# Station name → model file key (same mapping as train_models_auto.py)
+STATION_KEYS = {
+    'SAN YSIDRO':   'SAN_YSIDRO',
+    'NESTOR - BES': 'NESTOR__BES',
+    'IB CIVIC CTR': 'IB_CIVIC_CTR',
+}
+
+# Tidal state encoding (matching h2s_daily_analysis.py)
+TIDAL_ENCODING = {'ebb': 0, 'flood': 1, 'slack': 2, 'slack high': 3, 'slack low': 4}
+
+
+def classify_risk(prob_5, prob_10, h2s_pred):
+    """Assign risk tier from predictions (same logic as h2s_daily_analysis.py)."""
+    if prob_10 > 0.5 or h2s_pred > 30:
+        return 'RED'
+    elif prob_5 > 0.5 or h2s_pred > 10:
+        return 'ORANGE'
+    elif prob_5 > 0.25 or h2s_pred > 5:
+        return 'YELLOW'
+    return 'GREEN'
+
+
+class _ModelUnpickler(pickle.Unpickler):
+    """Resolve EnsembleRegressor/EnsembleClassifier regardless of which module pickled them."""
+    _CLASSES = {
+        'EnsembleRegressor': EnsembleRegressor,
+        'EnsembleClassifier': EnsembleClassifier,
+    }
+    def find_class(self, module, name):
+        if name in self._CLASSES:
+            return self._CLASSES[name]
+        return super().find_class(module, name)
+
+
+def load_models(models_dir, station_key):
+    """Load regression + classifier models for a station."""
+    def _load(path):
+        with open(path, 'rb') as f:
+            return _ModelUnpickler(f).load()
+    reg = _load(os.path.join(models_dir, f'best_reg_{station_key}.pkl'))
+    clf5 = _load(os.path.join(models_dir, f'best_clf_5ppb_{station_key}.pkl'))
+    clf10 = _load(os.path.join(models_dir, f'best_clf_10ppb_{station_key}.pkl'))
+    return reg, clf5, clf10
+
+
+def engineer_features(df):
+    """Engineer features to match train_models_auto.py format."""
+    df = df.copy()
+
+    # Time features
+    if 'time' in df.columns:
+        df['time'] = pd.to_datetime(df['time'])
+        hour = df['time'].dt.hour
+        month = df['time'].dt.month
+        df['hour_sin'] = np.sin(2 * np.pi * hour / 24)
+        df['hour_cos'] = np.cos(2 * np.pi * hour / 24)
+        df['month_sin'] = np.sin(2 * np.pi * month / 12)
+        df['month_cos'] = np.cos(2 * np.pi * month / 12)
+        df['is_night'] = ((hour < 6) | (hour >= 20)).astype(int)
+    elif 'date' in df.columns:
+        df['date'] = pd.to_datetime(df['date'])
+        hour = df['date'].dt.hour
+        month = df['date'].dt.month
+        df['hour_sin'] = np.sin(2 * np.pi * hour / 24)
+        df['hour_cos'] = np.cos(2 * np.pi * hour / 24)
+        df['month_sin'] = np.sin(2 * np.pi * month / 12)
+        df['month_cos'] = np.cos(2 * np.pi * month / 12)
+        df['is_night'] = ((hour < 6) | (hour >= 20)).astype(int)
+
+    # Wind direction cyclicals
+    if 'wind_direction_10m' in df.columns:
+        rad = np.deg2rad(df['wind_direction_10m'].fillna(0))
+        df['wind_direction_sin'] = np.sin(rad)
+        df['wind_direction_cos'] = np.cos(rad)
+
+    # Wind rolling averages and gust maxes
+    if 'wind_gusts_10m' not in df.columns and 'wind_speed_10m' in df.columns:
+        df['wind_gusts_10m'] = df['wind_speed_10m'] * 1.8
+    for h in (2, 3, 4):
+        if f'wind_speed_10m_avg_{h}h' not in df.columns and 'wind_speed_10m' in df.columns:
+            df[f'wind_speed_10m_avg_{h}h'] = df['wind_speed_10m'].rolling(h, min_periods=1).mean()
+        if f'wind_gusts_10m_max_{h}h' not in df.columns and 'wind_gusts_10m' in df.columns:
+            df[f'wind_gusts_10m_max_{h}h'] = df['wind_gusts_10m'].rolling(h, min_periods=1).max()
+
+    # Interaction features
+    if 'wind_speed_10m' in df.columns and 'temperature_2m' in df.columns:
+        df['wind_temp_interaction'] = df['wind_speed_10m'] * df['temperature_2m']
+    if 'relative_humidity_2m' in df.columns and 'temperature_2m' in df.columns:
+        df['humidity_temp_interaction'] = df['relative_humidity_2m'] * df['temperature_2m']
+
+    # Source regime
+    if 'is_night' in df.columns and 'wind_direction_10m' in df.columns:
+        def _source_regime(row):
+            if not row['is_night']:
+                return 0
+            wd = row.get('wind_direction_10m', 0)
+            if 22.5 <= wd < 135:
+                return 1
+            elif wd >= 247.5 or wd < 22.5:
+                return 2
+            elif 135 <= wd < 247.5:
+                return 3
+            return 0
+        df['source_regime'] = df.apply(_source_regime, axis=1)
+
+    # Atmospheric stability
+    if 'wind_speed_10m' in df.columns and 'is_night' in df.columns:
+        df['stable_atm'] = ((df['wind_speed_10m'] < 5) & (df['is_night'] == 1)).astype(int)
+
+    # Tidal state encoding
+    if 'tidal_state' in df.columns and 'tidal_state_encoded' not in df.columns:
+        df['tidal_state_encoded'] = df['tidal_state'].map(TIDAL_ENCODING).fillna(-1).astype(int)
+
+    # Tide height alias
+    if 'tide_height_m' in df.columns and 'tide_height' not in df.columns:
+        df['tide_height'] = df['tide_height_m']
+
+    # Flow features
+    flow_col = None
+    for c in ['Flow (m^3/s)--Border', 'flow_rate_cms']:
+        if c in df.columns:
+            flow_col = c
+            break
+    if flow_col:
+        df['flow_log'] = np.log1p(df[flow_col])
+        df['flow_low'] = (df[flow_col] < 1).astype(int)
+        df['flow_high'] = (df[flow_col] > 5).astype(int)
+        df['flow_lag_6h'] = df[flow_col].shift(6).fillna(df[flow_col].median())
+        df['flow_rolling_24h'] = df[flow_col].rolling(24, min_periods=1).mean()
+    else:
+        for c in ['flow_log', 'flow_low', 'flow_high', 'flow_lag_6h', 'flow_rolling_24h']:
+            if c not in df.columns:
+                df[c] = 0.0
+
+    # H2S lags — forecast mode, no measurements available
+    for col in ('h2s_lag_1h', 'h2s_lag_3h', 'h2s_lag_6h', 'h2s_rolling_6h', 'h2s_rolling_24h'):
+        if col not in df.columns:
+            df[col] = 0.0
+
+    return df
+
+
+def predict(df, reg, clf5, clf10):
+    """Run prediction using regression + classifiers, return results DataFrame."""
+    avail = [f for f in MODEL_FEATURES if f in df.columns]
+    missing = [f for f in MODEL_FEATURES if f not in df.columns]
+    if missing:
+        print(f"  Warning: {len(missing)} missing features (zero-filled): {missing[:5]}{'...' if len(missing) > 5 else ''}")
+        for f in missing:
+            df[f] = 0.0
+
+    X = df[MODEL_FEATURES].fillna(0.0).values
+    h2s_pred = np.clip(reg.predict(X), 0, None)
+    prob_5 = clf5.predict_proba(X)[:, 1]
+    prob_10 = clf10.predict_proba(X)[:, 1]
+
+    result = df.copy()
+    result['h2s_predicted'] = np.round(h2s_pred, 1)
+    result['prob_exceed_5ppb'] = np.round(prob_5 * 100, 1)
+    result['prob_exceed_10ppb'] = np.round(prob_10 * 100, 1)
+    result['risk'] = [classify_risk(prob_5[i], prob_10[i], h2s_pred[i]) for i in range(len(df))]
+    result['alert'] = result['risk'].isin(['ORANGE', 'RED'])
+
+    return result
 
 
 def main():
     """Main execution function."""
     parser = argparse.ArgumentParser(
-        description='Generate H2S predictions for NESTOR - BES',
+        description='Generate H2S predictions using trained models',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic prediction
-  python predict_h2s.py --input new_data.csv --output predictions.csv
-  
-  # With custom thresholds for more sensitive detection
-  python predict_h2s.py --input new_data.csv --output predictions.csv --orange-threshold 0.25
-  
-  # Filter to show only alerts
-  python predict_h2s.py --input new_data.csv --output alerts.csv --filter-alerts
-  
-  # Combine options
-  python predict_h2s.py --input new_data.csv --output alerts.csv --orange-threshold 0.25 --filter-alerts
+  # Basic prediction (writes ./prediction.csv)
+  python predict_h2s.py --input data.csv --models ./models
+
+  # Output to a specific directory
+  python predict_h2s.py --input data.csv --models ./models --output ./results
+
+  # Custom output filename
+  python predict_h2s.py --input data.csv --models ./models --output ./results --prediction alerts.csv
+
+  # Alerts only (ORANGE + RED)
+  python predict_h2s.py --input data.csv --models ./models --filter-alerts
+
+  # Different station
+  python predict_h2s.py --input data.csv --models ./models --site "IB CIVIC CTR"
         """
     )
-    
+
     parser.add_argument('--input', '-i', required=True,
-                        help='Input CSV file with new data')
-    parser.add_argument('--output', '-o', required=True,
-                        help='Output CSV file for predictions')
-    parser.add_argument('--model', default='nestor_xgboost_weighted_model.json',
-                        help='Path to model file (default: nestor_xgboost_weighted_model.json)')
-    parser.add_argument('--preprocessing', default='nestor_preprocessing_info.pkl',
-                        help='Path to preprocessing file (default: nestor_preprocessing_info.pkl)')
-    parser.add_argument('--orange-threshold', type=float,
-                        help='Custom threshold for orange prediction (default: 0.33, lower=more sensitive)')
-    parser.add_argument('--yellow-threshold', type=float,
-                        help='Custom threshold for yellow prediction (default: 0.33)')
+                        help='Input CSV file with environmental data')
+    parser.add_argument('--output', '-o', default='.',
+                        help='Output directory (default: current directory)')
+    parser.add_argument('--prediction', default='prediction.csv',
+                        help='Output filename (default: prediction.csv)')
+    parser.add_argument('--models', required=True,
+                        help='Directory containing model .pkl files from train_models_auto.py')
     parser.add_argument('--filter-alerts', action='store_true',
-                        help='Only output orange and yellow predictions (exclude green)')
+                        help='Only output ORANGE and RED predictions')
     parser.add_argument('--site', default='NESTOR - BES',
-                        help='Filter to specific site (default: NESTOR - BES)')
-    
+                        choices=list(STATION_KEYS.keys()),
+                        help='Station to predict for (default: NESTOR - BES)')
+
     args = parser.parse_args()
-    
+
     # Header
-    print("="*80)
-    print("H2S PREDICTION SYSTEM - NESTOR - BES")
-    print("="*80)
-    print(f"Input file: {args.input}")
-    print(f"Output file: {args.output}")
-    print(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("="*80)
-    print()
-    
+    print("=" * 70)
+    print("H2S PREDICTION SYSTEM")
+    print(f"  Station:   {args.site}")
+    print(f"  Input:     {args.input}")
+    os.makedirs(args.output, exist_ok=True)
+    output_path = os.path.join(args.output, args.prediction)
+    print(f"  Output:    {output_path}")
+    print(f"  Models:    {args.models}")
+    print(f"  Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 70)
+
     # Load data
-    print(f"Loading data from {args.input}...")
+    print(f"\nLoading data from {args.input}...")
     try:
-        df = pd.read_csv(args.input)
-        print(f"✓ Loaded {len(df)} records")
+        if args.input.endswith('.parquet'):
+            df = pd.read_parquet(args.input)
+        else:
+            df = pd.read_csv(args.input)
+        print(f"  {len(df)} records loaded")
     except Exception as e:
-        print(f"✗ Error loading data: {e}")
+        print(f"  Error loading data: {e}")
         return 1
-    
+
     # Filter to site if multiple sites present
     if 'site_name' in df.columns:
         if args.site in df['site_name'].values:
             df = df[df['site_name'] == args.site].copy()
-            print(f"✓ Filtered to {args.site}: {len(df)} records")
+            print(f"  Filtered to {args.site}: {len(df)} records")
         else:
-            print(f"⚠ Warning: Site '{args.site}' not found in data")
-    
-    # Initialize predictor
+            available = df['site_name'].unique().tolist()
+            print(f"  Warning: '{args.site}' not found. Available: {available}")
+
+    # Load models
+    skey = STATION_KEYS[args.site]
+    print(f"\nLoading models for {args.site} ({skey})...")
     try:
-        predictor = H2SPredictor(args.model, args.preprocessing)
-    except Exception as e:
-        print(f"✗ Error loading model: {e}")
+        reg, clf5, clf10 = load_models(args.models, skey)
+        print(f"  Loaded: best_reg_{skey}.pkl, best_clf_5ppb_{skey}.pkl, best_clf_10ppb_{skey}.pkl")
+    except FileNotFoundError as e:
+        print(f"  Error: {e}")
+        print(f"  Run train_models_auto.py first: python src/train_models_auto.py --obs data.parquet --models {args.models}")
         return 1
-    
-    # Preprocess
+
+    # Engineer features + predict
+    print("\nEngineering features...")
+    df = engineer_features(df)
+    print(f"  {len(df)} samples ready")
+
+    print("\nGenerating predictions...")
+    results = predict(df, reg, clf5, clf10)
+
+    # Filter to alerts if requested
+    if args.filter_alerts:
+        results = results[results['alert']].copy()
+        print(f"  Filtered to alerts: {len(results)} records")
+
+    # Summary
+    risk_counts = results['risk'].value_counts()
+    alert_count = int(results['alert'].sum())
+    print(f"\nPrediction Summary:")
+    for tier in ['GREEN', 'YELLOW', 'ORANGE', 'RED']:
+        count = risk_counts.get(tier, 0)
+        pct = count / len(results) * 100 if len(results) > 0 else 0
+        print(f"  {tier:8s}: {count:4d} ({pct:.0f}%)")
+    if alert_count:
+        print(f"  Alerts:  {alert_count}")
+
+    # Save
     try:
-        df_processed = predictor.preprocess_data(df)
+        results.to_csv(output_path, index=False)
+        print(f"\nSaved to {output_path}")
     except Exception as e:
-        print(f"✗ Error preprocessing data: {e}")
-        print(f"   Required columns: {predictor.feature_cols}")
+        print(f"  Error saving: {e}")
         return 1
-    
-    # Generate predictions
-    try:
-        if args.filter_alerts:
-            results = predictor.predict_with_alerts(
-                df_processed,
-                orange_threshold=args.orange_threshold,
-                yellow_threshold=args.yellow_threshold
-            )
-        else:
-            results = predictor.predict(
-                df_processed,
-                orange_threshold=args.orange_threshold,
-                yellow_threshold=args.yellow_threshold
-            )
-    except Exception as e:
-        print(f"✗ Error generating predictions: {e}")
-        return 1
-    
-    # Save results
-    try:
-        results.to_csv(args.output, index=False)
-        print(f"✓ Predictions saved to {args.output}")
-        print(f"  Total records: {len(results)}")
-        if 'alert' in results.columns:
-            print(f"  Alerts: {results['alert'].sum()}")
-    except Exception as e:
-        print(f"✗ Error saving results: {e}")
-        return 1
-    
-    print("\n" + "="*80)
+
+    print("\n" + "=" * 70)
     print("PREDICTION COMPLETE")
-    print("="*80)
-    
+    print("=" * 70)
     return 0
 
 

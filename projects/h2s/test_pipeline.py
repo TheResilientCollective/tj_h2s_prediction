@@ -83,8 +83,8 @@ warnings.filterwarnings("ignore")
 # STEP 1: Fetch weather forecast from Open-Meteo
 # ===========================================================================
 
-def fetch_weather() -> pd.DataFrame:
-    """Fetch past 14 days + next 3 days of hourly weather for NESTOR-BES."""
+def fetch_weather(past_days: int = 14) -> pd.DataFrame:
+    """Fetch past N days + next 3 days of hourly weather for NESTOR-BES."""
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": LATITUDE,
@@ -95,7 +95,7 @@ def fetch_weather() -> pd.DataFrame:
             "wind_speed_10m", "wind_direction_10m", "wind_gusts_10m",
         ]),
         "timezone": "UTC",
-        "past_days": 14,
+        "past_days": past_days,
         "forecast_days": 3,
     }
     print("Fetching weather from Open-Meteo...", end=" ", flush=True)
@@ -320,7 +320,8 @@ def load_training_data(filter_zero_h2s: bool = True) -> pd.DataFrame:
     return train_df, val_df
 
 
-def train_variant(train_df: pd.DataFrame, variant: str, hazard_multiplier: float = 3.0):
+def train_variant(train_df: pd.DataFrame, variant: str, hazard_multiplier: float = 3.0,
+                   n_folds_override: int | None = None, n_estimators_override: int | None = None):
     from h2s.training.model_trainer import (
         train_model_with_cv, train_random_forest_with_cv, calculate_cv_summary,
     )
@@ -332,22 +333,24 @@ def train_variant(train_df: pd.DataFrame, variant: str, hazard_multiplier: float
     unique = sorted(y.unique())
     label_map = {c: i for i, c in enumerate(unique)}
     n_classes = len(unique)
-    n_folds = max(2, min(3, len(X) // (n_classes * 2)))
+    n_folds = n_folds_override if n_folds_override is not None else max(2, min(3, len(X) // (n_classes * 2)))
 
     use_smote = variant == "xgboost_smote"
-    print(f"  Training {variant} ({len(X)} samples, {n_folds} folds, hazard_mult={hazard_multiplier})...", end=" ", flush=True)
+    n_est_default = 300 if variant == "random_forest" else 100
+    n_estimators = n_estimators_override if n_estimators_override is not None else n_est_default
+    print(f"  Training {variant} ({len(X)} samples, {n_folds} folds, {n_estimators} trees, hazard_mult={hazard_multiplier})...", end=" ", flush=True)
 
     if variant == "random_forest":
         model, cv = train_random_forest_with_cv(
             X_train=X, y_train=y, label_map=label_map,
-            n_folds=n_folds, n_estimators=300,
+            n_folds=n_folds, n_estimators=n_estimators,
             use_class_weights=True, use_smote=True, random_state=42,
             hazard_multiplier=hazard_multiplier,
         )
     else:
         model, cv = train_model_with_cv(
             X_train=X, y_train=y, label_map=label_map,
-            n_folds=n_folds, n_estimators=100, max_depth=5,
+            n_folds=n_folds, n_estimators=n_estimators, max_depth=5,
             learning_rate=0.1, use_class_weights=True,
             use_smote=use_smote, random_state=42,
             hazard_multiplier=hazard_multiplier,
@@ -688,6 +691,35 @@ if __name__ == "__main__":
         action="store_false",
         help="Include H2S=0/NaN rows in training (overrides default)",
     )
+    parser.add_argument(
+        "--n-folds", type=int, default=None,
+        help="Number of CV folds (default: auto = max(2, min(3, N//(n_classes*2))))",
+    )
+    parser.add_argument(
+        "--hazard-multiplier", type=float, default=3.0,
+        help="Class weight multiplier for hazardous categories (default: 3.0)",
+    )
+    parser.add_argument(
+        "--n-estimators", type=int, default=None,
+        help="Number of trees (default: 100 for xgboost, 300 for random_forest)",
+    )
+    parser.add_argument(
+        "--variants", nargs="+", default=list(_VARIANT_EXTS.keys()),
+        choices=list(_VARIANT_EXTS.keys()),
+        help="Model variants to train (default: all three)",
+    )
+    parser.add_argument(
+        "--past-days", type=int, default=14,
+        help="Days of past weather to fetch from Open-Meteo (default: 14)",
+    )
+    parser.add_argument(
+        "--skip-train", action="store_true",
+        help="Skip training; only run production model predictions",
+    )
+    parser.add_argument(
+        "--top-n", type=int, default=10,
+        help="Number of top features to show in importance chart (default: 10)",
+    )
     args = parser.parse_args()
 
     now_utc = datetime.now(timezone.utc)
@@ -701,11 +733,17 @@ if __name__ == "__main__":
     print(f"  Production model: {PROD_VARIANT}  (H2S_MODEL_VARIANT)")
     if not args.filter_zero_h2s:
         print("  Mode: --with-zero-h2s (H2S=0/NaN rows included in training)")
+    if args.n_folds is not None:
+        print(f"  CV folds: {args.n_folds}")
+    if args.n_estimators is not None:
+        print(f"  Trees: {args.n_estimators}")
+    print(f"  Hazard multiplier: {args.hazard_multiplier}")
+    print(f"  Variants: {', '.join(args.variants)}")
     print("=" * 65)
 
     # --- Step 1: Weather ---
     print("\n[1/3] WEATHER FORECAST")
-    forecast = fetch_weather()
+    forecast = fetch_weather(past_days=args.past_days)
 
     week_start = today - timedelta(days=7)
 
@@ -718,33 +756,43 @@ if __name__ == "__main__":
     print(f"  This month: {len(this_month)} hrs | Today: {len(today_df)} hrs | Tomorrow: {len(tomorrow_df)} hrs")
 
     # --- Step 2: Train ---
-    print("\n[2/4] TRAINING MODELS")
-    train_df, val_df = load_training_data(filter_zero_h2s=args.filter_zero_h2s)
-    model_base,  lm_base,  feat_base,  cls_base  = train_variant(train_df, "xgboost_base")
-    model_smote, lm_smote, feat_smote, cls_smote = train_variant(train_df, "xgboost_smote")
-    model_rf,    lm_rf,    feat_rf,    cls_rf    = train_variant(train_df, "random_forest")
+    retrained_models = {}
+    if not args.skip_train:
+        print("\n[2/4] TRAINING MODELS")
+        train_df, val_df = load_training_data(filter_zero_h2s=args.filter_zero_h2s)
+        for variant in args.variants:
+            result = train_variant(
+                train_df, variant,
+                hazard_multiplier=args.hazard_multiplier,
+                n_folds_override=args.n_folds,
+                n_estimators_override=args.n_estimators,
+            )
+            retrained_models[variant] = result
 
-    print_feature_importance(model_base,  feat_base,  "xgboost_base")
-    print_feature_importance(model_smote, feat_smote, "xgboost_smote")
-    print_feature_importance(model_rf,    feat_rf,    "random_forest")
+        for variant in args.variants:
+            model, _lm, feat, _cls = retrained_models[variant]
+            print_feature_importance(model, feat, variant, top_n=args.top_n)
 
-    retrained_models = {
-        "xgboost_base":  (model_base,  lm_base,  feat_base,  cls_base),
-        "xgboost_smote": (model_smote, lm_smote, feat_smote, cls_smote),
-        "random_forest": (model_rf,    lm_rf,    feat_rf,    cls_rf),
-    }
-
-    # --- Step 3: Save + deploy ---
-    print("\n[3/4] SAVE & DEPLOY")
-    save_models_to_startmodels(retrained_models, primary="random_forest")
-    deploy_and_approve(retrained_models, forecast)
+        # --- Step 3: Save + deploy ---
+        print("\n[3/4] SAVE & DEPLOY")
+        primary = "random_forest" if "random_forest" in args.variants else args.variants[0]
+        save_models_to_startmodels(retrained_models, primary=primary)
+        deploy_and_approve(retrained_models, forecast)
+    else:
+        print("\n[2/4] TRAINING MODELS — skipped (--skip-train)")
+        print("[3/4] SAVE & DEPLOY — skipped (--skip-train)")
+        val_df = pd.DataFrame()
 
     # Validation slices from the held-out val set (have actual H2S labels, not seen during training)
-    val_month_df = val_df[val_df["time"] >= pd.Timestamp(month_start)].copy()
-    last_week_df = val_df[
-        (val_df["time"].dt.date >= week_start) &
-        (val_df["time"].dt.date < today)
-    ].copy()
+    if not val_df.empty:
+        val_month_df = val_df[val_df["time"] >= pd.Timestamp(month_start)].copy()
+        last_week_df = val_df[
+            (val_df["time"].dt.date >= week_start) &
+            (val_df["time"].dt.date < today)
+        ].copy()
+    else:
+        val_month_df = pd.DataFrame()
+        last_week_df = pd.DataFrame()
 
     # predict_fresh uses (model, label_map, features) — drop classes for display helpers
     retrained_for_display = {k: v[:3] for k, v in retrained_models.items()}
@@ -770,11 +818,12 @@ if __name__ == "__main__":
             print_hourly(predict_production(df_), f"{label_} — production model (RF)")
 
     # Previous week: day-by-day predictions vs actuals
-    print(f"\n  ── Previous week vs actuals ({week_start} → {today - timedelta(days=1)}) ──")
-    print_week_vs_actuals(last_week_df, retrained_for_display)
+    if retrained_for_display and not last_week_df.empty:
+        print(f"\n  ── Previous week vs actuals ({week_start} → {today - timedelta(days=1)}) ──")
+        print_week_vs_actuals(last_week_df, retrained_for_display)
 
     # Confusion matrices on labelled month data (val holdout only)
-    if len(val_month_df) > 0:
+    if retrained_for_display and len(val_month_df) > 0:
         print(f"\n  ── Month confusion matrices ({month_start} → {val_month_df['time'].max().date()}, N={len(val_month_df)}) ──")
         y_true = val_month_df["h2s_category"].values
         for name, (m, lm, ft) in retrained_for_display.items():

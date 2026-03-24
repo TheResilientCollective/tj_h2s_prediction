@@ -201,26 +201,37 @@ tj_h2s_prediction/
 │   │   ├── resources/minio.py     # S3Resource
 │   │   └── utils/store_assets.py  # S3 storage utilities
 │   └── tests/                     # Test suite
-├── src/                           # Standalone scripts (legacy)
-│   ├── predict_h2s.py
-│   └── batch_predict.py
+├── src/                           # Standalone scripts (see src/README.md)
+│   ├── train_models_auto.py       # Train RF/XGB models per station
+│   ├── h2s_daily_analysis.py      # Source attribution + 48h forecast
+│   ├── predict_h2s.py             # Single-file prediction
+│   ├── batch_predict.py           # Multi-file batch prediction
+│   └── generate_visualizations.py # Feature importance & comparison plots
 ├── nestor_xgboost_weighted_model.json  # 4.2 MB trained model
 └── nestor_preprocessing_info.json      # Feature metadata
 ```
 
 ---
 
-## Standalone Scripts (Legacy)
+## Standalone Scripts
+
+Five scripts in `src/` cover training, prediction, visualization, and daily analysis. See [`src/README.md`](src/README.md) for full documentation, arguments, and execution order.
 
 ```bash
-# Single file prediction
-python src/predict_h2s.py --input data.csv --output predictions.csv
+# 1. Train models (monthly or after spill events)
+python src/train_models_auto.py --obs data/modeldata_h2s_nofill.parquet --models ./models
 
-# Alerts only
-python src/predict_h2s.py --input data.csv --output alerts.csv --filter-alerts
+# 2a. Single-file prediction
+python src/predict_h2s.py --input data.csv --models ./models --output ./results
 
-# Adjust sensitivity
-python src/predict_h2s.py --input data.csv --output predictions.csv --orange-threshold 0.25
+# 2a. Batch prediction (all stations)
+python src/batch_predict.py --obs data/model_forecast.csv --models ./models --output ./output
+
+# 2b. Daily source attribution + 48h forecast
+python src/h2s_daily_analysis.py --obs data/modeldata_h2s_nofill.parquet --forecast model_forecast.parquet --models ./models --output ./output
+
+# 3. Generate analysis plots (all stations)
+python src/generate_visualizations.py --models ./models --output ./reports
 ```
 
 ---

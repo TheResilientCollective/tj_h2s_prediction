@@ -479,8 +479,10 @@ def train_all(df, output_dir):
 
 def main():
     parser = argparse.ArgumentParser(description='H2S Model Training — Auto-Select Best Algorithm')
-    parser.add_argument('--data', required=True, help='Path to modeldata_h2s_nofill.parquet')
-    parser.add_argument('--output', default='./models', help='Output directory for model files')
+    parser.add_argument('--obs', '--data', required=True, dest='obs',
+                        help='Path to modeldata_h2s_nofill.parquet')
+    parser.add_argument('--models', '--output', default='./models', dest='models',
+                        help='Output directory for model files')
     parser.add_argument('--train-fraction', type=float, default=0.8, help='Fraction for training (rest is test)')
     parser.add_argument('--ensemble-margin', type=float, default=0.01, help='AUC margin for ensembling')
     args = parser.parse_args()
@@ -490,12 +492,12 @@ def main():
     ENSEMBLE_AUC_MARGIN = args.ensemble_margin
     ENSEMBLE_R2_MARGIN = args.ensemble_margin * 2  # wider for R² since it's noisier
 
-    os.makedirs(args.output, exist_ok=True)
+    os.makedirs(args.models, exist_ok=True)
 
-    df = prepare_data(args.data)
-    report = train_all(df, args.output)
+    df = prepare_data(args.obs)
+    report = train_all(df, args.models)
 
-    print(f"\nModel files saved to {args.output}/")
+    print(f"\nModel files saved to {args.models}/")
     print("Done.")
 
 
