@@ -17,7 +17,7 @@ from h2s.constants import (
     MODEL_PATH,
     PREDICTIONS_PATH,
     VISUALIZATIONS_PATH,
-    LATEST_FORECAST_DATA,
+    LATEST_FORECAST,
     VALIDATION_PATH,
 )
 
@@ -99,103 +99,6 @@ def h2s_model_artifacts(context: dg.AssetExecutionContext):
 # ==============================================================================
 # Asset Group: Data Ingestion
 # ==============================================================================
-
-@dg.asset(
-    key_prefix="h2s",
-    group_name="h2s_prediction",
-    required_resource_keys={"s3"},
-    kinds={"python", "s3"},
-    description="Streamflow forecast using diurnal (month, hour) median profile from historical data",
-    config_schema={
-        "local_fallback_path": dg.Field(
-            str,
-            default_value="/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/modeldata_h2s_nofill.parquet",
-            description="Local fallback path if S3 historical data is unavailable",
-        ),
-        "forecast_days": dg.Field(
-            int,
-            default_value=10,
-            description="Number of days forward to generate streamflow forecast",
-        ),
-    },
-)
-def streamflow_forecast(context: dg.AssetExecutionContext) -> pd.DataFrame:
-    """Generate flow rate forecast using historical diurnal (month, hour) median profile.
-
-    Loads historical training data, computes median Flow (m^3/s)--Border per (month, hour)
-    bucket, and projects that profile over the upcoming forecast window.
-    Returns columns: time, Flow (m^3/s)--Border
-    """
-    s3_resource = context.resources.s3
-    local_fallback = context.op_config["local_fallback_path"]
-    forecast_days = context.op_config["forecast_days"]
-    flow_col = "Flow (m^3/s)--Border"
-
-    # --- Load historical data (S3 with local fallback) ---
-    hist_df = None
-    s3_path = "latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet"
-    try:
-        stream = s3_resource.get_stream(path=s3_path)
-        hist_df = pd.read_parquet(stream)
-        context.log.info(f"✓ Loaded historical data from S3: {s3_path} ({len(hist_df)} rows)")
-    except Exception as e:
-        context.log.warning(f"S3 load failed ({e}), falling back to local: {local_fallback}")
-        hist_df = pd.read_parquet(local_fallback)
-        context.log.info(f"✓ Loaded historical data from local file ({len(hist_df)} rows)")
-
-    # --- Parse time column ---
-    time_col = next((c for c in ["time", "date", "Time", "Date"] if c in hist_df.columns), None)
-    if time_col is None:
-        raise ValueError(f"No time column found in historical data. Columns: {list(hist_df.columns)}")
-    if flow_col not in hist_df.columns:
-        raise ValueError(f"Column '{flow_col}' not found. Available: {list(hist_df.columns)}")
-
-    hist_df["_time"] = pd.to_datetime(hist_df[time_col])
-    hist_valid = hist_df[hist_df[flow_col].notna()].copy()
-    hist_valid["_month"] = hist_valid["_time"].dt.month
-    hist_valid["_hour"] = hist_valid["_time"].dt.hour
-
-    # --- Compute (month, hour) median profile ---
-    profile = hist_valid.groupby(["_month", "_hour"])[flow_col].median()
-    global_median = hist_valid[flow_col].median()
-
-    context.log.info(f"✓ Computed flow profile from {len(hist_valid)} rows")
-    context.log.info(f"  Date range: {hist_valid['_time'].min()} → {hist_valid['_time'].max()}")
-    context.log.info(f"  Flow range: {hist_valid[flow_col].min():.2f} – {hist_valid[flow_col].max():.2f} m³/s")
-    context.log.info(f"  Global median: {global_median:.3f} m³/s")
-
-    # --- Generate forecast timestamps (hourly from now) ---
-    now_utc = pd.Timestamp.utcnow().floor("h").tz_localize(None)
-    forecast_times = pd.date_range(start=now_utc, periods=forecast_days * 24, freq="h")
-
-    rows = [
-        {"time": ts, flow_col: profile.get((ts.month, ts.hour), global_median)}
-        for ts in forecast_times
-    ]
-    forecast_df = pd.DataFrame(rows)
-
-    context.log.info(f"✓ Generated {len(forecast_df)} hourly streamflow forecast rows")
-    context.log.info(f"  Flow range: {forecast_df[flow_col].min():.3f} – {forecast_df[flow_col].max():.3f} m³/s")
-
-    # --- Upload to S3 ---
-    csv_path = "latest/tijuana/streamflow_forecast/latest.csv"
-    try:
-        csv_bytes = forecast_df.to_csv(index=False).encode("utf-8")
-        s3_resource.putFile(csv_bytes, csv_path, bucket=s3_resource.S3_BUCKET, content_type="text/csv")
-        context.log.info(f"✓ Uploaded streamflow forecast to S3: {csv_path}")
-    except Exception as e:
-        context.log.warning(f"Could not upload streamflow forecast to S3: {e}")
-
-    context.add_output_metadata({
-        "row_count": len(forecast_df),
-        "flow_min": float(forecast_df[flow_col].min()),
-        "flow_max": float(forecast_df[flow_col].max()),
-        "flow_median": float(forecast_df[flow_col].median()),
-        "profile_buckets": int(len(profile)),
-        "historical_rows": int(len(hist_valid)),
-    })
-    return forecast_df
-
 
 @dg.asset(
     key_prefix="h2s",
@@ -404,19 +307,17 @@ def sbiwtp_operational_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
         ),
         "local_data_path": dg.Field(
             str,
-            default_value="/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/modeldata_h2s_nofill.parquet",
-            description="Path to local test data file (used when use_local_data=True)"
+            default_value="data/modeldata_h2s_nofill.parquet",
+            description="Path to local test data file (used when use_local_data=True, relative to project root)"
         ),
     },
     ins={
-        "streamflow_forecast": dg.AssetIn(key=_KEY("streamflow_forecast")),
         "tidal_forecast": dg.AssetIn(key=_KEY("tidal_forecast")),
         "sbiwtp_operational_data": dg.AssetIn(key=_KEY("sbiwtp_operational_data")),
     },
 )
 def raw_environmental_data(
     context: dg.AssetExecutionContext,
-    streamflow_forecast: pd.DataFrame,
     tidal_forecast: pd.DataFrame,
     sbiwtp_operational_data: pd.DataFrame,
 ) -> pd.DataFrame:
@@ -476,7 +377,7 @@ def raw_environmental_data(
     if not h2s_cols and source == "s3":
         try:
             context.log.info("No H2S measurements in S3 data - attempting to merge from local modeldata_h2s.csv")
-            local_path = "/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/latest.csv"
+            local_path = "data/latest.csv"
             h2s_df = pd.read_parquet(local_path)
 
             # Standardize time column in H2S data
@@ -514,26 +415,13 @@ def raw_environmental_data(
         else:
             context.log.warning(f"  ⚠ H2S column exists but has no values")
 
-    # --- Merge streamflow forecast ---
-    flow_col = "Flow (m^3/s)--Border"
+    # --- Merge tidal forecast ---
     merge_times = df["date"].dt.floor("h")
     if merge_times.dt.tz is not None:
         merge_times = merge_times.dt.tz_convert("UTC").dt.tz_localize(None)
     df["_merge_time"] = merge_times
 
-    sf = streamflow_forecast[[c for c in ["time", flow_col] if c in streamflow_forecast.columns]].copy()
-    sf_times = pd.to_datetime(sf["time"])
-    if sf_times.dt.tz is not None:
-        sf_times = sf_times.dt.tz_convert("UTC").dt.tz_localize(None)
-    sf["_merge_time"] = sf_times.dt.floor("h")
-    flow_merge = sf[["_merge_time", flow_col]].drop_duplicates("_merge_time")
-    df = df.merge(flow_merge, on="_merge_time", how="left")
-    flow_matched = int(df[flow_col].notna().sum())
-    context.log.info(f"✓ Streamflow merged: {flow_matched}/{len(df)} rows matched")
-    if flow_matched < len(df):
-        context.log.warning(f"  {len(df) - flow_matched} rows have no streamflow match — will default to 0.0 in preprocessor")
 
-    # --- Merge tidal forecast ---
     tf = tidal_forecast[["time", "tide_height", "tidal_state"]].copy()
     tf_times = pd.to_datetime(tf["time"])
     if tf_times.dt.tz is not None:
@@ -856,7 +744,7 @@ def feature_importance_viz(
 
     # Upload to latest path
     plot_bytes.seek(0)
-    latest_path = f"latest/{LATEST_FORECAST_DATA}/visualizations/feature_importance.png"
+    latest_path = f"latest/{LATEST_FORECAST}/visualizations/feature_importance.png"
     s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
@@ -955,7 +843,7 @@ def confusion_matrix_viz(
 
     # Upload to latest path
     plot_bytes.seek(0)
-    latest_path = f"latest/{LATEST_FORECAST_DATA}/visualizations/confusion_matrix.png"
+    latest_path = f"latest/{LATEST_FORECAST}/visualizations/confusion_matrix.png"
     s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
@@ -1043,7 +931,7 @@ def model_comparison_viz(
 
     # Upload to latest path
     plot_bytes.seek(0)
-    latest_path = f"latest/{LATEST_FORECAST_DATA}/visualizations/model_comparison.png"
+    latest_path = f"latest/{LATEST_FORECAST}/visualizations/model_comparison.png"
     s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
@@ -1097,7 +985,7 @@ def prediction_timeline_viz(
 
     # Upload to latest path
     plot_bytes.seek(0)
-    latest_path = f"latest/{LATEST_FORECAST_DATA}/visualizations/prediction_timeline.png"
+    latest_path = f"latest/{LATEST_FORECAST}/visualizations/prediction_timeline.png"
     s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
@@ -1155,7 +1043,7 @@ def cross_correlation_viz(
     s3_resource.putFile(plot_bytes.read(), timestamped_path, bucket=s3_resource.S3_BUCKET, content_type="image/png")
 
     plot_bytes.seek(0)
-    latest_path = f"latest/{LATEST_FORECAST_DATA}/visualizations/cross_correlation.png"
+    latest_path = f"latest/{LATEST_FORECAST}/visualizations/cross_correlation.png"
     s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type="image/png")
 
     context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
@@ -1206,20 +1094,20 @@ def predictions_export(
         dataset_identifier="h2s_predictions",
         s3_resource=s3_resource,
         metadata=metadata,
-        latestdatasetpath=LATEST_FORECAST_DATA,
+        latestdatasetpath=LATEST_FORECAST,
         enable_latest_path=True,
         formats=['csv', 'json']
     )
 
     context.log.info(f"✓ Exported predictions to {timestamped_path}")
-    context.log.info(f"✓ Latest path: latest/{LATEST_FORECAST_DATA}")
+    context.log.info(f"✓ Latest path: latest/{LATEST_FORECAST}")
 
     # === PER-VARIANT PREDICTIONS ===
     for variant, variant_df in h2s_variant_predictions.items():
         variant_csv = variant_df.to_csv(index=False)
         s3_resource.putFile_text(
             variant_csv,
-            path=f"latest/{LATEST_FORECAST_DATA}/h2s_predictions_{variant}.csv",
+            path=f"latest/{LATEST_FORECAST}/h2s_predictions_{variant}.csv",
             bucket=s3_resource.S3_BUCKET,
             content_type='text/csv',
         )
@@ -1229,7 +1117,7 @@ def predictions_export(
     ensemble_csv = h2s_ensemble_predictions.to_csv(index=False)
     s3_resource.putFile_text(
         ensemble_csv,
-        path=f"latest/{LATEST_FORECAST_DATA}/h2s_predictions_ensemble.csv",
+        path=f"latest/{LATEST_FORECAST}/h2s_predictions_ensemble.csv",
         bucket=s3_resource.S3_BUCKET,
         content_type='text/csv',
     )

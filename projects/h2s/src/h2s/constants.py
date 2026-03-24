@@ -15,5 +15,5 @@ VISUALIZATIONS_PATH = 'tijuana/forecast/visualizations'
 
 # Latest path base
 LATEST_BASEPATH = 'latest/tijuana'
-LATEST_FORECAST_DATA = 'tijuana/forecast_data'
+LATEST_FORECAST = 'tijuana/forecast'
 VALIDATION_PATH = 'tijuana/forecast/validation'

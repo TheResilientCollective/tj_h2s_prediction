@@ -48,7 +48,7 @@ from h2s.training.model_trainer import (
 )
 from h2s.training.validation import calculate_metrics, compare_models, format_metrics_report
 from h2s.utils import store_assets
-from h2s.constants import MODEL_PATH, TRAINING_PATH, LATEST_FORECAST_DATA
+from h2s.constants import MODEL_PATH, TRAINING_PATH, LATEST_FORECAST
 
 
 # ==============================================================================
@@ -98,8 +98,8 @@ def _KEY(name: str) -> dg.AssetKey:
         ),
         "local_data_path": dg.Field(
             str,
-            default_value="/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/modeldata_h2s_nofill.parquet",
-            description="Path to local training data file (.parquet or .csv) — only used when use_local_data=True"
+            default_value="data/modeldata_h2s_nofill.parquet",
+            description="Path to local training data file (.parquet or .csv, relative to project root) — only used when use_local_data=True"
         ),
         "s3_data_path": dg.Field(
             str,
@@ -865,7 +865,7 @@ def feature_importance_analysis(
     s3_resource.putFile(plot_data, s3_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     # Also write to forecast latest path so dashboards pick it up
-    latest_path = f"latest/{LATEST_FORECAST_DATA}/visualizations/feature_importance_{variant}.png"
+    latest_path = f"latest/{LATEST_FORECAST}/visualizations/feature_importance_{variant}.png"
     s3_resource.putFile(plot_data, latest_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     # Create metadata for visualization
