@@ -1,7 +1,14 @@
 <component name="ProjectRunConfigurationManager">
   <configuration default="false" name="predict h2s" type="UvRunConfigurationType" factoryName="UvRunConfigurationType" folderName="scripts">
     <option name="args">
-      <list />
+      <list>
+        <option value="--input" />
+        <option value="data/model_forecast.csv" />
+        <option value="--output" />
+        <option value="./output" />
+        <option value="--models" />
+        <option value="./models" />
+      </list>
     </option>
     <option name="checkSync" value="true" />
     <option name="env">

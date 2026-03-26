@@ -5,3 +5,5 @@ dagster_home/
 .env
 .coverage
 data/startmodels/
+/output/
+/models/

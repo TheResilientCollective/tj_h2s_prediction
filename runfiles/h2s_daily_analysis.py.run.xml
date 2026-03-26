@@ -1,0 +1,29 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="h2s_daily_analysis.py" type="UvRunConfigurationType" factoryName="UvRunConfigurationType" folderName="scripts">
+    <option name="args">
+      <list>
+        <option value="--obs" />
+        <option value="data/modeldata_h2s_nofill.parquet" />
+        <option value="--forecast" />
+        <option value="data/model_forecast.parquet" />
+        <option value="--spills" />
+        <option value="data/spills.csv" />
+        <option value="--models" />
+        <option value="./models" />
+        <option value="--output" />
+        <option value="./output" />
+      </list>
+    </option>
+    <option name="checkSync" value="true" />
+    <option name="env">
+      <map />
+    </option>
+    <option name="runType" value="SCRIPT" />
+    <option name="scriptOrModule" value="$PROJECT_DIR$/src/h2s_daily_analysis.py" />
+    <option name="uvArgs">
+      <list />
+    </option>
+    <option name="uvSdkKey" value="uv (h2s)" />
+    <method v="2" />
+  </configuration>
+</component>

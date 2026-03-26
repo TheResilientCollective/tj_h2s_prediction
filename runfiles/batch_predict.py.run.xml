@@ -1,0 +1,31 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="batch_predict.py" type="UvRunConfigurationType" factoryName="UvRunConfigurationType" folderName="scripts">
+    <option name="args">
+      <list>
+        <option value="--input-dir" />
+        <option value="./new_data" />
+        <option value="\" />
+        <option value="--output-dir" />
+        <option value="./predictions" />
+        <option value="\" />
+        <option value="--models" />
+        <option value="./models" />
+        <option value="\" />
+        <option value="--archive" />
+        <option value="--archive-dir" />
+        <option value="./processed" />
+      </list>
+    </option>
+    <option name="checkSync" value="true" />
+    <option name="env">
+      <map />
+    </option>
+    <option name="runType" value="SCRIPT" />
+    <option name="scriptOrModule" value="$PROJECT_DIR$/src/batch_predict.py" />
+    <option name="uvArgs">
+      <list />
+    </option>
+    <option name="uvSdkKey" value="uv (h2s)" />
+    <method v="2" />
+  </configuration>
+</component>

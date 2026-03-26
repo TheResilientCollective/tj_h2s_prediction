@@ -1,0 +1,23 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="train_models_auto.py" type="UvRunConfigurationType" factoryName="UvRunConfigurationType" folderName="scripts">
+    <option name="args">
+      <list>
+        <option value="--obs" />
+        <option value="data/modeldata_h2s_nofill.parquet" />
+        <option value="--models" />
+        <option value="./models" />
+      </list>
+    </option>
+    <option name="checkSync" value="true" />
+    <option name="env">
+      <map />
+    </option>
+    <option name="runType" value="SCRIPT" />
+    <option name="scriptOrModule" value="$PROJECT_DIR$/src/train_models_auto.py" />
+    <option name="uvArgs">
+      <list />
+    </option>
+    <option name="uvSdkKey" value="uv (h2s)" />
+    <method v="2" />
+  </configuration>
+</component>

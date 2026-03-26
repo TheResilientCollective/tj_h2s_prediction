@@ -18,7 +18,7 @@ import json
 import os
 import pickle
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -425,7 +425,7 @@ def run_forward_model(fc_df, obs_df, model_dir):
 def generate_json_summary(attribution_df, forecast_df, obs_df):
     """Generate a JSON summary for web dashboard consumption."""
     summary = {
-        'generated_at': datetime.utcnow().isoformat() + 'Z',
+        'generated_at': datetime.now(timezone.utc).isoformat() + 'Z',
         'stations': {},
         'forecast_48h': {},
         'active_sources': {},
@@ -504,7 +504,7 @@ def generate_dashboard(attribution_df, forecast_df, obs_df, lat_grid, lon_grid, 
     gs = fig.add_gridspec(5, 3, hspace=0.35, wspace=0.25,
                           height_ratios=[0.3, 1.0, 1.0, 1.0, 1.0])
 
-    run_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')
+    run_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
     fig.suptitle(f'H₂S Daily Analysis & Forecast Dashboard\n{run_str}',
                  fontsize=16, fontweight='bold', color='white', y=0.99)
 
@@ -676,7 +676,7 @@ def main():
 
     print("=" * 60)
     print("H2S DAILY SOURCE ATTRIBUTION & FORECAST")
-    print(f"Run: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
+    print(f"Run: { datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
     print("=" * 60)
 
     # Load data

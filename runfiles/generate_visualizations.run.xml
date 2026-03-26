@@ -1,0 +1,18 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="generate_visualizations" type="UvRunConfigurationType" factoryName="UvRunConfigurationType" folderName="scripts">
+    <option name="args">
+      <list />
+    </option>
+    <option name="checkSync" value="true" />
+    <option name="env">
+      <map />
+    </option>
+    <option name="runType" value="SCRIPT" />
+    <option name="scriptOrModule" value="$PROJECT_DIR$/src/generate_visualizations.py" />
+    <option name="uvArgs">
+      <list />
+    </option>
+    <option name="uvSdkKey" value="uv (h2s)" />
+    <method v="2" />
+  </configuration>
+</component>

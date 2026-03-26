@@ -1,0 +1,20 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="test_pipeline --with-zero-h2s" type="UvRunConfigurationType" factoryName="UvRunConfigurationType" folderName="pipline">
+    <option name="args">
+      <list>
+        <option value="--with-zero-h2s" />
+      </list>
+    </option>
+    <option name="checkSync" value="true" />
+    <option name="env">
+      <map />
+    </option>
+    <option name="runType" value="SCRIPT" />
+    <option name="scriptOrModule" value="$PROJECT_DIR$/projects/h2s/test_pipeline.py" />
+    <option name="uvArgs">
+      <list />
+    </option>
+    <option name="uvSdkKey" value="uv (h2s)" />
+    <method v="2" />
+  </configuration>
+</component>
