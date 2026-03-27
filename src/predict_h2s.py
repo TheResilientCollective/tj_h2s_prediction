@@ -5,7 +5,7 @@ H2S Prediction System
 
 Generates H2S predictions from CSV data using trained models produced by
 train_models_auto.py. Uses regression + binary classifiers to assign risk tiers
-(GREEN/YELLOW/ORANGE/RED), consistent with h2s_daily_analysis.py.
+(GREEN/YELLOW_LOW/YELLOW_HIGH/ORANGE), consistent with SD County guidance.
 
 Usage:
     python predict_h2s.py --input data.csv --models ./models
@@ -80,13 +80,19 @@ TIDAL_ENCODING = {'ebb': 0, 'flood': 1, 'slack': 2, 'slack high': 3, 'slack low'
 
 
 def classify_risk(prob_5, prob_10, h2s_pred):
-    """Assign risk tier from predictions (same logic as h2s_daily_analysis.py)."""
+    """Assign risk tier from predictions (SD County guidance).
+
+    GREEN:       H2S < 5 ppb
+    YELLOW_LOW:  5 ≤ H2S < 10 ppb  (prob >5 classifier)
+    YELLOW_HIGH: 10 ≤ H2S < 30 ppb (prob >10 classifier)
+    ORANGE:      H2S ≥ 30 ppb
+    """
     if prob_10 > 0.5 or h2s_pred > 30:
-        return 'RED'
-    elif prob_5 > 0.5 or h2s_pred > 10:
         return 'ORANGE'
+    elif prob_5 > 0.5 or h2s_pred > 10:
+        return 'YELLOW_HIGH'
     elif prob_5 > 0.25 or h2s_pred > 5:
-        return 'YELLOW'
+        return 'YELLOW_LOW'
     return 'GREEN'
 
 
@@ -229,7 +235,7 @@ def predict(df, reg, clf5, clf10):
     result['prob_exceed_5ppb'] = np.round(prob_5 * 100, 1)
     result['prob_exceed_10ppb'] = np.round(prob_10 * 100, 1)
     result['risk'] = [classify_risk(prob_5[i], prob_10[i], h2s_pred[i]) for i in range(len(df))]
-    result['alert'] = result['risk'].isin(['ORANGE', 'RED'])
+    result['alert'] = result['risk'].isin(['ORANGE', 'YELLOW_HIGH'])
 
     return result
 
@@ -250,7 +256,7 @@ Examples:
   # Custom output filename
   python predict_h2s.py --input data.csv --models ./models --output ./results --prediction alerts.csv
 
-  # Alerts only (ORANGE + RED)
+  # Alerts only (ORANGE + YELLOW_HIGH)
   python predict_h2s.py --input data.csv --models ./models --filter-alerts
 
   # Different station
@@ -267,7 +273,7 @@ Examples:
     parser.add_argument('--models', required=True,
                         help='Directory containing model .pkl files from train_models_auto.py')
     parser.add_argument('--filter-alerts', action='store_true',
-                        help='Only output ORANGE and RED predictions')
+                        help='Only output ORANGE and YELLOW_HIGH predictions')
     parser.add_argument('--site', default='NESTOR - BES',
                         choices=list(STATION_KEYS.keys()),
                         help='Station to predict for (default: NESTOR - BES)')
@@ -335,7 +341,7 @@ Examples:
     risk_counts = results['risk'].value_counts()
     alert_count = int(results['alert'].sum())
     print(f"\nPrediction Summary:")
-    for tier in ['GREEN', 'YELLOW', 'ORANGE', 'RED']:
+    for tier in ['GREEN', 'YELLOW_LOW', 'YELLOW_HIGH', 'ORANGE']:
         count = risk_counts.get(tier, 0)
         pct = count / len(results) * 100 if len(results) > 0 else 0
         print(f"  {tier:8s}: {count:4d} ({pct:.0f}%)")

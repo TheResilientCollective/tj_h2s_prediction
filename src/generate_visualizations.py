@@ -83,18 +83,18 @@ def plot_confusion_matrix(predictions_df, actuals_df, output_path='confusion_mat
     # Categorize actuals into risk tiers
     def categorize(h2s):
         if h2s > 30:
-            return 'RED'
-        elif h2s > 10:
             return 'ORANGE'
+        elif h2s > 10:
+            return 'YELLOW_HIGH'
         elif h2s > 5:
-            return 'YELLOW'
+            return 'YELLOW_LOW'
         return 'GREEN'
 
     merged['actual_risk'] = merged['H2S'].apply(categorize)
 
     # Use 'risk' column if present, fall back to 'predicted_category'
     pred_col = 'risk' if 'risk' in merged.columns else 'predicted_category'
-    tiers = ['GREEN', 'YELLOW', 'ORANGE', 'RED']
+    tiers = ['GREEN', 'YELLOW_LOW', 'YELLOW_HIGH', 'ORANGE']
     cm = confusion_matrix(merged['actual_risk'], merged[pred_col], labels=tiers)
 
     cm_norm = cm.astype('float') / cm.sum(axis=1, keepdims=True)

@@ -121,13 +121,19 @@ def dist_km(lat1, lon1, lat2, lon2):
 
 
 def classify_risk(prob_5, prob_10, h2s_pred):
-    """Assign risk tier from predictions."""
+    """Assign risk tier from predictions (SD County guidance).
+
+    GREEN:       H2S < 5 ppb
+    YELLOW_LOW:  5 ≤ H2S < 10 ppb  (prob >5 classifier)
+    YELLOW_HIGH: 10 ≤ H2S < 30 ppb (prob >10 classifier)
+    ORANGE:      H2S ≥ 30 ppb
+    """
     if prob_10 > 0.5 or h2s_pred > 30:
-        return 'RED'
-    elif prob_5 > 0.5 or h2s_pred > 10:
         return 'ORANGE'
+    elif prob_5 > 0.5 or h2s_pred > 10:
+        return 'YELLOW_HIGH'
     elif prob_5 > 0.25 or h2s_pred > 5:
-        return 'YELLOW'
+        return 'YELLOW_LOW'
     return 'GREEN'
 
 
@@ -459,9 +465,9 @@ def generate_json_summary(attribution_df, forecast_df, obs_df):
                 'max_h2s': round(float(sf['h2s_pred'].max()), 1),
                 'max_prob_5': round(float(sf['prob_5'].max()), 1),
                 'max_prob_10': round(float(sf['prob_10'].max()), 1),
-                'hours_red': int(risk_counts.get('RED', 0)),
                 'hours_orange': int(risk_counts.get('ORANGE', 0)),
-                'hours_yellow': int(risk_counts.get('YELLOW', 0)),
+                'hours_yellow_high': int(risk_counts.get('YELLOW_HIGH', 0)),
+                'hours_yellow_low': int(risk_counts.get('YELLOW_LOW', 0)),
                 'hours_green': int(risk_counts.get('GREEN', 0)),
             }
 
@@ -525,18 +531,18 @@ def generate_dashboard(attribution_df, forecast_df, obs_df, lat_grid, lon_grid, 
         sf = fc48[fc48['station'] == site] if len(fc48) > 0 else pd.DataFrame()
         max_fc = sf['h2s_pred'].max() if len(sf) > 0 else 0
         max_p5 = sf['prob_5'].max() if len(sf) > 0 else 0
-        reds = (sf['risk'] == 'RED').sum() if len(sf) > 0 else 0
         oranges = (sf['risk'] == 'ORANGE').sum() if len(sf) > 0 else 0
-        yellows = (sf['risk'] == 'YELLOW').sum() if len(sf) > 0 else 0
+        yellow_highs = (sf['risk'] == 'YELLOW_HIGH').sum() if len(sf) > 0 else 0
+        yellow_lows = (sf['risk'] == 'YELLOW_LOW').sum() if len(sf) > 0 else 0
 
-        if reds > 0: cc = '#e74c3c'
-        elif oranges > 0: cc = '#e67e22'
-        elif yellows > 0: cc = '#f39c12'
+        if oranges > 0: cc = '#e74c3c'
+        elif yellow_highs > 0: cc = '#e67e22'
+        elif yellow_lows > 0: cc = '#f39c12'
         else: cc = '#27ae60'
 
         ax.text(0.5, 0.75, site, ha='center', fontsize=13, fontweight='bold', color='white', transform=ax.transAxes)
         ax.text(0.5, 0.45, f'Last: {lh:.0f} ppb | Fcst max: {max_fc:.0f} ppb', ha='center', fontsize=9, color='#ccc', transform=ax.transAxes)
-        ax.text(0.5, 0.15, f'P(>5): {max_p5:.0f}% | R:{reds} O:{oranges} Y:{yellows}', ha='center', fontsize=9, color='#aaa', transform=ax.transAxes)
+        ax.text(0.5, 0.15, f'P(>5): {max_p5:.0f}% | O:{oranges} YH:{yellow_highs} YL:{yellow_lows}', ha='center', fontsize=9, color='#aaa', transform=ax.transAxes)
         for s in ax.spines.values(): s.set_color(cc); s.set_linewidth(3)
         ax.set_xticks([]); ax.set_yticks([])
 
@@ -724,7 +730,7 @@ def main():
             print(f"  {site}:")
             print(f"    Max H2S: {sf['h2s_pred'].max():.1f} ppb")
             print(f"    P(>5): {sf['prob_5'].max():.0f}% | P(>10): {sf['prob_10'].max():.0f}%")
-            print(f"    GREEN:{rc.get('GREEN',0)} YELLOW:{rc.get('YELLOW',0)} ORANGE:{rc.get('ORANGE',0)} RED:{rc.get('RED',0)}")
+            print(f"    GREEN:{rc.get('GREEN',0)} YL:{rc.get('YELLOW_LOW',0)} YH:{rc.get('YELLOW_HIGH',0)} ORANGE:{rc.get('ORANGE',0)}")
 
     # 4. JSON summary
     summary = generate_json_summary(attr, forecast_results, obs)

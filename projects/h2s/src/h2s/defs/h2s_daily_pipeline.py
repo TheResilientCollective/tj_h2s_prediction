@@ -73,12 +73,19 @@ def _dist_km(lat1, lon1, lat2, lon2):
 
 
 def _classify_risk(prob_5, prob_10, h2s_pred):
+    """Assign risk tier from predictions (SD County guidance).
+
+    GREEN:       H2S < 5 ppb
+    YELLOW_LOW:  5 ≤ H2S < 10 ppb  (prob >5 classifier)
+    YELLOW_HIGH: 10 ≤ H2S < 30 ppb (prob >10 classifier)
+    ORANGE:      H2S ≥ 30 ppb
+    """
     if prob_10 > 0.5 or h2s_pred > 30:
-        return 'RED'
-    elif prob_5 > 0.5 or h2s_pred > 10:
         return 'ORANGE'
+    elif prob_5 > 0.5 or h2s_pred > 10:
+        return 'YELLOW_HIGH'
     elif prob_5 > 0.25 or h2s_pred > 5:
-        return 'YELLOW'
+        return 'YELLOW_LOW'
     return 'GREEN'
 
 
@@ -594,13 +601,13 @@ def daily_dashboard_viz(
         sf = fc48[fc48['station'] == site] if len(fc48) > 0 else pd.DataFrame()
         max_fc = float(sf['h2s_pred'].max()) if len(sf) > 0 else 0
         max_p5 = float(sf['prob_5'].max()) if len(sf) > 0 else 0
-        reds = int((sf['risk'] == 'RED').sum()) if len(sf) > 0 else 0
         oranges = int((sf['risk'] == 'ORANGE').sum()) if len(sf) > 0 else 0
-        yellows = int((sf['risk'] == 'YELLOW').sum()) if len(sf) > 0 else 0
-        cc = '#e74c3c' if reds > 0 else '#e67e22' if oranges > 0 else '#f39c12' if yellows > 0 else '#27ae60'
+        yellow_highs = int((sf['risk'] == 'YELLOW_HIGH').sum()) if len(sf) > 0 else 0
+        yellow_lows = int((sf['risk'] == 'YELLOW_LOW').sum()) if len(sf) > 0 else 0
+        cc = '#e74c3c' if oranges > 0 else '#e67e22' if yellow_highs > 0 else '#f39c12' if yellow_lows > 0 else '#27ae60'
         ax.text(0.5, 0.75, site, ha='center', fontsize=13, fontweight='bold', color='white', transform=ax.transAxes)
         ax.text(0.5, 0.45, f'Last: {lh:.0f} ppb | Fcst max: {max_fc:.0f} ppb', ha='center', fontsize=9, color='#ccc', transform=ax.transAxes)
-        ax.text(0.5, 0.15, f'P(>5): {max_p5:.0f}% | R:{reds} O:{oranges} Y:{yellows}', ha='center', fontsize=9, color='#aaa', transform=ax.transAxes)
+        ax.text(0.5, 0.15, f'P(>5): {max_p5:.0f}% | O:{oranges} YH:{yellow_highs} YL:{yellow_lows}', ha='center', fontsize=9, color='#aaa', transform=ax.transAxes)
         for s_ in ax.spines.values():
             s_.set_color(cc)
             s_.set_linewidth(3)
@@ -859,9 +866,9 @@ def daily_summary_json(
                 'max_h2s': round(float(sf['h2s_pred'].max()), 1),
                 'max_prob_5': round(float(sf['prob_5'].max()), 1),
                 'max_prob_10': round(float(sf['prob_10'].max()), 1),
-                'hours_red': int(risk_counts.get('RED', 0)),
                 'hours_orange': int(risk_counts.get('ORANGE', 0)),
-                'hours_yellow': int(risk_counts.get('YELLOW', 0)),
+                'hours_yellow_high': int(risk_counts.get('YELLOW_HIGH', 0)),
+                'hours_yellow_low': int(risk_counts.get('YELLOW_LOW', 0)),
                 'hours_green': int(risk_counts.get('GREEN', 0)),
             }
 

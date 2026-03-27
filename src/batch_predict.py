@@ -32,7 +32,7 @@ def main():
     parser.add_argument('--output', '-o', default='./output',
                         help='Output directory (default: ./output)')
     parser.add_argument('--filter-alerts', action='store_true',
-                        help='Only output ORANGE and RED predictions')
+                        help='Only output ORANGE and YELLOW_HIGH predictions')
 
     args = parser.parse_args()
 
@@ -87,7 +87,7 @@ def main():
 
         # Summary
         risk_counts = results['risk'].value_counts()
-        parts = [f"{tier}:{risk_counts.get(tier, 0)}" for tier in ['GREEN', 'YELLOW', 'ORANGE', 'RED']]
+        parts = [f"{tier}:{risk_counts.get(tier, 0)}" for tier in ['GREEN', 'YELLOW_LOW', 'YELLOW_HIGH', 'ORANGE']]
         print(f"  {len(results)} rows -> {out_path}")
         print(f"  {' | '.join(parts)}")
 

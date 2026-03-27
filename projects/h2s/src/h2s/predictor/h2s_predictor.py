@@ -3,10 +3,13 @@
 This module provides H2S forecasting with production classification model,
 optimized for S3 storage and Dagster integration.
 
-Predicts H2S levels in three categories:
+Predicts H2S levels per SD County guidance:
 - Green: H2S < 5 ppb (safe)
 - Yellow: 5 ≤ H2S < 30 ppb (caution)
 - Orange: H2S ≥ 30 ppb (alert)
+
+Note: The standalone scripts (src/) further split yellow into YELLOW_LOW (5-10 ppb)
+and YELLOW_HIGH (10-30 ppb) using >5 and >10 binary classifiers for operational granularity.
 """
 
 import json
