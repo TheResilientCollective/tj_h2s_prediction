@@ -16,6 +16,7 @@ from h2s.defs.h2s_pipeline import (
     preprocessed_features,
     h2s_predictions,
     h2s_alerts,
+    slack_alerts,
 )
 
 
@@ -305,6 +306,78 @@ class TestH2SAlertsMaterialization:
             if len(alerts) > 0:
                 assert alerts['alert'].all()
                 assert 'green' not in alerts['predicted_category'].values
+
+
+class MockSlackResource:
+    """Mock SlackAlertResource for testing."""
+
+    def __init__(self):
+        self.channel = "#test"
+        self._messages = []
+
+    def get_client(self):
+        mock_client = Mock()
+        def capture_message(**kwargs):
+            self._messages.append(kwargs)
+        mock_client.chat_postMessage = capture_message
+        return mock_client
+
+
+@pytest.mark.integration
+class TestSlackAlertsMaterialization:
+    """Test slack_alerts asset materialization."""
+
+    def test_sends_slack_when_alerts_exist(self):
+        """Test that Slack message is sent when there are alerts."""
+        alerts_df = pd.DataFrame({
+            'time': pd.date_range('2024-06-15', periods=5, freq='h'),
+            'predicted_category': ['orange', 'orange', 'yellow', 'yellow', 'yellow'],
+            'confidence': [0.8, 0.7, 0.6, 0.5, 0.55],
+            'h2s_risk': [0.9, 0.85, 0.4, 0.35, 0.38],
+            'alert': True,
+        })
+
+        mock_slack = MockSlackResource()
+
+        # Name must match the asset key that slack_alerts expects
+        @dg.asset(key=dg.AssetKey(["h2s", "h2s_alerts"]))
+        def h2s_alerts_source():
+            return alerts_df
+
+        result = dg.materialize(
+            assets=[h2s_alerts_source, slack_alerts],
+            resources={"slack": mock_slack, "io_manager": dg.mem_io_manager},
+        )
+
+        assert result.success
+        assert len(mock_slack._messages) == 1
+        msg = mock_slack._messages[0]
+        assert msg['channel'] == '#test'
+        assert 'orange' in msg['text'].lower()
+
+    def test_no_slack_when_no_alerts(self):
+        """Test that no Slack message is sent when alerts DataFrame is empty."""
+        empty_df = pd.DataFrame({
+            'time': pd.Series([], dtype='datetime64[ns]'),
+            'predicted_category': pd.Series([], dtype='str'),
+            'confidence': pd.Series([], dtype='float'),
+            'h2s_risk': pd.Series([], dtype='float'),
+            'alert': pd.Series([], dtype='bool'),
+        })
+
+        mock_slack = MockSlackResource()
+
+        @dg.asset(key=dg.AssetKey(["h2s", "h2s_alerts"]))
+        def h2s_alerts_source():
+            return empty_df
+
+        result = dg.materialize(
+            assets=[h2s_alerts_source, slack_alerts],
+            resources={"slack": mock_slack, "io_manager": dg.mem_io_manager},
+        )
+
+        assert result.success
+        assert len(mock_slack._messages) == 0
 
 
 @pytest.mark.integration

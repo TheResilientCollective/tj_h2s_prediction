@@ -540,6 +540,81 @@ def h2s_alerts(
 
 @dg.asset(
     key_prefix="h2s",
+    group_name="h2s_alerts",
+    kinds={"slack"},
+    required_resource_keys={"slack"},
+    description="Send YELLOW_HIGH and ORANGE alerts to Slack",
+    auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
+    ins={
+        "h2s_alerts": dg.AssetIn(key=_KEY("h2s_alerts")),
+    },
+)
+def slack_alerts(
+    context: dg.AssetExecutionContext,
+    h2s_alerts: pd.DataFrame,
+) -> None:
+    """Post H2S alert summary to Slack when YELLOW_HIGH or ORANGE predictions exist."""
+    if h2s_alerts.empty:
+        context.log.info("No alerts to send")
+        return
+
+    orange_count = int((h2s_alerts['predicted_category'] == 'orange').sum())
+    yellow_count = int((h2s_alerts['predicted_category'] == 'yellow').sum())
+    total = len(h2s_alerts)
+
+    # Build time range
+    time_col = 'time' if 'time' in h2s_alerts.columns else None
+    if time_col:
+        t_min = h2s_alerts[time_col].min()
+        t_max = h2s_alerts[time_col].max()
+        time_range = f"{t_min} — {t_max}"
+    else:
+        time_range = "unknown"
+
+    # Peak risk info
+    max_confidence = float(h2s_alerts['confidence'].max()) if 'confidence' in h2s_alerts.columns else 0
+    max_risk = float(h2s_alerts['h2s_risk'].max()) if 'h2s_risk' in h2s_alerts.columns else 0
+
+    # Compose Slack message using Block Kit
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": "H2S Alert — Elevated Levels Forecast"},
+        },
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*Orange (>30 ppb):*\n{orange_count} hours"},
+                {"type": "mrkdwn", "text": f"*Yellow (5-30 ppb):*\n{yellow_count} hours"},
+                {"type": "mrkdwn", "text": f"*Total alerts:*\n{total}"},
+                {"type": "mrkdwn", "text": f"*Peak risk score:*\n{max_risk:.2f}"},
+            ],
+        },
+        {
+            "type": "context",
+            "elements": [
+                {"type": "mrkdwn", "text": f"Forecast window: {time_range} | Max confidence: {max_confidence:.0%}"},
+            ],
+        },
+    ]
+
+    slack = context.resources.slack
+    slack.get_client().chat_postMessage(
+        channel=slack.channel,
+        text=f"H2S Alert: {orange_count} orange, {yellow_count} yellow hours forecast",
+        blocks=blocks,
+    )
+
+    context.log.info(f"Slack alert sent: {orange_count} orange, {yellow_count} yellow")
+    context.add_output_metadata({
+        "orange_count": orange_count,
+        "yellow_count": yellow_count,
+        "total_alerts": total,
+    })
+
+
+@dg.asset(
+    key_prefix="h2s",
     group_name="h2s_prediction",
     required_resource_keys={"s3"},
     kinds={"ml", "xgboost"},
