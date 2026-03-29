@@ -20,7 +20,7 @@ import dagster as dg
 import numpy as np
 import pandas as pd
 
-from h2s.constants import MODEL_PATH
+from h2s.constants import MODEL_PATH, DAILY_SUMMARY_PATH
 from h2s.training.multi_station_trainer import (
     MODEL_FEATURES,
     STATION_PARTITION_MAP,
@@ -740,7 +740,7 @@ def daily_dashboard_viz(
     # Upload to S3 (latest + timestamped)
     ts = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H')
     latest_path = "latest/tijuana/forecast_data/visualizations/daily_dashboard.png"
-    ts_path = f"tijuana/forecast/output/{ts}/daily_dashboard.png"
+    ts_path = f"{DAILY_SUMMARY_PATH}/{ts}/daily_dashboard.png"
 
     for path in [latest_path, ts_path]:
         try:
@@ -896,7 +896,7 @@ def daily_summary_json(
     ts = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H')
     for path in [
         "latest/tijuana/forecast_data/daily_summary.json",
-        f"tijuana/forecast/output/{ts}/daily_summary.json",
+        f"{DAILY_SUMMARY_PATH}/{ts}/daily_summary.json",
     ]:
         try:
             s3.putFile(summary_bytes, path, bucket=s3.S3_BUCKET, content_type='application/json')

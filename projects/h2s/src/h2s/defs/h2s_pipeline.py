@@ -15,7 +15,7 @@ import pandas as pd
 from h2s.utils import store_assets
 from h2s.constants import (
     MODEL_PATH,
-    PREDICTIONS_PATH,
+    HOURLY_PREDICTIONS_PATH,
     VISUALIZATIONS_PATH,
     LATEST_FORECAST,
     VALIDATION_PATH,
@@ -1117,14 +1117,22 @@ def predictions_export(
     """Export predictions to S3 with versioning.
 
     Stores predictions in both timestamped and latest paths.
-    S3 Path: tijuana/forecast/predictions/
+    S3 Path: tijuana/forecast/hourly/model=.../year=.../month=.../day=.../hour=.../
     """
     s3_resource = context.resources.s3
 
     context.log.info("Using store_assets utility for export...")
 
-    run_timestamp = datetime.now().strftime("%Y-%m-%d_%H")
-    timestamped_path = f"{PREDICTIONS_PATH}/{run_timestamp}"
+    now = datetime.now()
+    hive_path = (
+        f"{HOURLY_PREDICTIONS_PATH}"
+        f"/model=nestor_xgboost"
+        f"/year={now.strftime('%Y')}"
+        f"/month={now.strftime('%m')}"
+        f"/day={now.strftime('%d')}"
+        f"/hour={now.strftime('%H')}"
+    )
+    timestamped_path = hive_path
 
     metadata = store_assets.objectMetadata(
         name="H2S Predictions - NESTOR BES",
@@ -1140,7 +1148,7 @@ def predictions_export(
         metadata=metadata,
         latestdatasetpath=LATEST_FORECAST,
         enable_latest_path=True,
-        formats=['csv', 'json']
+        formats=['csv', 'json', 'parquet']
     )
 
     context.log.info(f"✓ Exported predictions to {timestamped_path}")
