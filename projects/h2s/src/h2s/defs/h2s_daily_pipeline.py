@@ -796,8 +796,8 @@ def _compute_source_probability_grid(obs_df: pd.DataFrame):
 @dg.asset(
     key_prefix="h2s",
     group_name="h2s_daily",
-    required_resource_keys={"s3"},
-    kinds={"json", "s3"},
+    required_resource_keys={"s3", "slack"},
+    kinds={"json", "s3", "slack"},
     description="JSON summary for web dashboards (station stats, 48h rollup, active sources)",
     ins={
         "source_attribution": dg.AssetIn(key=_KEY("source_attribution")),
@@ -908,6 +908,61 @@ def daily_summary_json(
         "stations_in_summary": list(summary['stations'].keys()),
         "active_sources": list(summary['active_sources'].keys()),
     })
+
+    # --- Slack summary ---
+    station_fields = []
+    for short, stats in summary.get('stations', {}).items():
+        fc = summary.get('forecast_48h', {}).get(short, {})
+        hours_orange = fc.get('hours_orange', 0)
+        hours_yellow = fc.get('hours_yellow_high', 0) + fc.get('hours_yellow_low', 0)
+        risk_icon = "🔴" if hours_orange > 0 else ("🟡" if hours_yellow > 0 else "🟢")
+        station_fields.append({
+            "type": "mrkdwn",
+            "text": (
+                f"*{risk_icon} {stats.get('name', short)}*\n"
+                f"Now: {stats.get('last_h2s', 'N/A')} ppb | "
+                f"24h max: {stats.get('max_24h', 'N/A')} ppb\n"
+                f"48h forecast: {fc.get('max_h2s', 'N/A')} ppb max "
+                f"({hours_orange}h orange, {hours_yellow}h yellow)"
+            ),
+        })
+
+    active_sources = summary.get('active_sources', {})
+    source_text = (
+        ", ".join(
+            f"{src} ({s['aligned_hours']}h, {s['max_h2s']} ppb max)"
+            for src, s in active_sources.items()
+        )
+        if active_sources
+        else "None"
+    )
+
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": f"H2S Daily Summary — {ts}"},
+        },
+        {
+            "type": "section",
+            "fields": station_fields,
+        },
+        {
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": f"*Active sources:* {source_text}"}],
+        },
+    ]
+
+    try:
+        slack = context.resources.slack
+        slack.get_client().chat_postMessage(
+            channel=slack.channel,
+            text=f"H2S Daily Summary {ts}",
+            blocks=blocks,
+        )
+        context.log.info("Slack daily summary sent")
+    except Exception as e:
+        context.log.warning(f"Slack notification failed: {e}")
+
     return summary
 
 
