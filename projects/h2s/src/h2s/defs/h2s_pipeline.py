@@ -788,7 +788,7 @@ def feature_importance_viz(
 
     # Upload to latest path
     plot_bytes.seek(0)
-    latest_path = f"latest/{LATEST_FORECAST}/visualizations/feature_importance.png"
+    latest_path = f"latest/{LATEST_FORECAST}/visualizations/models/feature_importance.png"
     s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
@@ -887,7 +887,7 @@ def confusion_matrix_viz(
 
     # Upload to latest path
     plot_bytes.seek(0)
-    latest_path = f"latest/{LATEST_FORECAST}/visualizations/confusion_matrix.png"
+    latest_path = f"latest/{LATEST_FORECAST}/visualizations/models/confusion_matrix.png"
     s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
@@ -975,7 +975,7 @@ def model_comparison_viz(
 
     # Upload to latest path
     plot_bytes.seek(0)
-    latest_path = f"latest/{LATEST_FORECAST}/visualizations/model_comparison.png"
+    latest_path = f"latest/{LATEST_FORECAST}/visualizations/models/model_comparison.png"
     s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
@@ -1029,7 +1029,7 @@ def prediction_timeline_viz(
 
     # Upload to latest path
     plot_bytes.seek(0)
-    latest_path = f"latest/{LATEST_FORECAST}/visualizations/prediction_timeline.png"
+    latest_path = f"latest/{LATEST_FORECAST}/visualizations/models/prediction_timeline.png"
     s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
@@ -1087,7 +1087,7 @@ def cross_correlation_viz(
     s3_resource.putFile(plot_bytes.read(), timestamped_path, bucket=s3_resource.S3_BUCKET, content_type="image/png")
 
     plot_bytes.seek(0)
-    latest_path = f"latest/{LATEST_FORECAST}/visualizations/cross_correlation.png"
+    latest_path = f"latest/{LATEST_FORECAST}/visualizations/models/cross_correlation.png"
     s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type="image/png")
 
     context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
@@ -1146,20 +1146,20 @@ def predictions_export(
         dataset_identifier="h2s_predictions",
         s3_resource=s3_resource,
         metadata=metadata,
-        latestdatasetpath=LATEST_FORECAST,
+        latestdatasetpath=f"{LATEST_FORECAST}/predictions",
         enable_latest_path=True,
         formats=['csv', 'json', 'parquet']
     )
 
     context.log.info(f"✓ Exported predictions to {timestamped_path}")
-    context.log.info(f"✓ Latest path: latest/{LATEST_FORECAST}")
+    context.log.info(f"✓ Latest path: latest/{LATEST_FORECAST}/predictions")
 
     # === PER-VARIANT PREDICTIONS ===
     for variant, variant_df in h2s_variant_predictions.items():
         variant_csv = variant_df.to_csv(index=False)
         s3_resource.putFile_text(
             variant_csv,
-            path=f"latest/{LATEST_FORECAST}/h2s_predictions_{variant}.csv",
+            path=f"latest/{LATEST_FORECAST}/predictions/h2s_predictions_{variant}.csv",
             bucket=s3_resource.S3_BUCKET,
             content_type='text/csv',
         )
@@ -1169,7 +1169,7 @@ def predictions_export(
     ensemble_csv = h2s_ensemble_predictions.to_csv(index=False)
     s3_resource.putFile_text(
         ensemble_csv,
-        path=f"latest/{LATEST_FORECAST}/h2s_predictions_ensemble.csv",
+        path=f"latest/{LATEST_FORECAST}/predictions/h2s_predictions_ensemble.csv",
         bucket=s3_resource.S3_BUCKET,
         content_type='text/csv',
     )

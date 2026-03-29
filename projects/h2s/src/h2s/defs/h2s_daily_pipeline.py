@@ -15,6 +15,7 @@ import io
 import json
 import pickle
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import dagster as dg
 import numpy as np
@@ -739,7 +740,7 @@ def daily_dashboard_viz(
 
     # Upload to S3 (latest + timestamped)
     ts = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H')
-    latest_path = "latest/tijuana/forecast_data/visualizations/daily_dashboard.png"
+    latest_path = "latest/tijuana/forecast/visualizations/daily_dashboard.png"
     ts_path = f"{DAILY_SUMMARY_PATH}/{ts}/daily_dashboard.png"
 
     for path in [latest_path, ts_path]:
@@ -937,6 +938,15 @@ def daily_summary_json(
         else "None"
     )
 
+    # Forecast time range in Pacific time
+    pacific = ZoneInfo("America/Los_Angeles")
+    if len(fc_df) > 0:
+        fc_start = fc_df['time'].min().astimezone(pacific).strftime("%-I %p %-m/%-d")
+        fc_end = fc_df['time'].max().astimezone(pacific).strftime("%-I %p %-m/%-d")
+        time_range = f"{fc_start} → {fc_end} PT"
+    else:
+        time_range = "N/A"
+
     blocks = [
         {
             "type": "header",
@@ -948,7 +958,10 @@ def daily_summary_json(
         },
         {
             "type": "context",
-            "elements": [{"type": "mrkdwn", "text": f"*Active sources:* {source_text}"}],
+            "elements": [
+                {"type": "mrkdwn", "text": f"*Forecast window:* {time_range}"},
+                {"type": "mrkdwn", "text": f"*Active sources:* {source_text}"},
+            ],
         },
     ]
 
