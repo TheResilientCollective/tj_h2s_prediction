@@ -915,7 +915,7 @@ def daily_summary_json(
         fc = summary.get('forecast_48h', {}).get(short, {})
         hours_orange = fc.get('hours_orange', 0)
         hours_yellow = fc.get('hours_yellow_high', 0) + fc.get('hours_yellow_low', 0)
-        risk_icon = "🔴" if hours_orange > 0 else ("🟡" if hours_yellow > 0 else "🟢")
+        risk_icon = "🟠" if hours_orange > 0 else ("🟡" if hours_yellow > 0 else "🟢")
         station_fields.append({
             "type": "mrkdwn",
             "text": (
