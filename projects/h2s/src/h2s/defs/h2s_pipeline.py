@@ -1207,12 +1207,14 @@ def daily_validation_report(context: dg.AssetExecutionContext) -> None:
     )
 
     s3_resource = context.resources.s3
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    yesterday_dt = datetime.now() - timedelta(days=1)
+    yesterday = yesterday_dt.strftime("%Y-%m-%d")
+    y, m, d = yesterday_dt.strftime("%Y"), yesterday_dt.strftime("%m"), yesterday_dt.strftime("%d")
 
     # Load yesterday's 6-hourly predictions
     prediction_dfs = []
     for hour in ["00", "06", "12", "18"]:
-        s3_path = f"{PREDICTIONS_PATH}/{yesterday}_{hour}/h2s_predictions.csv"
+        s3_path = f"{HOURLY_PREDICTIONS_PATH}/model=nestor_xgboost/year={y}/month={m}/day={d}/hour={hour}/h2s_predictions.csv"
         try:
             csv_url = s3_resource.get_presigned_url(path=s3_path)
             df = pd.read_csv(csv_url)
