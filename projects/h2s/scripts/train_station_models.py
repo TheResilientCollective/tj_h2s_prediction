@@ -6,13 +6,18 @@ evaluates on time-series holdout, selects the winner per combination.
 Optionally ensembles when performance is within a tight margin.
 
 Usage:
-    python train_models_auto.py --data modeldata_h2s_nofill.parquet --output ./models
+    cd projects/h2s
+    uv run python scripts/train_station_models.py --obs ../../data/modeldata_h2s_nofill.parquet
+    uv run python scripts/train_station_models.py --obs ../../data/modeldata_h2s_nofill.parquet --models ../../data/models_v2/$(date +%Y%m%d)
 
-Produces:
-    - best_reg_{STATION}.pkl        (regression model)
-    - best_clf5_{STATION}.pkl       (P(>5 ppb) classifier)
-    - best_clf10_{STATION}.pkl      (P(>10 ppb) classifier)
+Produces (in --models directory):
+    - model_reg_{STATION}.pkl       (regression model)
+    - model_clf5_{STATION}.pkl      (P(>5 ppb) classifier)
+    - model_clf10_{STATION}.pkl     (P(>10 ppb) classifier)
     - training_report.json          (full metrics, algorithm choices, feature importance)
+
+After training, seed models to S3:
+    uv run python scripts/seed_models_to_s3.py
 """
 
 import argparse
@@ -388,7 +393,7 @@ def train_all(df, output_dir):
 
         print(f"    >> SELECTED: {choice} — {reason}")
 
-        pickle.dump(best_model, open(os.path.join(output_dir, f'best_reg_{skey}.pkl'), 'wb'))
+        pickle.dump(best_model, open(os.path.join(output_dir, f'model_reg_{skey}.pkl'), 'wb'))
 
         task_report = {
             'selected': choice, 'reason': reason,
@@ -403,7 +408,11 @@ def train_all(df, output_dir):
                              'RF': m_rf['R2'], 'XGB': m_xgb['R2'] if m_xgb else None, 'selected': choice})
 
         # ---- CLASSIFIER >5 ppb ----
-        for threshold, label, ytr, yte in [(5, 'clf_5ppb', ytr_5, yte_5), (10, 'clf_10ppb', ytr_10, yte_10)]:
+        # label = S3 task name; short_label = output filename prefix
+        for threshold, label, short_label, ytr, yte in [
+            (5,  'clf_5ppb',  'clf5',  ytr_5,  yte_5),
+            (10, 'clf_10ppb', 'clf10', ytr_10, yte_10),
+        ]:
             print(f"\n  --- Classifier >{threshold} ppb ---")
             pos_rate = ytr.mean()
             scale_pos = (1 - pos_rate) / max(pos_rate, 0.01)
@@ -430,7 +439,7 @@ def train_all(df, output_dir):
 
             print(f"    >> SELECTED: {choice} — {reason}")
 
-            pickle.dump(best_clf, open(os.path.join(output_dir, f'best_{label}_{skey}.pkl'), 'wb'))
+            pickle.dump(best_clf, open(os.path.join(output_dir, f'model_{short_label}_{skey}.pkl'), 'wb'))
 
             task_report = {
                 'selected': choice, 'reason': reason,

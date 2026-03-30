@@ -395,18 +395,18 @@ def daily_station_forecasts(
     obs_df = obs_df[(obs_df['h2s_measured'] == True) & (obs_df['H2S'] <= 500)].copy()
     obs_df['H2S'] = obs_df['H2S'].clip(lower=0)
 
-    # Load weather forecast from S3
-    fc_df = None
+    # Load model forecast from S3 (try parquet first, then CSV)
     try:
-        fc_url = s3.get_presigned_url(path="latest/tijuana/weather_forecast/latest.csv")
+        fc_url = s3.get_presigned_url(path="latest/tijuana/forecast_data/model_forecast.parquet")
+        fc_df = pd.read_parquet(fc_url)
+        context.log.info(f"✓ Loaded model forecast (parquet) from S3: {len(fc_df)} rows")
+    except Exception:
+        fc_url = s3.get_presigned_url(path="latest/tijuana/forecast_data/model_forecast.csv")
         fc_df = pd.read_csv(fc_url)
-        if 'time' not in fc_df.columns and 'date' in fc_df.columns:
-            fc_df = fc_df.rename(columns={'date': 'time'})
-        fc_df['time'] = pd.to_datetime(fc_df['time'], utc=True)
-        context.log.info(f"✓ Loaded weather forecast from S3: {len(fc_df)} rows")
-    except Exception as e:
-        context.log.warning(f"Weather forecast unavailable ({e}), generating synthetic forecast")
-        fc_df = _generate_synthetic_forecast(obs_df, forecast_hours)
+        context.log.info(f"✓ Loaded model forecast (csv) from S3: {len(fc_df)} rows")
+    if 'time' not in fc_df.columns and 'date' in fc_df.columns:
+        fc_df = fc_df.rename(columns={'date': 'time'})
+    fc_df['time'] = pd.to_datetime(fc_df['time'], utc=True)
 
     # Load tidal forecast
     try:
@@ -436,8 +436,7 @@ def daily_station_forecasts(
     results = []
     for site, info in STATION_META.items():
         if site not in multi_station_model_artifacts:
-            context.log.warning(f"No models for {site}, skipping")
-            continue
+            raise ValueError(f"No models for {site}")
 
         station_models = multi_station_model_artifacts[site]
         if 'regression' not in station_models:
@@ -804,6 +803,7 @@ def _compute_source_probability_grid(obs_df: pd.DataFrame):
         "source_attribution": dg.AssetIn(key=_KEY("source_attribution")),
         "daily_station_forecasts": dg.AssetIn(key=_KEY("daily_station_forecasts")),
     },
+    deps=[_KEY("daily_station_forecasts")],
     config_schema={
         "obs_bucket": dg.Field(str, default_value="resilentpublic"),
     },
