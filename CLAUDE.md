@@ -48,10 +48,73 @@ tj_h2s_prediction/
 │   ├── pytest.ini               # Pytest configuration
 │   └── pyproject.toml           # Dependencies (dagster, xgboost, minio, pytest, etc.)
 ├── nestor_xgboost_weighted_model.json  # 4.2 MB trained model
-├── nestor_preprocessing_info.json      # Feature metadata (JSON, not pickle)
-├── convert_preprocessing.py            # One-time pickle→JSON converter
-└── upload_models_to_s3.py             # Upload models to S3
+└── nestor_preprocessing_info.json      # Feature metadata (JSON, not pickle)
 ```
+
+## Operational Runbooks
+
+### Initial Installation
+
+Run once when deploying to a new environment:
+
+```bash
+cd projects/h2s
+uv sync
+cp .env.example .env   # fill in S3 credentials
+
+# 1. Seed S3 with starter models (hourly pipeline + per-station daily pipeline)
+uv run dg launch --job seed_models_job
+
+# 2. Run hourly forecast pipeline
+uv run dg launch --job forecast_prediction_job
+
+# 3. Run daily analysis (source attribution + station forecasts + dashboard)
+uv run dg launch --job daily_analysis_job
+```
+
+`seed_models_job` uploads:
+- Hourly pipeline models from `data/startmodels/` → `tijuana/forecast/models/`
+- Per-station daily models from `data/models_v2/` → `tijuana/forecast/models/stations/`
+
+### Rebuilding Models (new training data available)
+
+No approval gate is required — `station_deployment_job` acts as the explicit approval step.
+
+```bash
+cd projects/h2s
+
+# 1. Train per-station models (partitioned: san_ysidro, nestor_bes, ib_civic_ctr)
+#    Runs multi_station_training_data → per_station_trained_models → station_training_report
+uv run dg launch --job multi_station_training_job
+
+# 2. Review training metrics in Dagster UI (station_training_report asset metadata)
+
+# 3. Deploy approved models to S3 (this IS the approval — running this job means you approve)
+uv run dg launch --job station_deployment_job
+
+# 4. Run daily analysis — it will re-load fresh models from S3
+uv run dg launch --job daily_analysis_job
+```
+
+**Important:** `multi_station_training_job` stores models in Dagster's IO only.
+`station_deployment_job` uploads them to S3 where the daily pipeline reads from.
+Running `daily_analysis_job` after training but before deployment will use the previously deployed models.
+
+### Running the Forecast Pipelines
+
+```bash
+cd projects/h2s
+
+# Hourly H2S prediction (auto-runs every 6h via forecast_prediction_schedule)
+uv run dg launch --job forecast_prediction_job
+
+# Daily source attribution + station forecasts + dashboard (auto-runs daily at 8am)
+uv run dg launch --job daily_analysis_job
+```
+
+### Re-executing a Failed daily_analysis_job
+
+If `daily_analysis_job` fails partway through, use **"Re-execute all"** in the Dagster UI — not "Re-execute failed steps". Re-executing only the failed step reads `multi_station_model_artifacts` from a stale IO cache and will fail again. Running all steps re-loads models fresh from S3.
 
 ## Common Commands
 
@@ -74,11 +137,21 @@ uv run dg list defs
 uv run dg dev
 
 # Materialize a specific asset
-uv run dg launch --assets h2s_predictions
+uv run dg launch --assets h2s/h2s_predictions
+```
 
-# Helper scripts (automatically load .env)
-bash scripts/materialize_artiacts.sh   # Load model from S3
-bash scripts/materialize_data.sh       # Load environmental data
+### Training Scripts
+
+```bash
+cd projects/h2s
+
+# Train per-station models locally (outputs to data/models_v2/YYYYMMDD/)
+uv run python scripts/train_station_models.py \
+  --obs ../../data/modeldata_h2s_nofill.parquet \
+  --models ../../data/models_v2/$(date +%Y%m%d)
+
+# Then seed to S3 via Dagster:
+uv run dg launch --job seed_models_job
 ```
 
 ### Standalone Scripts
@@ -95,16 +168,6 @@ python src/predict_h2s.py --input data.csv --output alerts.csv --filter-alerts
 
 # Adjust sensitivity (lower threshold = more sensitive)
 python src/predict_h2s.py --input data.csv --output predictions.csv --orange-threshold 0.25
-```
-
-### Model Management
-
-```bash
-# Convert preprocessing from pickle to JSON (one-time, already done)
-python convert_preprocessing.py
-
-# Upload models to S3 (requires .env with S3 credentials)
-cd projects/h2s && uv run python ../../upload_models_to_s3.py
 ```
 
 ### Testing

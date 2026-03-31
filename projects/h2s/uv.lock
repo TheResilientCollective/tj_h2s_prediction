@@ -663,6 +663,19 @@ wheels = [
 ]
 
 [[package]]
+name = "dagster-slack"
+version = "0.28.19"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "dagster" },
+    { name = "slack-sdk" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/af/ce/f00fbde737dced99ababaa7e3d3411e1842deb04799f41093e9c2e7e0334/dagster_slack-0.28.19.tar.gz", hash = "sha256:dfbd5b474a510edcd755d1eb304e109e4f067e088f3c1ce7703bb5f87230e3af", size = 11192, upload-time = "2026-03-12T17:34:34.146Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/62/3b/8fb245263b2c8518d9652959c5a271df87d18e10890ec81faed211de202f/dagster_slack-0.28.19-py3-none-any.whl", hash = "sha256:4f9069bde355f61e2f02df10c946d67f3c8e993aec15ec281350f7fe353fbf9c", size = 10899, upload-time = "2026-03-12T17:34:33.021Z" },
+]
+
+[[package]]
 name = "dagster-webserver"
 version = "1.12.19"
 source = { registry = "https://pypi.org/simple" }
@@ -2216,6 +2229,7 @@ source = { editable = "." }
 dependencies = [
     { name = "dagster" },
     { name = "dagster-postgres" },
+    { name = "dagster-slack" },
     { name = "imbalanced-learn" },
     { name = "matplotlib" },
     { name = "minio" },
@@ -2246,6 +2260,7 @@ scheduling = [
 requires-dist = [
     { name = "dagster", specifier = ">=1.12.12" },
     { name = "dagster-postgres", specifier = ">=0.28.2" },
+    { name = "dagster-slack", specifier = ">=0.28.0" },
     { name = "imbalanced-learn", specifier = ">=0.11.0" },
     { name = "matplotlib", specifier = ">=3.7.0" },
     { name = "minio", specifier = ">=7.0.0" },
@@ -2529,6 +2544,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/bb/23/89246376a9e6e9ee256c83145b30ccdf41a515e06152e406885c116e4187/sklearn_compat-0.1.5.tar.gz", hash = "sha256:1a0c3a2f384100e034def49ee5a6cfe984a826f79d032eb559f10445e012b02c", size = 130433, upload-time = "2025-12-21T14:54:17.391Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/53/60/08cb1b41563a0a8f26a72b8c5d1726986ab535fee67aa95541b2a2cc1dfa/sklearn_compat-0.1.5-py3-none-any.whl", hash = "sha256:dddd00c442027b6a2c2fd4a86667b804a7353cdb5093bfd0d5431f5e3c135fce", size = 20966, upload-time = "2025-12-21T14:54:16.349Z" },
+]
+
+[[package]]
+name = "slack-sdk"
+version = "3.41.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/22/35/fc009118a13187dd9731657c60138e5a7c2dea88681a7f04dc406af5da7d/slack_sdk-3.41.0.tar.gz", hash = "sha256:eb61eb12a65bebeca9cb5d36b3f799e836ed2be21b456d15df2627cfe34076ca", size = 250568, upload-time = "2026-03-12T16:10:11.381Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a1/df/2e4be347ff98281b505cc0ccf141408cdd25eb5ca9f3830deb361b2472d3/slack_sdk-3.41.0-py2.py3-none-any.whl", hash = "sha256:bb18dcdfff1413ec448e759cf807ec3324090993d8ab9111c74081623b692a89", size = 313885, upload-time = "2026-03-12T16:10:09.811Z" },
 ]
 
 [[package]]

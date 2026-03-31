@@ -861,7 +861,7 @@ def feature_importance_analysis(
     s3_resource.putFile(plot_data, s3_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     # Also write to forecast latest path so dashboards pick it up
-    latest_path = f"latest/{LATEST_FORECAST}/visualizations/feature_importance_{variant}.png"
+    latest_path = f"latest/{LATEST_FORECAST}/visualizations/models/feature_importance_{variant}.png"
     s3_resource.putFile(plot_data, latest_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     # Create metadata for visualization

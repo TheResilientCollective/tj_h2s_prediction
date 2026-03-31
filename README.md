@@ -33,19 +33,64 @@ ML-based forecasting of H2S levels at the NESTOR - BES wastewater treatment site
 
 ---
 
-## Quick Start (Dagster)
+## Initial Installation
+
+Run once when deploying to a new environment:
+
+```bash
+cd projects/h2s
+uv sync
+cp .env.example .env   # fill in S3 credentials
+
+# 1. Seed S3 with all starter models (hourly + per-station daily pipeline)
+uv run dg launch --job seed_models_job
+
+# 2. Run the hourly forecast pipeline
+uv run dg launch --job forecast_prediction_job
+
+# 3. Run the daily analysis (source attribution + station forecasts + dashboard)
+uv run dg launch --job daily_analysis_job
+```
+
+`seed_models_job` uploads starter models for both pipelines:
+- `data/startmodels/` → `tijuana/forecast/models/` (hourly pipeline)
+- `data/models_v2/` → `tijuana/forecast/models/stations/` (daily per-station pipeline)
+
+---
+
+## Rebuilding Models
+
+Run when new training data is available. No separate approval gate — running `station_deployment_job` is the approval.
 
 ```bash
 cd projects/h2s
 
-# Install dependencies
-uv sync
+# 1. Train per-station models (partitioned by station: san_ysidro, nestor_bes, ib_civic_ctr)
+uv run dg launch --job multi_station_training_job
 
-# Validate definitions load
-uv run dg check defs
+# 2. Review metrics in the Dagster UI (station_training_report asset)
 
-# Start Dagster UI (http://localhost:3000)
-uv run dg dev
+# 3. Deploy to S3 — running this job IS the approval
+uv run dg launch --job station_deployment_job
+
+# 4. Re-run daily analysis with new models
+uv run dg launch --job daily_analysis_job
+```
+
+> **Note:** `multi_station_training_job` stores trained models in Dagster's IO only. `station_deployment_job` uploads them to S3, where the daily pipeline reads from. Always run deployment before expecting updated forecasts.
+
+---
+
+## Running the Forecast Pipelines
+
+```bash
+cd projects/h2s
+
+# Hourly H2S predictions (also runs automatically every 6h)
+uv run dg launch --job forecast_prediction_job
+
+# Daily source attribution + station forecasts + Slack summary (also runs automatically at 8am)
+uv run dg launch --job daily_analysis_job
 ```
 
 ### Automated Schedules
@@ -57,19 +102,13 @@ uv run dg dev
 | `monthly_data_schedule` | `0 2 1 * *` | Extract monthly training data |
 | `monthly_model_training_schedule` | `0 4 1 * *` | Retrain model variants |
 
-Both forecast and validation schedules start in `RUNNING` state — they activate automatically when Dagster starts.
+Both forecast and validation schedules start in `RUNNING` state and activate automatically when Dagster starts.
 
-### Manual Asset Materialization
+### Dagster UI
 
 ```bash
-# Run the full forecast pipeline
-uv run dg launch --job forecast_prediction_job
-
-# Run daily validation report
-uv run dg launch --job daily_validation_job
-
-# Materialize a specific asset
-uv run dg launch --assets h2s/h2s_predictions
+cd projects/h2s
+uv run dg dev   # http://localhost:3000
 ```
 
 ---
@@ -200,9 +239,10 @@ tj_h2s_prediction/
 │   │   │   └── visualizations.py  # Plot generators
 │   │   ├── resources/minio.py     # S3Resource
 │   │   └── utils/store_assets.py  # S3 storage utilities
+│   ├── scripts/
+│   │   └── train_station_models.py  # Train RF/XGB models per station locally
 │   └── tests/                     # Test suite
-├── src/                           # Standalone scripts (see src/README.md)
-│   ├── train_models_auto.py       # Train RF/XGB models per station
+├── src/                           # Standalone prediction scripts
 │   ├── h2s_daily_analysis.py      # Source attribution + 48h forecast
 │   ├── predict_h2s.py             # Single-file prediction
 │   ├── batch_predict.py           # Multi-file batch prediction
@@ -215,22 +255,26 @@ tj_h2s_prediction/
 
 ## Standalone Scripts
 
-Five scripts in `src/` cover training, prediction, visualization, and daily analysis. See [`src/README.md`](src/README.md) for full documentation, arguments, and execution order.
+Scripts in `src/` and `projects/h2s/scripts/` for training, prediction, and visualization.
 
 ```bash
-# 1. Train models (monthly or after spill events)
-python src/train_models_auto.py --obs data/modeldata_h2s_nofill.parquet --models ./models
+# Train per-station models locally (outputs to data/models_v2/YYYYMMDD/)
+cd projects/h2s
+uv run python scripts/train_station_models.py \
+  --obs ../../data/modeldata_h2s_nofill.parquet \
+  --models ../../data/models_v2/$(date +%Y%m%d)
+# Then seed to S3: uv run dg launch --job seed_models_job
 
-# 2a. Single-file prediction
+# Single-file prediction
 python src/predict_h2s.py --input data.csv --models ./models --output ./results
 
-# 2a. Batch prediction (all stations)
+# Batch prediction (all stations)
 python src/batch_predict.py --obs data/model_forecast.csv --models ./models --output ./output
 
-# 2b. Daily source attribution + 48h forecast
+# Daily source attribution + 48h forecast
 python src/h2s_daily_analysis.py --obs data/modeldata_h2s_nofill.parquet --forecast model_forecast.parquet --models ./models --output ./output
 
-# 3. Generate analysis plots (all stations)
+# Generate analysis plots (all stations)
 python src/generate_visualizations.py --models ./models --output ./reports
 ```
 

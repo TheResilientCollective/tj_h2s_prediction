@@ -15,7 +15,7 @@ import pandas as pd
 from h2s.utils import store_assets
 from h2s.constants import (
     MODEL_PATH,
-    PREDICTIONS_PATH,
+    HOURLY_PREDICTIONS_PATH,
     VISUALIZATIONS_PATH,
     LATEST_FORECAST,
     VALIDATION_PATH,
@@ -540,6 +540,81 @@ def h2s_alerts(
 
 @dg.asset(
     key_prefix="h2s",
+    group_name="h2s_alerts",
+    kinds={"slack"},
+    required_resource_keys={"slack"},
+    description="Send YELLOW_HIGH and ORANGE alerts to Slack",
+    auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
+    ins={
+        "h2s_alerts": dg.AssetIn(key=_KEY("h2s_alerts")),
+    },
+)
+def slack_alerts(
+    context: dg.AssetExecutionContext,
+    h2s_alerts: pd.DataFrame,
+) -> None:
+    """Post H2S alert summary to Slack when YELLOW_HIGH or ORANGE predictions exist."""
+    if h2s_alerts.empty:
+        context.log.info("No alerts to send")
+        return
+
+    orange_count = int((h2s_alerts['predicted_category'] == 'orange').sum())
+    yellow_count = int((h2s_alerts['predicted_category'] == 'yellow').sum())
+    total = len(h2s_alerts)
+
+    # Build time range
+    time_col = 'time' if 'time' in h2s_alerts.columns else None
+    if time_col:
+        t_min = h2s_alerts[time_col].min()
+        t_max = h2s_alerts[time_col].max()
+        time_range = f"{t_min} — {t_max}"
+    else:
+        time_range = "unknown"
+
+    # Peak risk info
+    max_confidence = float(h2s_alerts['confidence'].max()) if 'confidence' in h2s_alerts.columns else 0
+    max_risk = float(h2s_alerts['h2s_risk'].max()) if 'h2s_risk' in h2s_alerts.columns else 0
+
+    # Compose Slack message using Block Kit
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": "H2S Alert — Elevated Levels Forecast"},
+        },
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*Orange (>30 ppb):*\n{orange_count} hours"},
+                {"type": "mrkdwn", "text": f"*Yellow (5-30 ppb):*\n{yellow_count} hours"},
+                {"type": "mrkdwn", "text": f"*Total alerts:*\n{total}"},
+                {"type": "mrkdwn", "text": f"*Peak risk score:*\n{max_risk:.2f}"},
+            ],
+        },
+        {
+            "type": "context",
+            "elements": [
+                {"type": "mrkdwn", "text": f"Forecast window: {time_range} | Max confidence: {max_confidence:.0%}"},
+            ],
+        },
+    ]
+
+    slack = context.resources.slack
+    slack.get_client().chat_postMessage(
+        channel=slack.channel,
+        text=f"H2S Alert: {orange_count} orange, {yellow_count} yellow hours forecast",
+        blocks=blocks,
+    )
+
+    context.log.info(f"Slack alert sent: {orange_count} orange, {yellow_count} yellow")
+    context.add_output_metadata({
+        "orange_count": orange_count,
+        "yellow_count": yellow_count,
+        "total_alerts": total,
+    })
+
+
+@dg.asset(
+    key_prefix="h2s",
     group_name="h2s_prediction",
     required_resource_keys={"s3"},
     kinds={"ml", "xgboost"},
@@ -713,7 +788,7 @@ def feature_importance_viz(
 
     # Upload to latest path
     plot_bytes.seek(0)
-    latest_path = f"latest/{LATEST_FORECAST}/visualizations/feature_importance.png"
+    latest_path = f"latest/{LATEST_FORECAST}/visualizations/models/feature_importance.png"
     s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
@@ -812,7 +887,7 @@ def confusion_matrix_viz(
 
     # Upload to latest path
     plot_bytes.seek(0)
-    latest_path = f"latest/{LATEST_FORECAST}/visualizations/confusion_matrix.png"
+    latest_path = f"latest/{LATEST_FORECAST}/visualizations/models/confusion_matrix.png"
     s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
@@ -900,7 +975,7 @@ def model_comparison_viz(
 
     # Upload to latest path
     plot_bytes.seek(0)
-    latest_path = f"latest/{LATEST_FORECAST}/visualizations/model_comparison.png"
+    latest_path = f"latest/{LATEST_FORECAST}/visualizations/models/model_comparison.png"
     s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
@@ -954,7 +1029,7 @@ def prediction_timeline_viz(
 
     # Upload to latest path
     plot_bytes.seek(0)
-    latest_path = f"latest/{LATEST_FORECAST}/visualizations/prediction_timeline.png"
+    latest_path = f"latest/{LATEST_FORECAST}/visualizations/models/prediction_timeline.png"
     s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
     context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
@@ -1012,7 +1087,7 @@ def cross_correlation_viz(
     s3_resource.putFile(plot_bytes.read(), timestamped_path, bucket=s3_resource.S3_BUCKET, content_type="image/png")
 
     plot_bytes.seek(0)
-    latest_path = f"latest/{LATEST_FORECAST}/visualizations/cross_correlation.png"
+    latest_path = f"latest/{LATEST_FORECAST}/visualizations/models/cross_correlation.png"
     s3_resource.putFile(plot_bytes.read(), latest_path, bucket=s3_resource.S3_BUCKET, content_type="image/png")
 
     context.log.info(f"✓ Uploaded to S3: {timestamped_path}")
@@ -1042,14 +1117,22 @@ def predictions_export(
     """Export predictions to S3 with versioning.
 
     Stores predictions in both timestamped and latest paths.
-    S3 Path: tijuana/forecast/predictions/
+    S3 Path: tijuana/forecast/hourly/model=.../year=.../month=.../day=.../hour=.../
     """
     s3_resource = context.resources.s3
 
     context.log.info("Using store_assets utility for export...")
 
-    run_timestamp = datetime.now().strftime("%Y-%m-%d_%H")
-    timestamped_path = f"{PREDICTIONS_PATH}/{run_timestamp}"
+    now = datetime.now()
+    hive_path = (
+        f"{HOURLY_PREDICTIONS_PATH}"
+        f"/model=nestor_xgboost"
+        f"/year={now.strftime('%Y')}"
+        f"/month={now.strftime('%m')}"
+        f"/day={now.strftime('%d')}"
+        f"/hour={now.strftime('%H')}"
+    )
+    timestamped_path = hive_path
 
     metadata = store_assets.objectMetadata(
         name="H2S Predictions - NESTOR BES",
@@ -1063,20 +1146,20 @@ def predictions_export(
         dataset_identifier="h2s_predictions",
         s3_resource=s3_resource,
         metadata=metadata,
-        latestdatasetpath=LATEST_FORECAST,
+        latestdatasetpath=f"{LATEST_FORECAST}/predictions",
         enable_latest_path=True,
-        formats=['csv', 'json']
+        formats=['csv', 'json', 'parquet']
     )
 
     context.log.info(f"✓ Exported predictions to {timestamped_path}")
-    context.log.info(f"✓ Latest path: latest/{LATEST_FORECAST}")
+    context.log.info(f"✓ Latest path: latest/{LATEST_FORECAST}/predictions")
 
     # === PER-VARIANT PREDICTIONS ===
     for variant, variant_df in h2s_variant_predictions.items():
         variant_csv = variant_df.to_csv(index=False)
         s3_resource.putFile_text(
             variant_csv,
-            path=f"latest/{LATEST_FORECAST}/h2s_predictions_{variant}.csv",
+            path=f"latest/{LATEST_FORECAST}/predictions/h2s_predictions_{variant}.csv",
             bucket=s3_resource.S3_BUCKET,
             content_type='text/csv',
         )
@@ -1086,7 +1169,7 @@ def predictions_export(
     ensemble_csv = h2s_ensemble_predictions.to_csv(index=False)
     s3_resource.putFile_text(
         ensemble_csv,
-        path=f"latest/{LATEST_FORECAST}/h2s_predictions_ensemble.csv",
+        path=f"latest/{LATEST_FORECAST}/predictions/h2s_predictions_ensemble.csv",
         bucket=s3_resource.S3_BUCKET,
         content_type='text/csv',
     )
@@ -1124,12 +1207,14 @@ def daily_validation_report(context: dg.AssetExecutionContext) -> None:
     )
 
     s3_resource = context.resources.s3
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    yesterday_dt = datetime.now() - timedelta(days=1)
+    yesterday = yesterday_dt.strftime("%Y-%m-%d")
+    y, m, d = yesterday_dt.strftime("%Y"), yesterday_dt.strftime("%m"), yesterday_dt.strftime("%d")
 
     # Load yesterday's 6-hourly predictions
     prediction_dfs = []
     for hour in ["00", "06", "12", "18"]:
-        s3_path = f"{PREDICTIONS_PATH}/{yesterday}_{hour}/h2s_predictions.csv"
+        s3_path = f"{HOURLY_PREDICTIONS_PATH}/model=nestor_xgboost/year={y}/month={m}/day={d}/hour={hour}/h2s_predictions.csv"
         try:
             csv_url = s3_resource.get_presigned_url(path=s3_path)
             df = pd.read_csv(csv_url)

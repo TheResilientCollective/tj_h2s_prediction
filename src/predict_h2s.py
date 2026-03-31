@@ -7,11 +7,12 @@ Generates H2S predictions from CSV data using trained models produced by
 train_models_auto.py. Uses regression + binary classifiers to assign risk tiers
 (GREEN/YELLOW_LOW/YELLOW_HIGH/ORANGE), consistent with SD County guidance.
 
+Runs all stations by default; use --site to filter to one.
+
 Usage:
-    python predict_h2s.py --input data.csv --models ./models
-    python predict_h2s.py --input data.csv --models ./models --output ./results
-    python predict_h2s.py --input data.csv --models ./models --filter-alerts
+    python predict_h2s.py --input data.parquet --models ./models
     python predict_h2s.py --input data.csv --models ./models --site "IB CIVIC CTR"
+    python predict_h2s.py --input data.csv --models ./models --filter-alerts
 
 Requirements:
     - Model .pkl files from train_models_auto.py (best_reg_*, best_clf_5ppb_*, best_clf_10ppb_*)
@@ -240,6 +241,40 @@ def predict(df, reg, clf5, clf10):
     return result
 
 
+def _predict_station(df, site, skey, models_dir, filter_alerts):
+    """Run prediction for a single station. Returns results DataFrame or None."""
+    # Filter to site
+    if 'site_name' in df.columns:
+        sdf = df[df['site_name'] == site].copy()
+        if len(sdf) == 0:
+            print(f"  No data for {site}, skipping")
+            return None
+    else:
+        sdf = df.copy()
+
+    # Load models
+    try:
+        reg, clf5, clf10 = load_models(models_dir, skey)
+    except FileNotFoundError:
+        print(f"  Models not found for {skey}, skipping")
+        return None
+
+    # Engineer features + predict
+    sdf = engineer_features(sdf)
+    results = predict(sdf, reg, clf5, clf10)
+    results['station'] = site
+
+    if filter_alerts:
+        results = results[results['alert']].copy()
+
+    # Per-station summary
+    risk_counts = results['risk'].value_counts()
+    parts = [f"{tier}:{risk_counts.get(tier, 0)}" for tier in ['GREEN', 'YELLOW_LOW', 'YELLOW_HIGH', 'ORANGE']]
+    print(f"  {len(results)} rows | {' | '.join(parts)}")
+
+    return results
+
+
 def main():
     """Main execution function."""
     parser = argparse.ArgumentParser(
@@ -247,47 +282,43 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic prediction (writes ./prediction.csv)
-  python predict_h2s.py --input data.csv --models ./models
+  # All stations (default)
+  python predict_h2s.py --input data.parquet --models ./models
 
-  # Output to a specific directory
-  python predict_h2s.py --input data.csv --models ./models --output ./results
-
-  # Custom output filename
-  python predict_h2s.py --input data.csv --models ./models --output ./results --prediction alerts.csv
+  # Single station
+  python predict_h2s.py --input data.csv --models ./models --site "IB CIVIC CTR"
 
   # Alerts only (ORANGE + YELLOW_HIGH)
   python predict_h2s.py --input data.csv --models ./models --filter-alerts
 
-  # Different station
-  python predict_h2s.py --input data.csv --models ./models --site "IB CIVIC CTR"
+  # Output to a specific directory
+  python predict_h2s.py --input data.csv --models ./models --output ./results
         """
     )
 
     parser.add_argument('--input', '-i', required=True,
-                        help='Input CSV file with environmental data')
+                        help='Input CSV or parquet with environmental data')
     parser.add_argument('--output', '-o', default='.',
                         help='Output directory (default: current directory)')
-    parser.add_argument('--prediction', default='prediction.csv',
-                        help='Output filename (default: prediction.csv)')
     parser.add_argument('--models', required=True,
                         help='Directory containing model .pkl files from train_models_auto.py')
     parser.add_argument('--filter-alerts', action='store_true',
                         help='Only output ORANGE and YELLOW_HIGH predictions')
-    parser.add_argument('--site', default='NESTOR - BES',
+    parser.add_argument('--site', default=None,
                         choices=list(STATION_KEYS.keys()),
-                        help='Station to predict for (default: NESTOR - BES)')
+                        help='Station to predict for (default: all stations)')
 
     args = parser.parse_args()
+
+    sites = {args.site: STATION_KEYS[args.site]} if args.site else STATION_KEYS
 
     # Header
     print("=" * 70)
     print("H2S PREDICTION SYSTEM")
-    print(f"  Station:   {args.site}")
+    print(f"  Stations:  {', '.join(sites.keys())}")
     print(f"  Input:     {args.input}")
     os.makedirs(args.output, exist_ok=True)
-    output_path = os.path.join(args.output, args.prediction)
-    print(f"  Output:    {output_path}")
+    print(f"  Output:    {args.output}")
     print(f"  Models:    {args.models}")
     print(f"  Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 70)
@@ -304,57 +335,38 @@ Examples:
         print(f"  Error loading data: {e}")
         return 1
 
-    # Filter to site if multiple sites present
-    if 'site_name' in df.columns:
-        if args.site in df['site_name'].values:
-            df = df[df['site_name'] == args.site].copy()
-            print(f"  Filtered to {args.site}: {len(df)} records")
-        else:
-            available = df['site_name'].unique().tolist()
-            print(f"  Warning: '{args.site}' not found. Available: {available}")
+    # Run predictions per station
+    all_results = []
+    for site, skey in sites.items():
+        print(f"\n--- {site} ({skey}) ---")
+        results = _predict_station(df, site, skey, args.models, args.filter_alerts)
+        if results is not None and len(results) > 0:
+            # Save per-station CSV
+            out_path = os.path.join(args.output, f'predictions_{skey}.csv')
+            results.to_csv(out_path, index=False)
+            print(f"  Saved to {out_path}")
+            all_results.append(results)
 
-    # Load models
-    skey = STATION_KEYS[args.site]
-    print(f"\nLoading models for {args.site} ({skey})...")
-    try:
-        reg, clf5, clf10 = load_models(args.models, skey)
-        print(f"  Loaded: best_reg_{skey}.pkl, best_clf_5ppb_{skey}.pkl, best_clf_10ppb_{skey}.pkl")
-    except FileNotFoundError as e:
-        print(f"  Error: {e}")
-        print(f"  Run train_models_auto.py first: python src/train_models_auto.py --obs data.parquet --models {args.models}")
+    if not all_results:
+        print("\nNo predictions generated.")
         return 1
 
-    # Engineer features + predict
-    print("\nEngineering features...")
-    df = engineer_features(df)
-    print(f"  {len(df)} samples ready")
+    # Combined output
+    combined = pd.concat(all_results, ignore_index=True)
+    combined_path = os.path.join(args.output, 'predictions_all.csv')
+    combined.to_csv(combined_path, index=False)
 
-    print("\nGenerating predictions...")
-    results = predict(df, reg, clf5, clf10)
-
-    # Filter to alerts if requested
-    if args.filter_alerts:
-        results = results[results['alert']].copy()
-        print(f"  Filtered to alerts: {len(results)} records")
-
-    # Summary
-    risk_counts = results['risk'].value_counts()
-    alert_count = int(results['alert'].sum())
-    print(f"\nPrediction Summary:")
+    # Overall summary
+    risk_counts = combined['risk'].value_counts()
+    alert_count = int(combined['alert'].sum())
+    print(f"\nPrediction Summary ({len(combined)} total across {len(all_results)} stations):")
     for tier in ['GREEN', 'YELLOW_LOW', 'YELLOW_HIGH', 'ORANGE']:
         count = risk_counts.get(tier, 0)
-        pct = count / len(results) * 100 if len(results) > 0 else 0
-        print(f"  {tier:8s}: {count:4d} ({pct:.0f}%)")
+        pct = count / len(combined) * 100 if len(combined) > 0 else 0
+        print(f"  {tier:12s}: {count:4d} ({pct:.0f}%)")
     if alert_count:
-        print(f"  Alerts:  {alert_count}")
-
-    # Save
-    try:
-        results.to_csv(output_path, index=False)
-        print(f"\nSaved to {output_path}")
-    except Exception as e:
-        print(f"  Error saving: {e}")
-        return 1
+        print(f"  {'Alerts':12s}: {alert_count}")
+    print(f"\nCombined: {combined_path}")
 
     print("\n" + "=" * 70)
     print("PREDICTION COMPLETE")

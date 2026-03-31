@@ -4,6 +4,7 @@ from pathlib import Path
 from dagster import Definitions, EnvVar, definitions, load_from_defs_folder
 
 from h2s.resources.minio import S3Resource
+from h2s.resources.slack import SlackAlertResource
 
 # Configure S3 resource (using EnvVar for Dagster config)
 s3_resource = S3Resource(
@@ -15,9 +16,15 @@ s3_resource = S3Resource(
     S3_SECRET_KEY=EnvVar('S3_SECRET_KEY'),
 )
 
+# Configure Slack resource for alert notifications
+slack_resource = SlackAlertResource(
+    token=EnvVar('SLACK_TOKEN'),
+    channel=os.environ.get('SLACK_CHANNEL', '#test'),
+)
+
 resources = {
-    "local": {"s3": s3_resource},
-    "production": {"s3": s3_resource},
+    "local": {"s3": s3_resource, "slack": slack_resource},
+    "production": {"s3": s3_resource, "slack": slack_resource},
 }
 
 deployment_name = os.environ.get("DAGSTER_DEPLOYMENT", "local")
@@ -35,6 +42,7 @@ def defs():
         preprocessed_features,
         h2s_predictions,
         h2s_alerts,
+        slack_alerts,
         h2s_variant_predictions,
         h2s_ensemble_predictions,
         feature_importance_viz,
@@ -100,6 +108,7 @@ def defs():
             preprocessed_features,
             h2s_predictions,
             h2s_alerts,
+            slack_alerts,
             h2s_variant_predictions,
             h2s_ensemble_predictions,
             feature_importance_viz,

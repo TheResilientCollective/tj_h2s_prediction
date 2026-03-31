@@ -15,12 +15,13 @@ import io
 import json
 import pickle
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import dagster as dg
 import numpy as np
 import pandas as pd
 
-from h2s.constants import MODEL_PATH
+from h2s.constants import MODEL_PATH, DAILY_SUMMARY_PATH
 from h2s.training.multi_station_trainer import (
     MODEL_FEATURES,
     STATION_PARTITION_MAP,
@@ -394,18 +395,18 @@ def daily_station_forecasts(
     obs_df = obs_df[(obs_df['h2s_measured'] == True) & (obs_df['H2S'] <= 500)].copy()
     obs_df['H2S'] = obs_df['H2S'].clip(lower=0)
 
-    # Load weather forecast from S3
-    fc_df = None
+    # Load model forecast from S3 (try parquet first, then CSV)
     try:
-        fc_url = s3.get_presigned_url(path="latest/tijuana/weather_forecast/latest.csv")
+        fc_url = s3.get_presigned_url(path="latest/tijuana/forecast_data/model_forecast.parquet")
+        fc_df = pd.read_parquet(fc_url)
+        context.log.info(f"✓ Loaded model forecast (parquet) from S3: {len(fc_df)} rows")
+    except Exception:
+        fc_url = s3.get_presigned_url(path="latest/tijuana/forecast_data/model_forecast.csv")
         fc_df = pd.read_csv(fc_url)
-        if 'time' not in fc_df.columns and 'date' in fc_df.columns:
-            fc_df = fc_df.rename(columns={'date': 'time'})
-        fc_df['time'] = pd.to_datetime(fc_df['time'], utc=True)
-        context.log.info(f"✓ Loaded weather forecast from S3: {len(fc_df)} rows")
-    except Exception as e:
-        context.log.warning(f"Weather forecast unavailable ({e}), generating synthetic forecast")
-        fc_df = _generate_synthetic_forecast(obs_df, forecast_hours)
+        context.log.info(f"✓ Loaded model forecast (csv) from S3: {len(fc_df)} rows")
+    if 'time' not in fc_df.columns and 'date' in fc_df.columns:
+        fc_df = fc_df.rename(columns={'date': 'time'})
+    fc_df['time'] = pd.to_datetime(fc_df['time'], utc=True)
 
     # Load tidal forecast
     try:
@@ -435,8 +436,7 @@ def daily_station_forecasts(
     results = []
     for site, info in STATION_META.items():
         if site not in multi_station_model_artifacts:
-            context.log.warning(f"No models for {site}, skipping")
-            continue
+            raise ValueError(f"No models for {site}")
 
         station_models = multi_station_model_artifacts[site]
         if 'regression' not in station_models:
@@ -739,8 +739,8 @@ def daily_dashboard_viz(
 
     # Upload to S3 (latest + timestamped)
     ts = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H')
-    latest_path = "latest/tijuana/forecast_data/visualizations/daily_dashboard.png"
-    ts_path = f"tijuana/forecast/output/{ts}/daily_dashboard.png"
+    latest_path = "latest/tijuana/forecast/visualizations/daily_dashboard.png"
+    ts_path = f"{DAILY_SUMMARY_PATH}/{ts}/daily_dashboard.png"
 
     for path in [latest_path, ts_path]:
         try:
@@ -796,13 +796,14 @@ def _compute_source_probability_grid(obs_df: pd.DataFrame):
 @dg.asset(
     key_prefix="h2s",
     group_name="h2s_daily",
-    required_resource_keys={"s3"},
-    kinds={"json", "s3"},
+    required_resource_keys={"s3", "slack"},
+    kinds={"json", "s3", "slack"},
     description="JSON summary for web dashboards (station stats, 48h rollup, active sources)",
     ins={
         "source_attribution": dg.AssetIn(key=_KEY("source_attribution")),
         "daily_station_forecasts": dg.AssetIn(key=_KEY("daily_station_forecasts")),
     },
+    deps=[_KEY("daily_station_forecasts")],
     config_schema={
         "obs_bucket": dg.Field(str, default_value="resilentpublic"),
     },
@@ -896,7 +897,7 @@ def daily_summary_json(
     ts = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H')
     for path in [
         "latest/tijuana/forecast_data/daily_summary.json",
-        f"tijuana/forecast/output/{ts}/daily_summary.json",
+        f"{DAILY_SUMMARY_PATH}/{ts}/daily_summary.json",
     ]:
         try:
             s3.putFile(summary_bytes, path, bucket=s3.S3_BUCKET, content_type='application/json')
@@ -908,6 +909,73 @@ def daily_summary_json(
         "stations_in_summary": list(summary['stations'].keys()),
         "active_sources": list(summary['active_sources'].keys()),
     })
+
+    # --- Slack summary ---
+    station_fields = []
+    for short, stats in summary.get('stations', {}).items():
+        fc = summary.get('forecast_48h', {}).get(short, {})
+        hours_orange = fc.get('hours_orange', 0)
+        hours_yellow = fc.get('hours_yellow_high', 0) + fc.get('hours_yellow_low', 0)
+        risk_icon = "🟠" if hours_orange > 0 else ("🟡" if hours_yellow > 0 else "🟢")
+        station_fields.append({
+            "type": "mrkdwn",
+            "text": (
+                f"*{risk_icon} {stats.get('name', short)}*\n"
+                f"Now: {stats.get('last_h2s', 'N/A')} ppb | "
+                f"24h max: {stats.get('max_24h', 'N/A')} ppb\n"
+                f"48h forecast: {fc.get('max_h2s', 'N/A')} ppb max "
+                f"({hours_orange}h orange, {hours_yellow}h yellow)"
+            ),
+        })
+
+    active_sources = summary.get('active_sources', {})
+    source_text = (
+        ", ".join(
+            f"{src} ({s['aligned_hours']}h, {s['max_h2s']} ppb max)"
+            for src, s in active_sources.items()
+        )
+        if active_sources
+        else "None"
+    )
+
+    # Forecast time range in Pacific time
+    pacific = ZoneInfo("America/Los_Angeles")
+    if len(fc_df) > 0:
+        fc_start = fc_df['time'].min().astimezone(pacific).strftime("%-I %p %-m/%-d")
+        fc_end = fc_df['time'].max().astimezone(pacific).strftime("%-I %p %-m/%-d")
+        time_range = f"{fc_start} → {fc_end} PT"
+    else:
+        time_range = "N/A"
+
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": f"H2S Daily Summary — {ts}"},
+        },
+        {
+            "type": "section",
+            "fields": station_fields,
+        },
+        {
+            "type": "context",
+            "elements": [
+                {"type": "mrkdwn", "text": f"*Forecast window:* {time_range}"},
+                {"type": "mrkdwn", "text": f"*Active sources:* {source_text}"},
+            ],
+        },
+    ]
+
+    try:
+        slack = context.resources.slack
+        slack.get_client().chat_postMessage(
+            channel=slack.channel,
+            text=f"H2S Daily Summary {ts}",
+            blocks=blocks,
+        )
+        context.log.info("Slack daily summary sent")
+    except Exception as e:
+        context.log.warning(f"Slack notification failed: {e}")
+
     return summary
 
 
