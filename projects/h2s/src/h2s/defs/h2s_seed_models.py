@@ -355,14 +355,13 @@ def seed_models(context: dg.AssetExecutionContext) -> dict:
 
     uploaded = []
 
-    # Check if any phase needs inline training (to load training data once)
-    need_train_p1 = not startmodels_dir.exists()
-    need_train_p2 = station_models_dir is None or not station_models_dir.exists()
-    need_train_p3 = mh_dir is None or not mh_dir.exists()
+    # Lazy-load training data (only fetched from S3 when a phase needs inline training)
+    _training_cache = {}
 
-    raw_training_df = None
-    if need_train_p1 or need_train_p2 or need_train_p3:
-        raw_training_df = _load_training_data(s3, bucket, context)
+    def _ensure_training_data():
+        if 'df' not in _training_cache:
+            _training_cache['df'] = _load_training_data(s3, bucket, context)
+        return _training_cache['df']
 
     def _upload(local_path: Path, s3_path: str, content_type: str = "application/octet-stream") -> bool:
         if not local_path.exists():
@@ -383,8 +382,25 @@ def seed_models(context: dg.AssetExecutionContext) -> dict:
     # =========================================================================
     context.log.info("Phase 1: Seeding hourly pipeline models")
 
+    local_p1_valid = False
     if startmodels_dir.exists():
-        # Upload from local files
+        # Validate local model feature count matches current MODEL_FEATURES
+        prep_file = startmodels_dir / primary_variant / "nestor_preprocessing_info.json"
+        if prep_file.exists():
+            local_prep = json.loads(prep_file.read_text())
+            local_n = len(local_prep.get('feature_cols', []))
+            if local_n != len(MODEL_FEATURES):
+                context.log.warning(
+                    f"Phase 1: Local model has {local_n} features, "
+                    f"current MODEL_FEATURES has {len(MODEL_FEATURES)}. Training fresh model."
+                )
+            else:
+                local_p1_valid = True
+        else:
+            local_p1_valid = True  # no prep info to validate, trust the local files
+
+    if local_p1_valid and startmodels_dir.exists():
+        # Upload from validated local files
         primary_dir = startmodels_dir / primary_variant
         _upload(primary_dir / VARIANTS.get(primary_variant, "model.joblib"), f"{MODEL_PATH}/nestor_xgboost_weighted_model.json")
         _upload(primary_dir / "nestor_preprocessing_info.json", f"{MODEL_PATH}/nestor_preprocessing_info.json", "application/json")
@@ -413,15 +429,30 @@ def seed_models(context: dg.AssetExecutionContext) -> dict:
             context.log.info(f"deployment_metadata.json -> s3://{bucket}/{hourly_meta_path}")
         uploaded.append(hourly_meta_path)
     else:
-        _train_and_seed_phase1(s3, bucket, context, raw_training_df, uploaded, dry_run)
+        _train_and_seed_phase1(s3, bucket, context, _ensure_training_data(), uploaded, dry_run)
 
     # =========================================================================
     # Phase 2: Daily per-station models
     # =========================================================================
     context.log.info("Phase 2: Seeding per-station daily pipeline models")
 
+    local_p2_valid = False
     if station_models_dir is not None and station_models_dir.exists():
-        # Upload from local files
+        # Validate local models match current feature set before uploading
+        test_pkl = next(station_models_dir.glob("*.pkl"), None)
+        if test_pkl:
+            test_model = pickle.loads(test_pkl.read_bytes())
+            n_features = getattr(test_model, 'n_features_in_', None)
+            if n_features is not None and n_features != len(MODEL_FEATURES):
+                context.log.warning(
+                    f"Phase 2: Local models have {n_features} features, "
+                    f"current MODEL_FEATURES has {len(MODEL_FEATURES)}. Training fresh models."
+                )
+            else:
+                local_p2_valid = True
+
+    if local_p2_valid:
+        # Upload from validated local files
         context.log.info(f"Station models source: {station_models_dir}")
 
         for site_name, station_key in STATIONS.items():
@@ -434,7 +465,7 @@ def seed_models(context: dg.AssetExecutionContext) -> dict:
                 if _upload(local_file, s3_path):
                     station_uploaded[task] = s3_path
 
-            # Store feature list (ensures inference matches training shape)
+            # Store feature list (matches validated local models)
             feat_path = f"{base_path}/features.json"
             if not dry_run:
                 s3.putFile(json.dumps(MODEL_FEATURES, indent=2).encode("utf-8"), feat_path, bucket=bucket, content_type="application/json")
@@ -457,7 +488,7 @@ def seed_models(context: dg.AssetExecutionContext) -> dict:
                 context.log.info(f"{site_name} deployment_metadata.json -> s3://{bucket}/{station_meta_path}")
             uploaded.append(station_meta_path)
     else:
-        _train_and_seed_phase2(s3, bucket, context, raw_training_df, uploaded, dry_run)
+        _train_and_seed_phase2(s3, bucket, context, _ensure_training_data(), uploaded, dry_run)
 
     # =========================================================================
     # Phase 3: Multi-horizon models
@@ -503,7 +534,9 @@ def seed_models(context: dg.AssetExecutionContext) -> dict:
             context.log.info(f"MH deployment_metadata.json -> s3://{bucket}/{mh_meta_path}")
         uploaded.append(mh_meta_path)
     else:
-        _train_and_seed_phase3(s3, bucket, context, raw_training_df, uploaded, dry_run)
+        _train_and_seed_phase3(s3, bucket, context, _ensure_training_data(), uploaded, dry_run)
+
+    trained_inline = 'df' in _training_cache  # True if any phase needed inline training
 
     summary = {
         "status": "dry_run" if dry_run else "seeded",
@@ -512,11 +545,7 @@ def seed_models(context: dg.AssetExecutionContext) -> dict:
         "mh_models_source": str(mh_dir) if mh_dir else "trained_inline",
         "files_uploaded": len(uploaded),
         "paths": uploaded,
-        "trained_inline": {
-            "phase1": need_train_p1,
-            "phase2": need_train_p2,
-            "phase3": need_train_p3,
-        },
+        "trained_inline": trained_inline,
     }
 
     context.add_output_metadata({
@@ -524,7 +553,7 @@ def seed_models(context: dg.AssetExecutionContext) -> dict:
         "primary_variant": primary_variant,
         "station_models_source": str(station_models_dir),
         "files_uploaded": len(uploaded),
-        "trained_inline": str([f"P{i}" for i, v in enumerate([need_train_p1, need_train_p2, need_train_p3], 1) if v]),
+        "trained_inline": trained_inline,
     })
 
     return summary
