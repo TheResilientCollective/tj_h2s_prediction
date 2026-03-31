@@ -23,13 +23,14 @@ from pathlib import Path
 
 import dagster as dg
 
-from h2s.constants import MODEL_PATH
+from h2s.constants import MODEL_PATH, MH_MODELS_S3_BASE
 
 # Resolve the repo root (projects/h2s/src/h2s/defs -> repo root)
 _THIS_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _THIS_DIR.parents[4]
 _STARTMODELS = _REPO_ROOT / "data" / "startmodels"
 _MODELS_V2_DIR = _REPO_ROOT / "data" / "models_v2"
+_MODELS_MH_DIR = _REPO_ROOT / "data" / "models_mh"
 
 PRIMARY_VARIANT = "random_forest"
 VARIANTS = {
@@ -49,6 +50,19 @@ TASK_FILE_MAP = {
     'clf_5ppb':   'model_clf5',
     'clf_10ppb':  'model_clf10',
 }
+
+
+MH_HORIZON_NAMES = ['0_6h', '6_24h', '24_48h', '48_72h']
+MH_TASKS = ['regression', 'clf_5ppb', 'clf_10ppb']
+
+
+def _find_latest_mh_dir() -> Path | None:
+    """Return data/models_mh/ if it exists and has .pkl files, else None."""
+    if not _MODELS_MH_DIR.exists():
+        return None
+    if any(_MODELS_MH_DIR.glob("*.pkl")):
+        return _MODELS_MH_DIR
+    return None
 
 
 def _find_latest_models_dir() -> Path | None:
@@ -80,6 +94,11 @@ def _find_latest_models_dir() -> Path | None:
             str,
             default_value=PRIMARY_VARIANT,
             description="Variant to install as the production hourly model",
+        ),
+        "mh_models_dir": dg.Field(
+            str,
+            default_value="",
+            description="Directory with pre-trained MH .pkl models. Leave empty to auto-detect data/models_mh/",
         ),
         "dry_run": dg.Field(
             bool,
@@ -200,10 +219,65 @@ def seed_models(context: dg.AssetExecutionContext) -> dict:
             context.log.info(f"✓ {site_name} deployment_metadata.json -> s3://{bucket}/{station_meta_path}")
         uploaded.append(station_meta_path)
 
+    # =========================================================================
+    # Phase 3: Multi-horizon models
+    # =========================================================================
+    mh_dir_cfg = context.op_config["mh_models_dir"]
+    if mh_dir_cfg:
+        mh_dir: Path | None = Path(mh_dir_cfg)
+    else:
+        mh_dir = _find_latest_mh_dir()
+
+    if mh_dir and mh_dir.exists():
+        context.log.info(f"Phase 3: Seeding multi-horizon models from {mh_dir}")
+
+        for hz_name in MH_HORIZON_NAMES:
+            for station_key in STATIONS.values():
+                for task in MH_TASKS:
+                    # Expected naming: best_{horizon}_{task}_{station}.pkl
+                    local_file = mh_dir / f"best_{hz_name}_{task}_{station_key}.pkl"
+                    s3_path = f"{MH_MODELS_S3_BASE}/{hz_name}/{station_key}/{task}.pkl"
+                    _upload(local_file, s3_path)
+
+        # Upload horizon_features.json
+        _upload(
+            mh_dir / "horizon_features.json",
+            f"{MH_MODELS_S3_BASE}/horizon_features.json",
+            "application/json",
+        )
+
+        # Upload training report
+        _upload(
+            mh_dir / "training_report_mh.json",
+            f"{MH_MODELS_S3_BASE}/training_report_mh.json",
+            "application/json",
+        )
+
+        # Deployment metadata
+        mh_meta = {
+            "deployed_at": datetime.now(timezone.utc).isoformat(),
+            "source_dir": str(mh_dir),
+            "horizons": MH_HORIZON_NAMES,
+            "stations": list(STATIONS.values()),
+            "tasks": MH_TASKS,
+            "deployment_status": "seeded",
+        }
+        mh_meta_bytes = json.dumps(mh_meta, indent=2).encode("utf-8")
+        mh_meta_path = f"{MH_MODELS_S3_BASE}/deployment_metadata.json"
+        if dry_run:
+            context.log.info(f"[DRY RUN] deployment_metadata.json -> s3://{bucket}/{mh_meta_path}")
+        else:
+            s3.putFile(mh_meta_bytes, mh_meta_path, bucket=bucket, content_type="application/json")
+            context.log.info(f"✓ MH deployment_metadata.json -> s3://{bucket}/{mh_meta_path}")
+        uploaded.append(mh_meta_path)
+    else:
+        context.log.info("Phase 3: No multi-horizon models found, skipping")
+
     summary = {
         "status": "dry_run" if dry_run else "seeded",
         "primary_variant": primary_variant,
         "station_models_source": str(station_models_dir),
+        "mh_models_source": str(mh_dir) if mh_dir else "none",
         "files_uploaded": len(uploaded),
         "paths": uploaded,
     }

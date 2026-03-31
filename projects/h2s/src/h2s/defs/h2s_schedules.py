@@ -67,6 +67,15 @@ from h2s.defs.h2s_daily_pipeline import (
     daily_analysis_job,
 )
 
+from h2s.defs.h2s_multihorizon_training import (
+    mh_training_job,
+    STATION_PARTITIONS as MH_STATION_PARTITIONS,
+)
+
+from h2s.defs.h2s_multihorizon_pipeline import (
+    mh_forecast_job,
+)
+
 
 # ============================================================================
 # JOB 1: Monthly Data Extraction (monthly partitioned)
@@ -320,4 +329,45 @@ def daily_analysis_schedule(context: dg.ScheduleEvaluationContext):
     """Trigger daily H2S analysis pipeline."""
     return dg.RunRequest(
         run_key=f"daily_analysis_{context.scheduled_execution_time.strftime('%Y-%m-%d')}",
+    )
+
+
+# ============================================================================
+# SCHEDULE 7: Multi-Horizon Training (3 AM on 1st of month)
+# ============================================================================
+
+@dg.schedule(
+    job=mh_training_job,
+    cron_schedule="0 3 1 * *",
+    description="Monthly multi-horizon training — all 3 stations on 1st of month at 3 AM UTC",
+    default_status=dg.DefaultScheduleStatus.STOPPED,
+    tags={"environment": "production", "schedule_type": "mh_training"},
+)
+def mh_training_schedule(context: dg.ScheduleEvaluationContext):
+    """Train multi-horizon models for all stations (one RunRequest per station)."""
+    return [
+        dg.RunRequest(
+            partition_key=partition_key,
+            run_key=f"mh_training_{context.scheduled_execution_time.strftime('%Y-%m')}_{partition_key}",
+            tags={"training_month": context.scheduled_execution_time.strftime('%Y-%m')},
+        )
+        for partition_key in MH_STATION_PARTITIONS.get_partition_keys()
+    ]
+
+
+# ============================================================================
+# SCHEDULE 8: Multi-Horizon Forecast (14:00 UTC daily)
+# ============================================================================
+
+@dg.schedule(
+    job=mh_forecast_job,
+    cron_schedule="0 14 * * *",
+    description="Daily multi-horizon H2S forecast (14:00 UTC / 6 AM PST)",
+    default_status=dg.DefaultScheduleStatus.STOPPED,
+    tags={"environment": "production", "schedule_type": "mh_forecast"},
+)
+def mh_forecast_schedule(context: dg.ScheduleEvaluationContext):
+    """Trigger daily multi-horizon forecast."""
+    return dg.RunRequest(
+        run_key=f"mh_forecast_{context.scheduled_execution_time.strftime('%Y-%m-%d')}",
     )

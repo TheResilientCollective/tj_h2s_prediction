@@ -19,3 +19,7 @@ VISUALIZATIONS_PATH = 'tijuana/forecast/visualizations'
 LATEST_BASEPATH = 'latest/tijuana'
 LATEST_FORECAST = 'tijuana/forecast'
 VALIDATION_PATH = 'tijuana/forecast/validation'
+
+# Multi-horizon forecast paths
+MH_MODELS_S3_BASE = 'tijuana/forecast/models/multihorizon'
+MH_OUTPUT_PATH = 'tijuana/forecast/multihorizon'
