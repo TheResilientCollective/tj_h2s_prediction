@@ -80,6 +80,26 @@ def defs():
         daily_analysis_job,
     )
 
+    # Import multi-horizon training pipeline assets
+    from h2s.defs.h2s_multihorizon_training import (
+        mh_training_data,
+        mh_trained_models,
+        mh_training_report,
+        mh_model_deployment,
+        mh_training_job,
+        mh_deployment_job,
+    )
+
+    # Import multi-horizon forecast pipeline assets
+    from h2s.defs.h2s_multihorizon_pipeline import (
+        mh_model_artifacts,
+        mh_observation_state,
+        mh_forecasts,
+        mh_dashboard_viz,
+        mh_summary_export,
+        mh_forecast_job,
+    )
+
     # Import schedules and jobs
     from h2s.defs.h2s_schedules import (
         monthly_data_extraction_job,
@@ -94,6 +114,8 @@ def defs():
         daily_validation_schedule,
         multi_station_training_schedule,
         daily_analysis_schedule,
+        mh_training_schedule,
+        mh_forecast_schedule,
     )
 
     # Create definitions with assets, jobs, schedules, and resources
@@ -131,6 +153,17 @@ def defs():
             daily_summary_json,
             # Seed Models
             seed_models,
+            # Multi-Horizon Training Pipeline Assets
+            mh_training_data,
+            mh_trained_models,
+            mh_training_report,
+            mh_model_deployment,
+            # Multi-Horizon Forecast Pipeline Assets
+            mh_model_artifacts,
+            mh_observation_state,
+            mh_forecasts,
+            mh_dashboard_viz,
+            mh_summary_export,
         ],
         jobs=[
             # Prediction jobs
@@ -148,6 +181,10 @@ def defs():
             daily_analysis_job,
             # Seed models job
             seed_models_job,
+            # Multi-horizon jobs
+            mh_training_job,
+            mh_deployment_job,
+            mh_forecast_job,
         ],
         schedules=[
             forecast_prediction_schedule,
@@ -156,6 +193,8 @@ def defs():
             monthly_model_training_schedule,
             multi_station_training_schedule,
             daily_analysis_schedule,
+            mh_training_schedule,
+            mh_forecast_schedule,
         ],
         resources=resources[deployment_name]
     )
