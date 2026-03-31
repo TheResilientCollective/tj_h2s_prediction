@@ -147,77 +147,75 @@ def seed_models(context: dg.AssetExecutionContext) -> dict:
     context.log.info("Phase 1: Seeding hourly pipeline models")
 
     if not startmodels_dir.exists():
-        raise FileNotFoundError(f"Startmodels directory not found: {startmodels_dir}")
-
-    primary_dir = startmodels_dir / primary_variant
-    _upload(primary_dir / VARIANTS.get(primary_variant, "model.joblib"), f"{MODEL_PATH}/nestor_xgboost_weighted_model.json")
-    _upload(primary_dir / "nestor_preprocessing_info.json", f"{MODEL_PATH}/nestor_preprocessing_info.json", "application/json")
-
-    for variant, model_filename in VARIANTS.items():
-        variant_dir = startmodels_dir / variant
-        _upload(variant_dir / model_filename, f"{MODEL_PATH}/{variant}/{model_filename}")
-        variant_prep = variant_dir / "nestor_preprocessing_info.json"
-        if variant_prep.exists():
-            _upload(variant_prep, f"{MODEL_PATH}/{variant}/nestor_preprocessing_info.json", "application/json")
-
-    hourly_meta = {
-        "deployed_at": datetime.now(timezone.utc).isoformat(),
-        "primary_variant": primary_variant,
-        "model_path": f"{MODEL_PATH}/nestor_xgboost_weighted_model.json",
-        "preprocessing_path": f"{MODEL_PATH}/nestor_preprocessing_info.json",
-        "seeded_variants": list(VARIANTS.keys()),
-        "deployment_status": "seeded",
-    }
-    hourly_meta_bytes = json.dumps(hourly_meta, indent=2).encode("utf-8")
-    hourly_meta_path = f"{MODEL_PATH}/deployment_metadata.json"
-    if dry_run:
-        context.log.info(f"[DRY RUN] deployment_metadata.json -> s3://{bucket}/{hourly_meta_path}")
+        context.log.warning(f"Phase 1: Startmodels directory not found ({startmodels_dir}), skipping")
     else:
-        s3.putFile(hourly_meta_bytes, hourly_meta_path, bucket=bucket, content_type="application/json")
-        context.log.info(f"✓ deployment_metadata.json -> s3://{bucket}/{hourly_meta_path}")
-    uploaded.append(hourly_meta_path)
+        primary_dir = startmodels_dir / primary_variant
+        _upload(primary_dir / VARIANTS.get(primary_variant, "model.joblib"), f"{MODEL_PATH}/nestor_xgboost_weighted_model.json")
+        _upload(primary_dir / "nestor_preprocessing_info.json", f"{MODEL_PATH}/nestor_preprocessing_info.json", "application/json")
+
+        for variant, model_filename in VARIANTS.items():
+            variant_dir = startmodels_dir / variant
+            _upload(variant_dir / model_filename, f"{MODEL_PATH}/{variant}/{model_filename}")
+            variant_prep = variant_dir / "nestor_preprocessing_info.json"
+            if variant_prep.exists():
+                _upload(variant_prep, f"{MODEL_PATH}/{variant}/nestor_preprocessing_info.json", "application/json")
+
+        hourly_meta = {
+            "deployed_at": datetime.now(timezone.utc).isoformat(),
+            "primary_variant": primary_variant,
+            "model_path": f"{MODEL_PATH}/nestor_xgboost_weighted_model.json",
+            "preprocessing_path": f"{MODEL_PATH}/nestor_preprocessing_info.json",
+            "seeded_variants": list(VARIANTS.keys()),
+            "deployment_status": "seeded",
+        }
+        hourly_meta_bytes = json.dumps(hourly_meta, indent=2).encode("utf-8")
+        hourly_meta_path = f"{MODEL_PATH}/deployment_metadata.json"
+        if dry_run:
+            context.log.info(f"[DRY RUN] deployment_metadata.json -> s3://{bucket}/{hourly_meta_path}")
+        else:
+            s3.putFile(hourly_meta_bytes, hourly_meta_path, bucket=bucket, content_type="application/json")
+            context.log.info(f"✓ deployment_metadata.json -> s3://{bucket}/{hourly_meta_path}")
+        uploaded.append(hourly_meta_path)
 
     # =========================================================================
     # Phase 2: Daily per-station models
     # =========================================================================
     context.log.info("Phase 2: Seeding per-station daily pipeline models")
 
-    if station_models_dir is None:
-        raise FileNotFoundError(
-            f"No per-station models found under {_MODELS_V2_DIR}. "
-            "Run scripts/train_station_models.py first, or set station_models_dir in config."
+    if station_models_dir is None or not station_models_dir.exists():
+        context.log.warning(
+            f"Phase 2: Per-station models directory not found "
+            f"({station_models_dir or _MODELS_V2_DIR}), skipping"
         )
-    if not station_models_dir.exists():
-        raise FileNotFoundError(f"Station models directory not found: {station_models_dir}")
+    else:
+        context.log.info(f"Station models source: {station_models_dir}")
 
-    context.log.info(f"Station models source: {station_models_dir}")
+        for site_name, station_key in STATIONS.items():
+            base_path = f"{STATION_MODELS_S3_BASE}/{station_key}"
+            station_uploaded = {}
 
-    for site_name, station_key in STATIONS.items():
-        base_path = f"{STATION_MODELS_S3_BASE}/{station_key}"
-        station_uploaded = {}
+            for task, file_prefix in TASK_FILE_MAP.items():
+                local_file = station_models_dir / f"{file_prefix}_{station_key}.pkl"
+                s3_path = f"{base_path}/{task}.pkl"
+                if _upload(local_file, s3_path):
+                    station_uploaded[task] = s3_path
 
-        for task, file_prefix in TASK_FILE_MAP.items():
-            local_file = station_models_dir / f"{file_prefix}_{station_key}.pkl"
-            s3_path = f"{base_path}/{task}.pkl"
-            if _upload(local_file, s3_path):
-                station_uploaded[task] = s3_path
-
-        station_meta = {
-            "deployed_at": datetime.now(timezone.utc).isoformat(),
-            "station": site_name,
-            "station_key": station_key,
-            "source_dir": str(station_models_dir),
-            "models": station_uploaded,
-            "deployment_status": "seeded",
-        }
-        station_meta_bytes = json.dumps(station_meta, indent=2).encode("utf-8")
-        station_meta_path = f"{base_path}/deployment_metadata.json"
-        if dry_run:
-            context.log.info(f"[DRY RUN] {site_name} deployment_metadata.json -> s3://{bucket}/{station_meta_path}")
-        else:
-            s3.putFile(station_meta_bytes, station_meta_path, bucket=bucket, content_type="application/json")
-            context.log.info(f"✓ {site_name} deployment_metadata.json -> s3://{bucket}/{station_meta_path}")
-        uploaded.append(station_meta_path)
+            station_meta = {
+                "deployed_at": datetime.now(timezone.utc).isoformat(),
+                "station": site_name,
+                "station_key": station_key,
+                "source_dir": str(station_models_dir),
+                "models": station_uploaded,
+                "deployment_status": "seeded",
+            }
+            station_meta_bytes = json.dumps(station_meta, indent=2).encode("utf-8")
+            station_meta_path = f"{base_path}/deployment_metadata.json"
+            if dry_run:
+                context.log.info(f"[DRY RUN] {site_name} deployment_metadata.json -> s3://{bucket}/{station_meta_path}")
+            else:
+                s3.putFile(station_meta_bytes, station_meta_path, bucket=bucket, content_type="application/json")
+                context.log.info(f"✓ {site_name} deployment_metadata.json -> s3://{bucket}/{station_meta_path}")
+            uploaded.append(station_meta_path)
 
     # =========================================================================
     # Phase 3: Multi-horizon models
