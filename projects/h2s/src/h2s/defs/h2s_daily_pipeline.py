@@ -255,6 +255,15 @@ def multi_station_model_artifacts(context: dg.AssetExecutionContext) -> dict:
             except Exception as e:
                 context.log.warning(f"  ✗ {site_name} / {task}: {e}")
 
+        # Load stored feature list (ensures inference matches training shape)
+        feat_path = f"{base_path}/features.json"
+        try:
+            feat_bytes = s3.getFile(path=feat_path, bucket=s3.S3_BUCKET)
+            station_models['_feature_cols'] = json.loads(feat_bytes.decode('utf-8'))
+            context.log.info(f"  ✓ {site_name} / features.json ({len(station_models['_feature_cols'])} features)")
+        except Exception:
+            context.log.info(f"  ⚠ {site_name} / features.json not found, will use MODEL_FEATURES default")
+
         if station_models:
             artifacts[site_name] = station_models
 
@@ -443,6 +452,9 @@ def daily_station_forecasts(
             context.log.warning(f"Missing regression model for {site}, skipping")
             continue
 
+        # Use stored feature list if available, otherwise fall back to MODEL_FEATURES
+        feature_cols = station_models.get('_feature_cols', MODEL_FEATURES)
+
         # Get last known state for lag initialization
         ss = obs_df[obs_df['site_name'] == site].sort_values('time')
         if len(ss) > 0:
@@ -463,11 +475,11 @@ def daily_station_forecasts(
         sfc = _engineer_forecast_features(sfc, last_state)
 
         # Fill any missing model features with 0
-        for col in MODEL_FEATURES:
+        for col in feature_cols:
             if col not in sfc.columns:
                 sfc[col] = 0.0
 
-        X = sfc[MODEL_FEATURES].fillna(0).values
+        X = sfc[feature_cols].fillna(0).values
 
         reg = station_models['regression']
         clf5 = station_models.get('clf_5ppb')

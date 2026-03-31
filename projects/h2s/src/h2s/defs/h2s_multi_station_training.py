@@ -301,6 +301,16 @@ def station_model_deployment(
         context.log.info(f"  ✓ Uploaded {task} → {s3_path}")
         uploaded[task] = s3_path
 
+    # Write feature list (used by inference to match training shape)
+    feat_path = f"{base_path}/features.json"
+    s3.putFile(
+        json.dumps(MODEL_FEATURES, indent=2).encode('utf-8'),
+        feat_path,
+        bucket=s3.S3_BUCKET,
+        content_type='application/json',
+    )
+    context.log.info(f"  ✓ Uploaded features.json ({len(MODEL_FEATURES)} features)")
+
     # Write deployment metadata
     meta = {
         'deployed_at': datetime.now(timezone.utc).isoformat(),
