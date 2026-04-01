@@ -516,6 +516,115 @@ def mh_summary_export(
 
 
 # ==============================================================================
+# Asset 6: Slack alerts
+# ==============================================================================
+
+_RISK_EMOJI = {'ORANGE': '🟠', 'YELLOW_HIGH': '🟡', 'YELLOW_LOW': '🔆', 'GREEN': '🟢'}
+_RISK_ORDER = ['ORANGE', 'YELLOW_HIGH', 'YELLOW_LOW', 'GREEN']
+_HZ_LABELS = {'0_6h': '0-6h', '6_24h': '6-24h', '24_48h': '24-48h', '48_72h': '48-72h'}
+
+
+@dg.asset(
+    key_prefix="h2s",
+    group_name="h2s_mh_forecast",
+    required_resource_keys={"slack"},
+    kinds={"slack"},
+    description="Send multi-horizon H2S elevated-risk alerts to Slack",
+    ins={"mh_forecasts": dg.AssetIn(key=_KEY("mh_forecasts"))},
+)
+def mh_slack_alerts(
+    context: dg.AssetExecutionContext,
+    mh_forecasts: pd.DataFrame,
+) -> None:
+    """Post MH forecast alert to Slack when ORANGE or YELLOW_HIGH hours are predicted.
+
+    Skips silently if all stations show GREEN/YELLOW_LOW across all horizons.
+    Groups results by station with a per-horizon breakdown of elevated hours.
+    """
+    if len(mh_forecasts) == 0:
+        context.log.info("No MH forecast data — skipping Slack alert")
+        return
+
+    elevated = mh_forecasts[mh_forecasts['risk'].isin(['ORANGE', 'YELLOW_HIGH'])]
+    if elevated.empty:
+        context.log.info("No elevated risk predicted — skipping Slack alert")
+        context.add_output_metadata({"status": "skipped", "reason": "all green/yellow_low"})
+        return
+
+    total_orange = int((mh_forecasts['risk'] == 'ORANGE').sum())
+    total_yh = int((mh_forecasts['risk'] == 'YELLOW_HIGH').sum())
+
+    blocks: list = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": "⚠ Multi-Horizon H2S Alert — Elevated Levels Forecast"},
+        },
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*🟠 Orange (>30 ppb):*\n{total_orange} hours"},
+                {"type": "mrkdwn", "text": f"*🟡 Yellow-High (10-30 ppb):*\n{total_yh} hours"},
+            ],
+        },
+        {"type": "divider"},
+    ]
+
+    for site_name in STATIONS:
+        sf = mh_forecasts[mh_forecasts['station'] == site_name]
+        if sf.empty:
+            continue
+
+        site_orange = int((sf['risk'] == 'ORANGE').sum())
+        site_yh = int((sf['risk'] == 'YELLOW_HIGH').sum())
+        if site_orange == 0 and site_yh == 0:
+            continue
+
+        max_pred = float(sf['h2s_pred'].max())
+        worst_risk = 'ORANGE' if site_orange > 0 else 'YELLOW_HIGH'
+
+        hz_parts = []
+        for hz_key, hz_label in _HZ_LABELS.items():
+            hz = sf[sf['horizon'] == hz_key]
+            if hz.empty:
+                continue
+            worst_hz = next((r for r in _RISK_ORDER if (hz['risk'] == r).any()), 'GREEN')
+            elevated_h = int((hz['risk'].isin(['ORANGE', 'YELLOW_HIGH'])).sum())
+            hz_parts.append(f"{hz_label}: {_RISK_EMOJI[worst_hz]} {elevated_h}h")
+
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"{_RISK_EMOJI[worst_risk]} *{site_name}* — peak {max_pred:.0f} ppb\n"
+                    + " | ".join(hz_parts)
+                ),
+            },
+        })
+
+    t_min = mh_forecasts['time'].min()
+    t_max = mh_forecasts['time'].max()
+    blocks.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": f"Forecast window: {t_min} — {t_max}"}],
+    })
+
+    slack = context.resources.slack
+    slack.get_client().chat_postMessage(
+        channel=slack.channel,
+        text=f"MH H2S Alert: {total_orange} orange, {total_yh} yellow-high hours across all stations/horizons",
+        blocks=blocks,
+    )
+
+    context.log.info(f"MH Slack alert sent: {total_orange} orange, {total_yh} yellow-high hours")
+    context.add_output_metadata({
+        "orange_hours": total_orange,
+        "yellow_high_hours": total_yh,
+        "stations_alerted": int(elevated['station'].nunique()),
+    })
+
+
+# ==============================================================================
 # Job definition
 # ==============================================================================
 
@@ -528,6 +637,7 @@ mh_forecast_job = dg.define_asset_job(
         mh_forecasts,
         mh_dashboard_viz,
         mh_summary_export,
+        mh_slack_alerts,
     ),
     tags={"environment": "production", "pipeline": "h2s_mh_forecast"},
 )

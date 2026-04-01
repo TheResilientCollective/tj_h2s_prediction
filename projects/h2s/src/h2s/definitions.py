@@ -93,6 +93,7 @@ def defs():
         mh_forecasts,
         mh_dashboard_viz,
         mh_summary_export,
+        mh_slack_alerts,
         mh_forecast_job,
     )
 
@@ -156,6 +157,7 @@ def defs():
             mh_forecasts,
             mh_dashboard_viz,
             mh_summary_export,
+            mh_slack_alerts,
         ],
         jobs=[
             # Prediction jobs
