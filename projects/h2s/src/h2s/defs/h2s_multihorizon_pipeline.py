@@ -30,7 +30,7 @@ from h2s.training.multihorizon_trainer import (
 )
 
 _KEY = lambda name: dg.AssetKey(["h2s", name])
-
+ENV_LABEL = os.environ.get("ENV_LABEL", "add_ENV_LABEL").upper()
 
 # ==============================================================================
 # Asset 1: Load multi-horizon models from S3
@@ -554,11 +554,11 @@ def mh_slack_alerts(
 
     total_orange = int((mh_forecasts['risk'] == 'ORANGE').sum())
     total_yh = int((mh_forecasts['risk'] == 'YELLOW_HIGH').sum())
-    env_label = os.environ.get("ENV_LABEL", "PROD").upper()
+
     blocks: list = [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": f"{env_label} ⚠ Multi-Horizon H2S Alert — Elevated Levels Forecast"},
+            "text": {"type": "plain_text", "text": f"{ENV_LABEL} ⚠ Multi-Horizon H2S Alert — Elevated Levels Forecast"},
         },
         {
             "type": "section",

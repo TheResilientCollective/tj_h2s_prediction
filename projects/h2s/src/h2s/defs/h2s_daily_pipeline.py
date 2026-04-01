@@ -37,6 +37,7 @@ from h2s.constants import (
     classify_risk,
 )
 
+ENV_LABEL = os.environ.get("ENV_LABEL", "add_ENV_LABEL").upper()
 _KEY = lambda name: dg.AssetKey(["h2s", name])
 
 
@@ -928,11 +929,11 @@ def daily_summary_json(
         time_range = f"{fc_start} → {fc_end} PT"
     else:
         time_range = "N/A"
-    env_label = os.environ.get("ENV_LABEL", "PROD").upper()
+
     blocks = [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": f"{env_label} H2S Daily Summary — {ts}"},
+            "text": {"type": "plain_text", "text": f"{ENV_LABEL} H2S Daily Summary — {ts}"},
         },
         {
             "type": "section",

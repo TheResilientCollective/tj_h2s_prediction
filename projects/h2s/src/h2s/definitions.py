@@ -205,6 +205,7 @@ def defs():
             mh_training_schedule,
             mh_forecast_schedule,
         ],
+        sensors=[slack_on_run_failure],
         resources=resources[deployment_name]
     )
 
