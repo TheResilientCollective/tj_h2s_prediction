@@ -72,7 +72,7 @@ from h2s.defs.h2s_multihorizon_training import (
 from h2s.defs.h2s_multihorizon_pipeline import (
     mh_forecast_job,
 )
-
+from h2s.constants import SCHEDULE_6HR
 
 # ============================================================================
 # JOB 1: Monthly Data Extraction (monthly partitioned)
@@ -255,7 +255,7 @@ daily_validation_job = dg.define_asset_job(
 
 @dg.schedule(
     job=forecast_prediction_job,
-    cron_schedule="0 */6 * * *",
+    cron_schedule=SCHEDULE_6HR,
     description="Run H2S forecast every 6 hours (00:00, 06:00, 12:00, 18:00 UTC)",
     default_status=dg.DefaultScheduleStatus.RUNNING,
     tags={"environment": "production", "schedule_type": "forecast"},
@@ -314,7 +314,7 @@ def multi_station_training_schedule(context: dg.ScheduleEvaluationContext):
 
 @dg.schedule(
     job=daily_analysis_job,
-    cron_schedule="0 14 * * *",
+    cron_schedule=SCHEDULE_6HR,
     description="Daily H2S source attribution + 48h forecast + dashboard (14:00 UTC / 6 AM PST)",
     default_status=dg.DefaultScheduleStatus.RUNNING,
     tags={"environment": "production", "schedule_type": "daily_analysis"},
@@ -355,7 +355,7 @@ def mh_training_schedule(context: dg.ScheduleEvaluationContext):
 
 @dg.schedule(
     job=mh_forecast_job,
-    cron_schedule="0 14 * * *",
+    cron_schedule=SCHEDULE_6HR,
     description="Daily multi-horizon H2S forecast (14:00 UTC / 6 AM PST)",
     default_status=dg.DefaultScheduleStatus.STOPPED,
     tags={"environment": "production", "schedule_type": "mh_forecast"},

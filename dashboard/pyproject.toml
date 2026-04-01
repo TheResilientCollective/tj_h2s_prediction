@@ -13,4 +13,5 @@ dependencies = [
     "pyarrow>=14.0.0",
     "pandas>=2.0.0",
     "numpy>=1.23.0",
+    "pandas-stubs~=3.0.0",
 ]
