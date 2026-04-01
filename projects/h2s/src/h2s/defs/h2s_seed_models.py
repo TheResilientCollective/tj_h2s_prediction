@@ -27,9 +27,14 @@ from pathlib import Path
 import dagster as dg
 import pandas as pd
 
-from h2s.constants import MODEL_PATH, MH_MODELS_S3_BASE
-from h2s.training.multi_station_trainer import (
+from h2s.constants import (
+    MH_MODELS_S3_BASE,
     MODEL_FEATURES,
+    MODEL_PATH,
+    STATION_KEYS,
+    STATION_MODELS_S3_BASE,
+)
+from h2s.training.multi_station_trainer import (
     TRAIN_FRACTION,
     prepare_multi_station_features,
     train_and_select,
@@ -52,13 +57,6 @@ VARIANTS = {
     "xgboost_base": "model.json",
     "xgboost_smote": "model.json",
     "random_forest": "model.joblib",
-}
-
-STATION_MODELS_S3_BASE = "tijuana/forecast/models/stations"
-STATIONS = {
-    'SAN YSIDRO':   'SAN_YSIDRO',
-    'NESTOR - BES': 'NESTOR__BES',
-    'IB CIVIC CTR': 'IB_CIVIC_CTR',
 }
 TASK_FILE_MAP = {
     'regression': 'model_reg',
@@ -174,7 +172,7 @@ def _train_and_seed_phase2(s3, bucket, context, raw_df, uploaded, dry_run):
 
     df = prepare_multi_station_features(raw_df)
 
-    for site_name, station_key in STATIONS.items():
+    for site_name, station_key in STATION_KEYS.items():
         sdf = df[df['site_name'] == site_name].sort_values('time').reset_index(drop=True)
         if len(sdf) < 100:
             context.log.warning(f"Insufficient data for {site_name} ({len(sdf)} rows), skipping")
@@ -236,7 +234,7 @@ def _train_and_seed_phase3(s3, bucket, context, raw_df, uploaded, dry_run):
 
     all_horizon_features = {}
 
-    for site_name, station_key in STATIONS.items():
+    for site_name, station_key in STATION_KEYS.items():
         sdf = df[df['site_name'] == site_name].copy().sort_values('time').reset_index(drop=True)
         if len(sdf) < 100:
             context.log.warning(f"MH: Insufficient data for {site_name} ({len(sdf)} rows), skipping")
@@ -281,7 +279,7 @@ def _train_and_seed_phase3(s3, bucket, context, raw_df, uploaded, dry_run):
         "deployed_at": datetime.now(timezone.utc).isoformat(),
         "trained_inline": True,
         "horizons": MH_HORIZON_NAMES,
-        "stations": list(STATIONS.values()),
+        "stations": list(STATION_KEYS.values()),
         "tasks": list(MH_TASKS),
         "deployment_status": "seeded",
     }
@@ -455,7 +453,7 @@ def seed_models(context: dg.AssetExecutionContext) -> dict:
         # Upload from validated local files
         context.log.info(f"Station models source: {station_models_dir}")
 
-        for site_name, station_key in STATIONS.items():
+        for site_name, station_key in STATION_KEYS.items():
             base_path = f"{STATION_MODELS_S3_BASE}/{station_key}"
             station_uploaded = {}
 
@@ -500,17 +498,36 @@ def seed_models(context: dg.AssetExecutionContext) -> dict:
         context.log.info(f"MH models source: {mh_dir}")
 
         for hz_name in MH_HORIZON_NAMES:
-            for station_key in STATIONS.values():
+            for station_key in STATION_KEYS.values():
                 for task in MH_TASKS:
                     local_file = mh_dir / f"best_{hz_name}_{task}_{station_key}.pkl"
                     s3_path = f"{MH_MODELS_S3_BASE}/{hz_name}/{station_key}/{task}.pkl"
                     _upload(local_file, s3_path)
 
+        # Upload global horizon_features.json
         _upload(
             mh_dir / "horizon_features.json",
             f"{MH_MODELS_S3_BASE}/horizon_features.json",
             "application/json",
         )
+        # Also upload per-station files (loader expects per-station keying)
+        hf_path = mh_dir / "horizon_features.json"
+        if hf_path.exists():
+            all_hf = json.loads(hf_path.read_text())
+            # Restructure {horizon: {station: cols}} → {station_key: {horizon: cols}}
+            per_station = {}
+            for hz, stations_map in all_hf.items():
+                for sname, cols in stations_map.items():
+                    skey = STATION_KEYS.get(sname, sname)
+                    per_station.setdefault(skey, {})[hz] = cols
+            for skey, hz_feats in per_station.items():
+                feat_bytes = json.dumps(hz_feats, indent=2).encode("utf-8")
+                feat_s3 = f"{MH_MODELS_S3_BASE}/{skey}/horizon_features.json"
+                if dry_run:
+                    context.log.info(f"[dry-run] Would upload horizon features → {feat_s3}")
+                else:
+                    s3.putFile(feat_bytes, feat_s3, bucket=bucket, content_type="application/json")
+                    context.log.info(f"Uploaded horizon features → {feat_s3}")
         _upload(
             mh_dir / "training_report_mh.json",
             f"{MH_MODELS_S3_BASE}/training_report_mh.json",
@@ -521,7 +538,7 @@ def seed_models(context: dg.AssetExecutionContext) -> dict:
             "deployed_at": datetime.now(timezone.utc).isoformat(),
             "source_dir": str(mh_dir),
             "horizons": MH_HORIZON_NAMES,
-            "stations": list(STATIONS.values()),
+            "stations": list(STATION_KEYS.values()),
             "tasks": list(MH_TASKS),
             "deployment_status": "seeded",
         }

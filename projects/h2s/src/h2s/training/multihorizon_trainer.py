@@ -13,6 +13,8 @@ Ensemble classes must be importable from this module for pickle deserialization.
 import numpy as np
 import pandas as pd
 
+from h2s.training.feature_builder import ensure_base_features
+
 
 # ============================================================
 # HORIZON DEFINITIONS
@@ -63,25 +65,18 @@ HORIZON_BOUNDS = [
     ('48_72h', 48, 999),
 ]
 
-# Base features already present in the pre-featurized parquet
-BASE_FEATURES = [
-    'temperature_2m', 'wind_speed_10m', 'wind_direction_sin', 'wind_direction_cos',
-    'wind_gusts_10m', 'precipitation', 'relative_humidity_2m', 'surface_pressure',
-    'cloud_cover', 'dewpoint_2m',
-    'wind_speed_10m_avg_2h', 'wind_speed_10m_avg_3h', 'wind_speed_10m_avg_4h',
-    'wind_gusts_10m_max_2h', 'wind_gusts_10m_max_3h', 'wind_gusts_10m_max_4h',
-    'tide_height', 'tidal_state_encoded',
-    'hour_sin', 'hour_cos', 'month_sin', 'month_cos',
-    'is_night', 'source_regime',
-    'flow_log', 'flow_low', 'flow_high',
-    'wind_temp_interaction', 'humidity_temp_interaction', 'stable_atm',
-    'sbiwtp_flow_mgd', 'sbiwtp_anomaly', 'sbiwtp_deficit',
-    'sbiwtp_flow_x_temp', 'sbiwtp_hourly_mgd', 'sbiwtp_sli',
-]
+# BASE_FEATURES imported from h2s.constants
+
+from h2s.constants import (  # noqa: F401 — re-exported for downstream imports
+    BASE_FEATURES,
+    FLOW_COL,
+    SOURCES,
+    STATION_PARTITION_MAP,
+    STATIONS,
+    classify_risk,
+)
 
 TASKS = ['regression', 'clf_5ppb', 'clf_10ppb']
-
-FLOW_COL = 'Flow (m^3/s)--Border'
 
 
 # ============================================================
@@ -135,28 +130,7 @@ class EnsembleClassifier:
         return self.weight_a * a + self.weight_b * b
 
 
-# ============================================================
-# STATION CONFIG
-# ============================================================
-
-STATIONS = {
-    'SAN YSIDRO':   {'key': 'SAN_YSIDRO',   'lat': 32.552794, 'lon': -117.047286},
-    'NESTOR - BES': {'key': 'NESTOR__BES',   'lat': 32.567097, 'lon': -117.090656},
-    'IB CIVIC CTR': {'key': 'IB_CIVIC_CTR',  'lat': 32.576139, 'lon': -117.115361},
-}
-
-STATION_PARTITION_MAP = {
-    'san_ysidro':  'SAN YSIDRO',
-    'nestor_bes':  'NESTOR - BES',
-    'ib_civic_ctr': 'IB CIVIC CTR',
-}
-
-SOURCES = {
-    "Stewart's Drain":  {'lat': 32.54064, 'lon': -117.05801},
-    "Smuggler's Gulch": {'lat': 32.5377,  'lon': -117.08623},
-    "Hollister St PS":  {'lat': 32.5476,  'lon': -117.088374},
-    "Goat Canyon":      {'lat': 32.5369,  'lon': -117.09916},
-}
+# STATIONS, STATION_PARTITION_MAP, SOURCES imported from h2s.constants
 
 
 # ============================================================
@@ -341,24 +315,27 @@ def build_forecast_features(fc_site, obs_state, hz_name, hz_cfg):
     """
     df = fc_site.copy()
     n = len(df)
-    feature_cols = list(BASE_FEATURES)
 
     h2s_hist = obs_state['h2s_series']
     flow_hist = obs_state['flow_series']
 
-    # Fill base features that might be missing
+    # Fill any missing base features (time cyclicals, wind features, flow derivatives, etc.)
+    # The forecast parquet should already have these, but this ensures idempotence
+    df = ensure_base_features(df)
+
+    # Wind gust estimation if missing (data-specific, not in feature_builder)
     if 'wind_gusts_10m' not in df.columns or df['wind_gusts_10m'].isna().all():
         df['wind_gusts_10m'] = df['wind_speed_10m'] * 1.8
-    for w, col in [(2, 'wind_gusts_10m_max_2h'), (3, 'wind_gusts_10m_max_3h'), (4, 'wind_gusts_10m_max_4h')]:
-        if col not in df.columns or df[col].isna().all():
-            df[col] = df['wind_gusts_10m'].rolling(w, min_periods=1).max()
 
-    # SBIWTP: forward-fill nulls
+    # SBIWTP: forward-fill nulls (forecast-specific persistence assumption)
     for c in ['sbiwtp_flow_mgd', 'sbiwtp_anomaly', 'sbiwtp_deficit', 'sbiwtp_hourly_mgd', 'sbiwtp_sli']:
         if c in df.columns:
             df[c] = df[c].ffill().fillna(0)
     if 'sbiwtp_flow_x_temp' not in df.columns or df['sbiwtp_flow_x_temp'].isna().any():
         df['sbiwtp_flow_x_temp'] = df.get('sbiwtp_flow_mgd', pd.Series(20, index=df.index)) * df['temperature_2m']
+
+    # Start building feature list with BASE_FEATURES (already added by ensure_base_features)
+    feature_cols = list(BASE_FEATURES)
 
     # H2S lag features from observation history
     for offset in hz_cfg['lag_offsets']:
@@ -444,21 +421,7 @@ def build_forecast_features(fc_site, obs_state, hz_name, hz_cfg):
 # RISK CLASSIFICATION & SOURCE ATTRIBUTION
 # ============================================================
 
-def classify_risk(prob_5, prob_10, h2s_pred):
-    """4-tier risk classification per SD County H2S guidance.
-
-    GREEN:       H2S < 5 ppb
-    YELLOW_LOW:  5 <= H2S < 10 ppb
-    YELLOW_HIGH: 10 <= H2S < 30 ppb
-    ORANGE:      H2S >= 30 ppb
-    """
-    if prob_10 > 0.5 or h2s_pred > 30:
-        return 'ORANGE'
-    elif prob_5 > 0.5 or h2s_pred > 10:
-        return 'YELLOW_HIGH'
-    elif prob_5 > 0.25 or h2s_pred > 5:
-        return 'YELLOW_LOW'
-    return 'GREEN'
+# classify_risk imported from h2s.constants
 
 
 def bearing_from(lat1, lon1, lat2, lon2):

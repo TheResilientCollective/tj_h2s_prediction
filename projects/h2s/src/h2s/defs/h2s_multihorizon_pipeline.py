@@ -13,7 +13,7 @@ import dagster as dg
 import numpy as np
 import pandas as pd
 
-from h2s.constants import MH_MODELS_S3_BASE, MH_OUTPUT_PATH, LATEST_BASEPATH
+from h2s.constants import FORECAST_DATA_PATH, MH_MODELS_S3_BASE, MH_OUTPUT_PATH, LATEST_BASEPATH, OBS_DATA_PATH
 from h2s.training.multihorizon_trainer import (
     BASE_FEATURES,
     FLOW_COL,
@@ -156,7 +156,6 @@ def mh_observation_state(context: dg.AssetExecutionContext) -> dict:
     ins={
         "mh_model_artifacts": dg.AssetIn(key=_KEY("mh_model_artifacts")),
         "mh_observation_state": dg.AssetIn(key=_KEY("mh_observation_state")),
-        "raw_environmental_data": dg.AssetIn(key=_KEY("raw_environmental_data")),
     },
     config_schema={
         "s3_bucket": dg.Field(str, default_value="resilentpublic"),
@@ -166,24 +165,23 @@ def mh_forecasts(
     context: dg.AssetExecutionContext,
     mh_model_artifacts: dict,
     mh_observation_state: dict,
-    raw_environmental_data: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Run multi-horizon forecast using pre-featurized forecast data.
+    """Run multi-horizon forecast using pre-featurized forecast data from S3.
 
-    Assigns each forecast hour to its horizon bucket, builds horizon-specific
-    features on top of the pre-featurized parquet base, and runs predictions.
+    Loads model_forecast.parquet directly from S3, assigns each forecast hour
+    to its horizon bucket, builds horizon-specific features, and runs predictions.
     """
     s3 = context.resources.s3
     bucket = context.op_config["s3_bucket"]
 
     # Load forecast parquet from S3
-    fc_path = "latest/tijuana/forecast_data/model_forecast.parquet"
+    context.log.info(f"Loading forecast data from S3: {FORECAST_DATA_PATH}")
     try:
-        fc_url = s3.get_presigned_url(path=fc_path, bucket=bucket)
+        fc_url = s3.get_presigned_url(path=FORECAST_DATA_PATH, bucket=bucket)
         forecast_df = pd.read_parquet(fc_url)
-    except Exception:
-        context.log.warning("Could not load forecast from S3, using raw_environmental_data")
-        forecast_df = raw_environmental_data.copy()
+        context.log.info(f"✓ Loaded {len(forecast_df)} rows from S3")
+    except Exception as e:
+        raise RuntimeError(f"Failed to load forecast data from S3 path '{FORECAST_DATA_PATH}': {e}")
 
     forecast_df['time'] = pd.to_datetime(forecast_df['time'], utc=True)
     fc_start = forecast_df['time'].min()
