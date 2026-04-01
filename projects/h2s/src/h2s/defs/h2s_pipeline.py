@@ -725,9 +725,17 @@ def cross_correlation_viz(
         context.add_output_metadata({"status": "skipped", "reason": f"Insufficient H2S rows: {n_valid}"})
         return
 
+    # Filter to one station to avoid duplicate timestamps across stations
+    if 'site_name' in obs_data.columns:
+        best_station = obs_data.groupby('site_name')[h2s_col].count().idxmax()
+        obs_data = obs_data[obs_data['site_name'] == best_station].copy().reset_index(drop=True)
+        context.log.info(f"Using station '{best_station}' for cross-correlation ({int(obs_data[h2s_col].notna().sum())} H2S rows)")
+    else:
+        obs_data = obs_data.reset_index(drop=True)
+
     context.log.info(f"Computing cross-correlation over {n_valid} H2S measurements...")
 
-    plot_bytes = generate_cross_correlation_viz(obs_data.reset_index(drop=True), h2s_col=h2s_col)
+    plot_bytes = generate_cross_correlation_viz(obs_data, h2s_col=h2s_col)
 
     timestamp = datetime.now().strftime("%Y-%m-%d")
     timestamped_path = f"{VISUALIZATIONS_PATH}/{timestamp}/cross_correlation.png"
