@@ -19,40 +19,17 @@ try:
 except ImportError:
     HAS_XGB = False
 
-STATIONS = {
-    'SAN YSIDRO':   {'key': 'SAN_YSIDRO',    'partition': 'san_ysidro'},
-    'NESTOR - BES': {'key': 'NESTOR__BES',    'partition': 'nestor_bes'},
-    'IB CIVIC CTR': {'key': 'IB_CIVIC_CTR',   'partition': 'ib_civic_ctr'},
-}
-
-STATION_PARTITION_MAP = {v['partition']: k for k, v in STATIONS.items()}
-
-MODEL_FEATURES = [
-    'temperature_2m', 'wind_speed_10m', 'wind_direction_sin', 'wind_direction_cos',
-    'wind_gusts_10m', 'precipitation', 'relative_humidity_2m', 'surface_pressure',
-    'cloud_cover', 'dewpoint_2m',
-    'wind_speed_10m_avg_2h', 'wind_speed_10m_avg_3h', 'wind_speed_10m_avg_4h',
-    'wind_gusts_10m_max_2h', 'wind_gusts_10m_max_3h', 'wind_gusts_10m_max_4h',
-    'tide_height', 'tidal_state_encoded',
-    'hour_sin', 'hour_cos', 'month_sin', 'month_cos',
-    'is_night', 'source_regime',
-    'flow_log', 'flow_low', 'flow_high',
-    'wind_temp_interaction', 'humidity_temp_interaction',
-    'stable_atm',
-    'h2s_lag_1h', 'h2s_lag_3h', 'h2s_lag_6h',
-    'h2s_rolling_6h', 'h2s_rolling_24h',
-    'flow_lag_6h', 'flow_rolling_24h',
-    # SBIWTP effluent features (available when USIBWC feed is connected)
-    'sbiwtp_flow_mgd', 'sbiwtp_anomaly', 'sbiwtp_deficit',
-    'sbiwtp_flow_x_temp', 'sbiwtp_hourly_mgd', 'sbiwtp_sli',
-]
+from h2s.constants import (  # noqa: F401 — re-exported for downstream imports
+    FLOW_COL,
+    MODEL_FEATURES,
+    STATION_PARTITION_MAP,
+    STATIONS,
+)
 
 ENSEMBLE_AUC_MARGIN = 0.01
 ENSEMBLE_R2_MARGIN = 0.02
 TRAIN_FRACTION = 0.8
 RANDOM_STATE = 42
-
-FLOW_COL = 'Flow (m^3/s)--Border'
 
 
 class EnsembleRegressor:

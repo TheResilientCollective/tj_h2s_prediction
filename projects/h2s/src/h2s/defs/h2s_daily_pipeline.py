@@ -21,36 +21,20 @@ import dagster as dg
 import numpy as np
 import pandas as pd
 
-from h2s.constants import MODEL_PATH, DAILY_SUMMARY_PATH
-from h2s.training.multi_station_trainer import (
+from h2s.constants import (
+    ALIGNMENT_THRESHOLD_DEG,
+    DAILY_SUMMARY_PATH,
+    FLOW_COL,
     MODEL_FEATURES,
+    MODEL_PATH,
+    SOURCES,
+    SPEED_COL,
+    STATION_MODELS_S3_BASE,
     STATION_PARTITION_MAP,
     STATIONS,
-    FLOW_COL,
+    WIND_COL,
+    classify_risk,
 )
-
-# ---- Geographic constants ----
-
-STATION_META = {
-    'SAN YSIDRO':   {'lat': 32.552794, 'lon': -117.047286, 'color': '#e74c3c', 'short': 'SY'},
-    'NESTOR - BES': {'lat': 32.567097, 'lon': -117.090656, 'color': '#2ecc71', 'short': 'NB'},
-    'IB CIVIC CTR': {'lat': 32.576139, 'lon': -117.115361, 'color': '#3498db', 'short': 'IB'},
-}
-
-SOURCES = {
-    "Stewart's Drain":  {'lat': 32.54064, 'lon': -117.05801, 'color': '#ff4444'},
-    "Smuggler's Gulch": {'lat': 32.5377,  'lon': -117.08623, 'color': '#ffaa00'},
-    "Hollister St PS":  {'lat': 32.5476,  'lon': -117.088374,'color': '#ff6600'},
-    "Goat Canyon":      {'lat': 32.5369,  'lon': -117.09916, 'color': '#cc44cc'},
-    "Goat Canyon PS":   {'lat': 32.543476,'lon': -117.108026,'color': '#aa44aa'},
-    "Del Sol Canyon":   {'lat': 32.5393,  'lon': -117.06885, 'color': '#44aacc'},
-    "Silva Drain":      {'lat': 32.539743,'lon': -117.064269,'color': '#88cc44'},
-}
-
-STATION_MODELS_S3_BASE = "tijuana/forecast/models/stations"
-ALIGNMENT_THRESHOLD_DEG = 30
-WIND_COL = 'wind_direction_10m'
-SPEED_COL = 'wind_speed_10m'
 
 _KEY = lambda name: dg.AssetKey(["h2s", name])
 
@@ -73,21 +57,6 @@ def _dist_km(lat1, lon1, lat2, lon2):
     return float(np.sqrt(dlat**2 + dlon**2) * 111.32)
 
 
-def _classify_risk(prob_5, prob_10, h2s_pred):
-    """Assign risk tier from predictions (SD County guidance).
-
-    GREEN:       H2S < 5 ppb
-    YELLOW_LOW:  5 ≤ H2S < 10 ppb  (prob >5 classifier)
-    YELLOW_HIGH: 10 ≤ H2S < 30 ppb (prob >10 classifier)
-    ORANGE:      H2S ≥ 30 ppb
-    """
-    if prob_10 > 0.5 or h2s_pred > 30:
-        return 'ORANGE'
-    elif prob_5 > 0.5 or h2s_pred > 10:
-        return 'YELLOW_HIGH'
-    elif prob_5 > 0.25 or h2s_pred > 5:
-        return 'YELLOW_LOW'
-    return 'GREEN'
 
 
 def _estimate_emission_rate_gs(h2s_ppb, wind_speed_ms, dist_m):
@@ -104,7 +73,7 @@ def _estimate_emission_rate_gs(h2s_ppb, wind_speed_ms, dist_m):
 def _find_aligned_source(station_name, wind_dir, is_night, threshold=ALIGNMENT_THRESHOLD_DEG):
     if not is_night:
         return 'Daytime (mixed)'
-    stn = STATION_META[station_name]
+    stn = STATIONS[station_name]
     best_src, best_diff = None, 999.0
     for src_name, src_info in SOURCES.items():
         brg = _bearing_from(stn['lat'], stn['lon'], src_info['lat'], src_info['lon'])
@@ -316,7 +285,7 @@ def source_attribution(context: dg.AssetExecutionContext) -> pd.DataFrame:
     results = []
     for _, row in recent.iterrows():
         site = row['site_name']
-        if site not in STATION_META:
+        if site not in STATIONS:
             continue
         h2s = float(row['H2S'])
         wd = float(row.get(WIND_COL, 0))
@@ -330,7 +299,7 @@ def source_attribution(context: dg.AssetExecutionContext) -> pd.DataFrame:
         Q_gs = None
         if h2s > 2 and aligned_src not in ('Unaligned', 'Daytime (mixed)'):
             src = SOURCES[aligned_src]
-            d = _dist_km(STATION_META[site]['lat'], STATION_META[site]['lon'],
+            d = _dist_km(STATIONS[site]['lat'], STATIONS[site]['lon'],
                          src['lat'], src['lon']) * 1000
             Q_gs = float(_estimate_emission_rate_gs(h2s, ws, d))
 
@@ -443,7 +412,7 @@ def daily_station_forecasts(
         context.log.info(f"✓ {FLOW_COL} loaded from forecast data")
 
     results = []
-    for site, info in STATION_META.items():
+    for site, info in STATIONS.items():
         if site not in multi_station_model_artifacts:
             raise ValueError(f"No models for {site}")
 
@@ -500,7 +469,7 @@ def daily_station_forecasts(
                 'h2s_pred': round(float(h2s_pred[i]), 1),
                 'prob_5': round(float(prob_5[i]), 1),
                 'prob_10': round(float(prob_10[i]), 1),
-                'risk': _classify_risk(prob_5[i] / 100, prob_10[i] / 100, h2s_pred[i]),
+                'risk': classify_risk(prob_5[i] / 100, prob_10[i] / 100, h2s_pred[i]),
                 'wind_speed': round(float(sfc.get(SPEED_COL, pd.Series([0])).iloc[i]), 1),
                 'wind_dir': round(float(wd)),
                 'temp': round(float(sfc['temperature_2m'].iloc[i]) if 'temperature_2m' in sfc.columns else 0, 1),
@@ -511,7 +480,7 @@ def daily_station_forecasts(
             })
 
     forecast_df = pd.DataFrame(results)
-    context.log.info(f"✓ Generated forecasts: {len(forecast_df)} rows ({len(STATION_META)} stations × {forecast_hours}h)")
+    context.log.info(f"✓ Generated forecasts: {len(forecast_df)} rows ({len(STATIONS)} stations × {forecast_hours}h)")
 
     context.add_output_metadata({
         "rows": len(forecast_df),
@@ -633,8 +602,8 @@ def daily_dashboard_viz(
         ax.set_facecolor('#1a1a2e')
         ss = recent[recent['site_name'] == site].sort_values('time')
         if len(ss) > 0:
-            ax.plot(ss['time'], ss['H2S'], color=STATION_META[site]['color'], linewidth=1.2)
-            ax.fill_between(ss['time'], 0, ss['H2S'], alpha=0.15, color=STATION_META[site]['color'])
+            ax.plot(ss['time'], ss['H2S'], color=STATIONS[site]['color'], linewidth=1.2)
+            ax.fill_between(ss['time'], 0, ss['H2S'], alpha=0.15, color=STATIONS[site]['color'])
         ax.axhline(5, color='#f39c12', linewidth=0.8, linestyle='--', alpha=0.5)
         ax.axhline(30, color='#e74c3c', linewidth=0.8, linestyle='--', alpha=0.5)
         ax.set_ylabel('H₂S (ppb)', color='white', fontsize=9)
@@ -655,7 +624,7 @@ def daily_dashboard_viz(
     ax.contourf(lon_grid, lat_grid, prob_grid, levels=levels, cmap=cmap)
     ax.contour(lon_grid, lat_grid, prob_grid, levels=[0.5, 0.7, 0.9],
                colors=['#ff9800', '#ff5722', '#d50000'], linewidths=[0.6, 1.0, 1.5], alpha=0.7)
-    for site, info in STATION_META.items():
+    for site, info in STATIONS.items():
         ax.plot(info['lon'], info['lat'], '^', markersize=10, color=info['color'],
                 markeredgecolor='white', markeredgewidth=1.5, zorder=20)
     for src, si in SOURCES.items():
@@ -704,11 +673,11 @@ def daily_dashboard_viz(
                 (obs_df['time'] >= obs_df['time'].max() - pd.Timedelta(days=3))
             ].sort_values('time')
             if len(obs_last3d) > 0:
-                ax.plot(obs_last3d['time'], obs_last3d['H2S'], color=STATION_META[site]['color'],
+                ax.plot(obs_last3d['time'], obs_last3d['H2S'], color=STATIONS[site]['color'],
                         linewidth=1, alpha=0.5, label='Observed')
             sf = fc_df[fc_df['station'] == site].sort_values('time')
-            ax.plot(sf['time'], sf['h2s_pred'], color=STATION_META[site]['color'], linewidth=2, label='Forecast')
-            ax.fill_between(sf['time'], 0, sf['h2s_pred'], alpha=0.2, color=STATION_META[site]['color'])
+            ax.plot(sf['time'], sf['h2s_pred'], color=STATIONS[site]['color'], linewidth=2, label='Forecast')
+            ax.fill_between(sf['time'], 0, sf['h2s_pred'], alpha=0.2, color=STATIONS[site]['color'])
             if len(sf) > 0:
                 ax.axvline(sf['time'].min(), color='yellow', linewidth=1.5, linestyle='-', alpha=0.5)
             ax.axhline(5, color='#f39c12', linewidth=0.8, linestyle='--', alpha=0.5)
@@ -777,7 +746,7 @@ def _compute_source_probability_grid(obs_df: pd.DataFrame):
     lon_grid, lat_grid = np.meshgrid(lons, lats)
     prob = np.zeros_like(lon_grid)
 
-    for site, info in STATION_META.items():
+    for site, info in STATIONS.items():
         sdf = recent[(recent['site_name'] == site) & (recent['H2S'] > 1)]
         slat, slon = info['lat'], info['lon']
         dlat = lat_grid - slat
@@ -853,7 +822,7 @@ def daily_summary_json(
 
     # Per-station observation summary (last 24h)
     cutoff_24h = obs_df['time'].max() - pd.Timedelta(hours=24)
-    for site, info in STATION_META.items():
+    for site, info in STATIONS.items():
         ss = obs_df[(obs_df['site_name'] == site) & (obs_df['time'] >= cutoff_24h)]
         if len(ss) == 0:
             continue
@@ -870,7 +839,7 @@ def daily_summary_json(
     if len(fc_df) > 0:
         t48 = fc_df['time'].min() + pd.Timedelta(hours=48)
         fc48 = fc_df[fc_df['time'] <= t48]
-        for site, info in STATION_META.items():
+        for site, info in STATIONS.items():
             sf = fc48[fc48['station'] == site]
             if len(sf) == 0:
                 continue

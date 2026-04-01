@@ -16,10 +16,13 @@ import dagster as dg
 import numpy as np
 import pandas as pd
 
-from h2s.training.multi_station_trainer import (
+from h2s.constants import (
     MODEL_FEATURES,
+    STATION_MODELS_S3_BASE,
     STATION_PARTITION_MAP,
     STATIONS,
+)
+from h2s.training.multi_station_trainer import (
     TRAIN_FRACTION,
     prepare_multi_station_features,
     train_and_select,
@@ -28,8 +31,6 @@ from h2s.training.multi_station_trainer import (
 STATION_PARTITIONS = dg.StaticPartitionsDefinition(
     partition_keys=list(STATION_PARTITION_MAP.keys())  # san_ysidro, nestor_bes, ib_civic_ctr
 )
-
-STATION_MODELS_S3_BASE = "tijuana/forecast/models/stations"
 
 _KEY = lambda name: dg.AssetKey(["h2s", name])
 

@@ -63,25 +63,18 @@ HORIZON_BOUNDS = [
     ('48_72h', 48, 999),
 ]
 
-# Base features already present in the pre-featurized parquet
-BASE_FEATURES = [
-    'temperature_2m', 'wind_speed_10m', 'wind_direction_sin', 'wind_direction_cos',
-    'wind_gusts_10m', 'precipitation', 'relative_humidity_2m', 'surface_pressure',
-    'cloud_cover', 'dewpoint_2m',
-    'wind_speed_10m_avg_2h', 'wind_speed_10m_avg_3h', 'wind_speed_10m_avg_4h',
-    'wind_gusts_10m_max_2h', 'wind_gusts_10m_max_3h', 'wind_gusts_10m_max_4h',
-    'tide_height', 'tidal_state_encoded',
-    'hour_sin', 'hour_cos', 'month_sin', 'month_cos',
-    'is_night', 'source_regime',
-    'flow_log', 'flow_low', 'flow_high',
-    'wind_temp_interaction', 'humidity_temp_interaction', 'stable_atm',
-    'sbiwtp_flow_mgd', 'sbiwtp_anomaly', 'sbiwtp_deficit',
-    'sbiwtp_flow_x_temp', 'sbiwtp_hourly_mgd', 'sbiwtp_sli',
-]
+# BASE_FEATURES imported from h2s.constants
+
+from h2s.constants import (  # noqa: F401 — re-exported for downstream imports
+    BASE_FEATURES,
+    FLOW_COL,
+    SOURCES,
+    STATION_PARTITION_MAP,
+    STATIONS,
+    classify_risk,
+)
 
 TASKS = ['regression', 'clf_5ppb', 'clf_10ppb']
-
-FLOW_COL = 'Flow (m^3/s)--Border'
 
 
 # ============================================================
@@ -135,28 +128,7 @@ class EnsembleClassifier:
         return self.weight_a * a + self.weight_b * b
 
 
-# ============================================================
-# STATION CONFIG
-# ============================================================
-
-STATIONS = {
-    'SAN YSIDRO':   {'key': 'SAN_YSIDRO',   'lat': 32.552794, 'lon': -117.047286},
-    'NESTOR - BES': {'key': 'NESTOR__BES',   'lat': 32.567097, 'lon': -117.090656},
-    'IB CIVIC CTR': {'key': 'IB_CIVIC_CTR',  'lat': 32.576139, 'lon': -117.115361},
-}
-
-STATION_PARTITION_MAP = {
-    'san_ysidro':  'SAN YSIDRO',
-    'nestor_bes':  'NESTOR - BES',
-    'ib_civic_ctr': 'IB CIVIC CTR',
-}
-
-SOURCES = {
-    "Stewart's Drain":  {'lat': 32.54064, 'lon': -117.05801},
-    "Smuggler's Gulch": {'lat': 32.5377,  'lon': -117.08623},
-    "Hollister St PS":  {'lat': 32.5476,  'lon': -117.088374},
-    "Goat Canyon":      {'lat': 32.5369,  'lon': -117.09916},
-}
+# STATIONS, STATION_PARTITION_MAP, SOURCES imported from h2s.constants
 
 
 # ============================================================
@@ -444,21 +416,7 @@ def build_forecast_features(fc_site, obs_state, hz_name, hz_cfg):
 # RISK CLASSIFICATION & SOURCE ATTRIBUTION
 # ============================================================
 
-def classify_risk(prob_5, prob_10, h2s_pred):
-    """4-tier risk classification per SD County H2S guidance.
-
-    GREEN:       H2S < 5 ppb
-    YELLOW_LOW:  5 <= H2S < 10 ppb
-    YELLOW_HIGH: 10 <= H2S < 30 ppb
-    ORANGE:      H2S >= 30 ppb
-    """
-    if prob_10 > 0.5 or h2s_pred > 30:
-        return 'ORANGE'
-    elif prob_5 > 0.5 or h2s_pred > 10:
-        return 'YELLOW_HIGH'
-    elif prob_5 > 0.25 or h2s_pred > 5:
-        return 'YELLOW_LOW'
-    return 'GREEN'
+# classify_risk imported from h2s.constants
 
 
 def bearing_from(lat1, lon1, lat2, lon2):
