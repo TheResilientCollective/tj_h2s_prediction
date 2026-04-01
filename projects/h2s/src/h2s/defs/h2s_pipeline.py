@@ -727,7 +727,7 @@ def cross_correlation_viz(
 
     context.log.info(f"Computing cross-correlation over {n_valid} H2S measurements...")
 
-    plot_bytes = generate_cross_correlation_viz(obs_data, h2s_col=h2s_col)
+    plot_bytes = generate_cross_correlation_viz(obs_data.reset_index(drop=True), h2s_col=h2s_col)
 
     timestamp = datetime.now().strftime("%Y-%m-%d")
     timestamped_path = f"{VISUALIZATIONS_PATH}/{timestamp}/cross_correlation.png"
