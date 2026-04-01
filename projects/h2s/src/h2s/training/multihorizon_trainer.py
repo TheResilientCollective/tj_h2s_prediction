@@ -13,6 +13,8 @@ Ensemble classes must be importable from this module for pickle deserialization.
 import numpy as np
 import pandas as pd
 
+from h2s.training.feature_builder import ensure_base_features
+
 
 # ============================================================
 # HORIZON DEFINITIONS
@@ -313,24 +315,27 @@ def build_forecast_features(fc_site, obs_state, hz_name, hz_cfg):
     """
     df = fc_site.copy()
     n = len(df)
-    feature_cols = list(BASE_FEATURES)
 
     h2s_hist = obs_state['h2s_series']
     flow_hist = obs_state['flow_series']
 
-    # Fill base features that might be missing
+    # Fill any missing base features (time cyclicals, wind features, flow derivatives, etc.)
+    # The forecast parquet should already have these, but this ensures idempotence
+    df = ensure_base_features(df)
+
+    # Wind gust estimation if missing (data-specific, not in feature_builder)
     if 'wind_gusts_10m' not in df.columns or df['wind_gusts_10m'].isna().all():
         df['wind_gusts_10m'] = df['wind_speed_10m'] * 1.8
-    for w, col in [(2, 'wind_gusts_10m_max_2h'), (3, 'wind_gusts_10m_max_3h'), (4, 'wind_gusts_10m_max_4h')]:
-        if col not in df.columns or df[col].isna().all():
-            df[col] = df['wind_gusts_10m'].rolling(w, min_periods=1).max()
 
-    # SBIWTP: forward-fill nulls
+    # SBIWTP: forward-fill nulls (forecast-specific persistence assumption)
     for c in ['sbiwtp_flow_mgd', 'sbiwtp_anomaly', 'sbiwtp_deficit', 'sbiwtp_hourly_mgd', 'sbiwtp_sli']:
         if c in df.columns:
             df[c] = df[c].ffill().fillna(0)
     if 'sbiwtp_flow_x_temp' not in df.columns or df['sbiwtp_flow_x_temp'].isna().any():
         df['sbiwtp_flow_x_temp'] = df.get('sbiwtp_flow_mgd', pd.Series(20, index=df.index)) * df['temperature_2m']
+
+    # Start building feature list with BASE_FEATURES (already added by ensure_base_features)
+    feature_cols = list(BASE_FEATURES)
 
     # H2S lag features from observation history
     for offset in hz_cfg['lag_offsets']:

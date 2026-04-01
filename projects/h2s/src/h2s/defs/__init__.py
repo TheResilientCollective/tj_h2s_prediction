@@ -3,9 +3,7 @@
 from h2s.defs.h2s_pipeline import (
     # Model Management
     h2s_model_artifacts,
-    # Data Ingestion
-    raw_environmental_data,
-    actual_h2s_data,
+
     # Prediction Pipeline
     preprocessed_features,
     h2s_predictions,

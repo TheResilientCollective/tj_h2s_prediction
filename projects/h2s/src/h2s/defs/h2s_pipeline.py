@@ -14,36 +14,18 @@ import pandas as pd
 
 from h2s.utils import store_assets
 from h2s.constants import (
-    MODEL_PATH,
+    FORECAST_DATA_PATH,
     HOURLY_PREDICTIONS_PATH,
-    VISUALIZATIONS_PATH,
     LATEST_FORECAST,
+    MODEL_PATH,
+    OBS_DATA_PATH,
     VALIDATION_PATH,
+    VISUALIZATIONS_PATH,
 )
 
 STORE_ASSETS_AVAILABLE = True
 
 _KEY = lambda name: dg.AssetKey(["h2s", name])
-
-
-def _derive_tidal_state(heights: pd.Series) -> pd.Series:
-    """Classify each hourly tide height as flood, ebb, slack high, or slack low."""
-    states = ['ebb'] * len(heights)
-    for i in range(len(heights)):
-        h = heights.iloc[i]
-        h_prev = heights.iloc[i - 1] if i > 0 else h
-        h_next = heights.iloc[i + 1] if i < len(heights) - 1 else h
-        if i > 0 and i < len(heights) - 1:
-            if h >= h_prev and h >= h_next:
-                states[i] = 'slack high'
-            elif h <= h_prev and h <= h_next:
-                states[i] = 'slack low'
-            elif h > h_prev:
-                states[i] = 'flood'
-            # else: ebb (default)
-        elif h > h_prev:
-            states[i] = 'flood'
-    return pd.Series(states, index=heights.index)
 
 MODEL_VARIANTS = ["xgboost_base", "xgboost_smote", "random_forest"]
 
@@ -97,368 +79,45 @@ def h2s_model_artifacts(context: dg.AssetExecutionContext):
 
 
 # ==============================================================================
-# Asset Group: Data Ingestion
-# ==============================================================================
-
-@dg.asset(
-    key_prefix="h2s",
-    group_name="h2s_prediction",
-    required_resource_keys={"s3"},
-    kinds={"python", "s3"},
-    description="Tidal predictions from NOAA CO-OPS API (Station 9410170, San Diego)",
-    config_schema={
-        "forecast_days": dg.Field(
-            int,
-            default_value=10,
-            description="Number of days forward to fetch tidal predictions",
-        ),
-        "noaa_station": dg.Field(
-            str,
-            default_value="9410170",
-            description="NOAA CO-OPS station ID (default: San Diego, CA — closest to Tijuana River mouth)",
-        ),
-    },
-)
-def tidal_forecast(context: dg.AssetExecutionContext) -> pd.DataFrame:
-    """Fetch deterministic hourly tidal predictions from NOAA CO-OPS API.
-
-    Station 9410170 (San Diego) is the closest official NOAA gauge to the
-    Tijuana River mouth. Derives tidal_state (flood/ebb/slack high/slack low)
-    from the slope of the predicted tide height series.
-    Returns columns: time, tide_height, tidal_state
-    """
-    import json as _json
-    import urllib.request
-
-    s3_resource = context.resources.s3
-    forecast_days = context.op_config["forecast_days"]
-    station = context.op_config["noaa_station"]
-
-    now_utc = pd.Timestamp.utcnow()
-    begin_date = now_utc.strftime("%Y%m%d")
-    end_date = (now_utc + pd.Timedelta(days=forecast_days)).strftime("%Y%m%d")
-
-    api_url = (
-        f"https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
-        f"?product=predictions&datum=MLLW&interval=h&units=metric&time_zone=gmt"
-        f"&format=json&station={station}&begin_date={begin_date}&end_date={end_date}"
-    )
-
-    context.log.info(f"Fetching tidal predictions from NOAA CO-OPS (station {station})...")
-    context.log.info(f"  Date range: {begin_date} → {end_date}")
-
-    try:
-        with urllib.request.urlopen(api_url, timeout=30) as response:
-            data = _json.loads(response.read().decode("utf-8"))
-    except Exception as e:
-        raise RuntimeError(f"Failed to fetch NOAA tidal predictions: {e}")
-
-    if "error" in data:
-        raise RuntimeError(f"NOAA API error: {data['error'].get('message', data['error'])}")
-
-    predictions = data.get("predictions", [])
-    if not predictions:
-        raise RuntimeError("NOAA API returned no predictions")
-
-    context.log.info(f"✓ Received {len(predictions)} tidal predictions from NOAA")
-
-    tide_df = pd.DataFrame([
-        {"time": pd.to_datetime(p["t"]), "tide_height": float(p["v"])}
-        for p in predictions
-    ]).sort_values("time").reset_index(drop=True)
-
-    tide_df["tidal_state"] = _derive_tidal_state(tide_df["tide_height"])
-
-    state_counts = tide_df["tidal_state"].value_counts().to_dict()
-    context.log.info(f"✓ Tide height range: {tide_df['tide_height'].min():.3f} – {tide_df['tide_height'].max():.3f} m")
-    context.log.info(f"  Tidal states: {state_counts}")
-
-    # --- Upload to S3 ---
-    csv_path = "latest/tijuana/tidal_forecast/latest.csv"
-    try:
-        csv_bytes = tide_df.to_csv(index=False).encode("utf-8")
-        s3_resource.putFile(csv_bytes, csv_path, bucket=s3_resource.S3_BUCKET, content_type="text/csv")
-        context.log.info(f"✓ Uploaded tidal forecast to S3: {csv_path}")
-    except Exception as e:
-        context.log.warning(f"Could not upload tidal forecast to S3: {e}")
-
-    context.add_output_metadata({
-        "row_count": len(tide_df),
-        "tide_min": float(tide_df["tide_height"].min()),
-        "tide_max": float(tide_df["tide_height"].max()),
-        "tidal_states": state_counts,
-        "station": station,
-    })
-    return tide_df
-
-
-@dg.asset(
-    key_prefix="h2s",
-    group_name="h2s_prediction",
-    required_resource_keys={"s3"},
-    kinds={"python", "s3"},
-    description="SBIWTP effluent operational data: try S3 feed, fall back to 30-day persistence defaults",
-    config_schema={
-        "sbiwtp_30d_mean_mgd": dg.Field(
-            float,
-            default_value=23.5,
-            description="30-day rolling mean SBIWTP flow (MGD) used for persistence fallback",
-        ),
-        "forecast_hours": dg.Field(
-            int,
-            default_value=240,
-            description="Number of forecast hours to generate (must match weather forecast window)",
-        ),
-    },
-)
-def sbiwtp_operational_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
-    """Load SBIWTP effluent flow data and compute hourly features.
-
-    Tries to load from S3: latest/tijuana/sbiwtp/latest.csv
-    Falls back to persistence (30-day rolling mean = ~23.5 MGD).
-
-    Hourly features computed:
-    - sbiwtp_flow_mgd: daily flow in MGD
-    - sbiwtp_hourly_mgd: diurnal distribution of daily flow
-    - sbiwtp_anomaly: (flow - mean) / mean
-    - sbiwtp_deficit: max(0, mean - flow)
-    - sbiwtp_flow_x_temp: flow × temperature (proxy for temperature available in forecast)
-    - sbiwtp_sli: simplified accumulation-decay index
-    """
-    s3 = context.resources.s3
-    mean_flow = context.op_config["sbiwtp_30d_mean_mgd"]
-    forecast_hours = context.op_config["forecast_hours"]
-
-    # Diurnal factors for distributing daily flow to hourly (from SBIWTP plan)
-    DIURNAL_FACTORS = [
-        0.72, 0.68, 0.65, 0.63, 0.65, 0.72, 0.88, 1.07,
-        1.18, 1.22, 1.23, 1.22, 1.18, 1.14, 1.11, 1.10,
-        1.09, 1.08, 1.06, 1.03, 0.98, 0.92, 0.85, 0.78,
-    ]
-
-    daily_flow_mgd = mean_flow
-    source = "persistence"
-
-    try:
-        sbiwtp_url = s3.get_presigned_url(path="latest/tijuana/sbiwtp/latest.csv")
-        sbiwtp_raw = pd.read_csv(sbiwtp_url)
-        if 'flow_mgd' in sbiwtp_raw.columns and len(sbiwtp_raw) > 0:
-            daily_flow_mgd = float(sbiwtp_raw['flow_mgd'].iloc[-1])
-            source = "s3"
-            context.log.info(f"✓ Loaded SBIWTP flow from S3: {daily_flow_mgd:.1f} MGD")
-    except Exception as e:
-        context.log.info(f"SBIWTP S3 feed unavailable ({e}), using persistence ({mean_flow:.1f} MGD)")
-
-    anomaly = (daily_flow_mgd - mean_flow) / max(mean_flow, 0.01)
-    deficit = max(0.0, mean_flow - daily_flow_mgd)
-
-    # Build per-hour rows
-    now = pd.Timestamp.utcnow().floor("h").tz_localize(None)
-    rows = []
-    sli = 0.0  # accumulation-decay index
-    sli_decay = 0.9
-    sli_factor = daily_flow_mgd / max(mean_flow, 0.01)
-
-    for i in range(forecast_hours):
-        ts = now + pd.Timedelta(hours=i)
-        hour_factor = DIURNAL_FACTORS[ts.hour]
-        hourly_mgd = daily_flow_mgd * hour_factor / 24
-
-        # SLI: accumulates when above mean, decays otherwise
-        sli = sli * sli_decay + (sli_factor - 1.0) * 0.1
-        sli = max(-1.0, min(1.0, sli))
-
-        rows.append({
-            'time': ts,
-            'sbiwtp_flow_mgd': daily_flow_mgd,
-            'sbiwtp_hourly_mgd': hourly_mgd,
-            'sbiwtp_anomaly': anomaly,
-            'sbiwtp_deficit': deficit,
-            'sbiwtp_flow_x_temp': hourly_mgd,  # temperature multiplier applied in merge
-            'sbiwtp_sli': sli,
-        })
-
-    sbiwtp_df = pd.DataFrame(rows)
-    context.log.info(
-        f"✓ SBIWTP operational data: {len(sbiwtp_df)} hourly rows "
-        f"(source={source}, flow={daily_flow_mgd:.1f} MGD, anomaly={anomaly:+.2f})"
-    )
-    context.add_output_metadata({
-        "source": source,
-        "flow_mgd": daily_flow_mgd,
-        "anomaly": round(anomaly, 3),
-        "deficit": round(deficit, 2),
-        "rows": len(sbiwtp_df),
-    })
-    return sbiwtp_df
-
-
-@dg.asset(
-    key_prefix="h2s",
-    group_name="h2s_prediction",
-    required_resource_keys={"s3"},
-    kinds={"csv", "s3"},
-    description="Environmental data loaded from S3 or local test data",
-    config_schema={
-        "use_local_data": dg.Field(
-            bool,
-            default_value=False,
-            description="Use local test data from data/ directory instead of S3 (for testing only)"
-        ),
-        "local_data_path": dg.Field(
-            str,
-            default_value="data/modeldata_h2s_nofill.parquet",
-            description="Path to local test data file (used when use_local_data=True, relative to project root)"
-        ),
-    },
-    ins={
-        "tidal_forecast": dg.AssetIn(key=_KEY("tidal_forecast")),
-        "sbiwtp_operational_data": dg.AssetIn(key=_KEY("sbiwtp_operational_data")),
-    },
-)
-def raw_environmental_data(
-    context: dg.AssetExecutionContext,
-    tidal_forecast: pd.DataFrame,
-    sbiwtp_operational_data: pd.DataFrame,
-) -> pd.DataFrame:
-    """Load environmental data from S3 or local test data.
-
-    Production Mode (use_local_data=False):
-    - Loads from S3: latest/tijuana/weather_forecast/latest.csv
-    - FAILS if S3 data is not available (no fallback)
-    - If S3 data lacks H2S measurements, merges from local latest.csv
-
-    Test Mode (use_local_data=True):
-    - Loads from local data directory
-    - Use for testing when S3 is not available
-    """
-    s3_resource = context.resources.s3
-    use_local = context.op_config["use_local_data"]
-    local_path = context.op_config["local_data_path"]
-
-    if use_local:
-        # TEST MODE: Load from local data directory
-        context.log.info(f"TEST MODE: Loading from local file: {local_path}")
-        try:
-            if local_path.endswith(".parquet"):
-                df = pd.read_parquet(local_path)
-            else:
-                df = pd.read_csv(local_path)
-            context.log.info(f"✓ Loaded {len(df)} rows from local test data")
-            source = "local"
-        except Exception as e:
-            raise RuntimeError(f"Failed to load local test data from {local_path}: {e}")
-    else:
-        # PRODUCTION MODE: Load from S3 (no fallback)
-        context.log.info("PRODUCTION MODE: Loading from S3...")
-        s3_path = "latest/tijuana/weather_forecast/latest.csv"
-        try:
-            csv_url = s3_resource.get_presigned_url(path=s3_path)
-            df = pd.read_csv(csv_url)
-            context.log.info(f"✓ Loaded from S3: {s3_path}")
-            source = "s3"
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to load environmental data from S3 path '{s3_path}'. "
-                f"Error: {e}\n"
-                f"For testing, set use_local_data=True in asset config."
-            )
-
-    # Standardize time column
-    if 'time' in df.columns:
-        df['date'] = pd.to_datetime(df['time'])
-    elif 'date' in df.columns:
-        df['date'] = pd.to_datetime(df['date'])
-
-    # Check if H2S measurements are present
-    h2s_cols = [col for col in df.columns if col.upper() == 'H2S' or ('h2s' in col.lower() and col.lower() != 'h2s_measured')]
-
-    # Log H2S column availability
-    if h2s_cols:
-        context.log.info(f"✓ H2S measurements available in column: {h2s_cols[0]}")
-        h2s_col = h2s_cols[0]
-        non_null_count = df[h2s_col].notna().sum()
-        if non_null_count > 0:
-            context.log.info(f"  H2S values: {non_null_count}/{len(df)} rows")
-            context.log.info(f"  H2S range: {df[h2s_col].min():.2f} - {df[h2s_col].max():.2f} ppb")
-        else:
-            context.log.warning(f"  ⚠ H2S column exists but has no values")
-
-    # --- Merge tidal forecast ---
-    merge_times = df["date"].dt.floor("h")
-    if merge_times.dt.tz is not None:
-        merge_times = merge_times.dt.tz_convert("UTC").dt.tz_localize(None)
-    df["_merge_time"] = merge_times
-
-
-    tf = tidal_forecast[["time", "tide_height", "tidal_state"]].copy()
-    tf_times = pd.to_datetime(tf["time"])
-    if tf_times.dt.tz is not None:
-        tf_times = tf_times.dt.tz_convert("UTC").dt.tz_localize(None)
-    tf["_merge_time"] = tf_times.dt.floor("h")
-    tide_merge = tf[["_merge_time", "tide_height", "tidal_state"]].drop_duplicates("_merge_time")
-    df = df.merge(tide_merge, on="_merge_time", how="left")
-    tide_matched = int(df["tide_height"].notna().sum())
-    context.log.info(f"✓ Tidal merged: {tide_matched}/{len(df)} rows matched")
-    if tide_matched < len(df):
-        context.log.warning(f"  {len(df) - tide_matched} rows have no tidal match — will default to 0.0 in preprocessor")
-
-    # --- Merge SBIWTP operational data ---
-    sbiwtp_cols = ['sbiwtp_flow_mgd', 'sbiwtp_anomaly', 'sbiwtp_deficit',
-                   'sbiwtp_flow_x_temp', 'sbiwtp_hourly_mgd', 'sbiwtp_sli']
-    available_sbiwtp_cols = [c for c in sbiwtp_cols if c in sbiwtp_operational_data.columns]
-    if available_sbiwtp_cols:
-        sbiwtp_t = sbiwtp_operational_data.copy()
-        sbiwtp_times = pd.to_datetime(sbiwtp_t["time"])
-        if sbiwtp_times.dt.tz is not None:
-            sbiwtp_times = sbiwtp_times.dt.tz_convert("UTC").dt.tz_localize(None)
-        sbiwtp_t["_merge_time"] = sbiwtp_times.dt.floor("h")
-        sbiwtp_merge = sbiwtp_t[["_merge_time"] + available_sbiwtp_cols].drop_duplicates("_merge_time")
-        df = df.merge(sbiwtp_merge, on="_merge_time", how="left")
-        # Apply temperature multiplier to sbiwtp_flow_x_temp if temperature available
-        if "sbiwtp_flow_x_temp" in df.columns and "temperature_2m" in df.columns:
-            df["sbiwtp_flow_x_temp"] = df["sbiwtp_hourly_mgd"] * df["temperature_2m"]
-        sbiwtp_matched = int(df[available_sbiwtp_cols[0]].notna().sum())
-        context.log.info(f"✓ SBIWTP merged: {sbiwtp_matched}/{len(df)} rows matched")
-    else:
-        context.log.warning("No SBIWTP columns found in sbiwtp_operational_data")
-
-    df = df.drop(columns=["_merge_time"])
-
-    context.log.info(f"Loaded {len(df)} rows")
-    context.log.info(f"Date range: {df['date'].min()} to {df['date'].max()}")
-    context.log.info(f"Columns: {len(df.columns)}")
-
-    return df
-
-
-# ==============================================================================
 # Asset Group: Prediction Pipeline
 # ==============================================================================
 
 @dg.asset(
     key_prefix="h2s",
     group_name="h2s_prediction",
-    kinds={"python"},
-    description="Preprocessed features ready for model prediction",
+    required_resource_keys={"s3"},
+    kinds={"python", "s3"},
+    description="Preprocessed features ready for model prediction (loaded from pre-featurized S3 data)",
     auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
     ins={
         "h2s_model_artifacts": dg.AssetIn(key=_KEY("h2s_model_artifacts")),
-        "raw_environmental_data": dg.AssetIn(key=_KEY("raw_environmental_data")),
     },
 )
 def preprocessed_features(
     context: dg.AssetExecutionContext,
     h2s_model_artifacts,
-    raw_environmental_data: pd.DataFrame
 ) -> pd.DataFrame:
-    """Apply production preprocessing to raw data.
+    """Load pre-featurized forecast data from S3 and apply model preprocessing.
 
-    Creates cyclical encodings, interaction features, and categorical mappings.
+    Loads model_forecast.parquet from S3 (already contains 43 MODEL_FEATURES).
+    Applies H2SPredictor.preprocess_data() to add any missing features and
+    handle H2S lags (set to 0 in forecast mode).
     """
-    context.log.info("Preprocessing data...")
+    s3 = context.resources.s3
 
-    df_processed = h2s_model_artifacts.preprocess_data(raw_environmental_data)
+    context.log.info(f"Loading forecast data from S3: {FORECAST_DATA_PATH}")
+
+    try:
+        forecast_url = s3.get_presigned_url(path=FORECAST_DATA_PATH, bucket=s3.S3_BUCKET)
+        df = pd.read_parquet(forecast_url)
+        context.log.info(f"✓ Loaded {len(df)} rows from S3")
+        context.log.info(f"  Columns: {len(df.columns)}")
+    except Exception as e:
+        raise RuntimeError(f"Failed to load forecast data from S3 path '{FORECAST_DATA_PATH}': {e}")
+
+    # Apply model preprocessing (idempotent — fills only missing features)
+    context.log.info("Applying model preprocessing...")
+    df_processed = h2s_model_artifacts.preprocess_data(df)
 
     context.log.info(f"✓ Preprocessed {len(df_processed)} samples")
     context.log.info(f"  Features: {len(df_processed.columns)}")
@@ -718,38 +377,6 @@ def h2s_ensemble_predictions(
 # ==============================================================================
 # Asset Group: Actual Data (Optional)
 # ==============================================================================
-
-@dg.asset(
-    key_prefix="h2s",
-    group_name="h2s_data",
-    required_resource_keys={"s3"},
-    kinds={"csv", "s3"},
-    description="Actual H2S measurements for validation (optional)",
-)
-def actual_h2s_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
-    """Load actual H2S measurements from S3 for model validation.
-
-    This is optional - visualizations will gracefully handle if not available.
-    Tries to load from S3: tijuana/forecast/actuals/latest.csv
-    """
-    s3_resource = context.resources.s3
-
-    try:
-        csv_url = s3_resource.get_presigned_url(path="tijuana/forecast/actuals/latest.csv")
-        df = pd.read_csv(csv_url)
-        context.log.info(f"✓ Loaded actual H2S data from S3: {len(df)} rows")
-
-        # Ensure time column is datetime
-        if 'time' in df.columns:
-            df['time'] = pd.to_datetime(df['time'])
-
-        return df
-    except Exception as e:
-        context.log.warning(f"Could not load actual H2S data: {e}")
-        context.log.info("Returning empty DataFrame - visualizations requiring actuals will be skipped")
-        return pd.DataFrame()
-
-
 # ==============================================================================
 # Asset Group: Visualization & Export
 # ==============================================================================
@@ -799,45 +426,48 @@ def feature_importance_viz(
     key_prefix="h2s",
     group_name="h2s_visualization",
     required_resource_keys={"s3"},
-    description="Confusion matrix comparing predictions vs actuals (requires actual H2S data in raw_environmental_data)",
+    description="Confusion matrix comparing predictions vs actuals (requires actual H2S data from S3)",
     auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
     ins={
         "h2s_predictions": dg.AssetIn(key=_KEY("h2s_predictions")),
-        "raw_environmental_data": dg.AssetIn(key=_KEY("raw_environmental_data")),
         "h2s_model_artifacts": dg.AssetIn(key=_KEY("h2s_model_artifacts")),
     },
 )
 def confusion_matrix_viz(
     context: dg.AssetExecutionContext,
     h2s_predictions: pd.DataFrame,
-    raw_environmental_data: pd.DataFrame,
     h2s_model_artifacts,
 ) -> None:
     """Generate and upload confusion matrix plot to S3.
 
-    Requires actual H2S measurements in raw_environmental_data.
+    Loads actual H2S measurements from S3 observation data.
     Skips if H2S measurements are not available in the data.
     """
     from h2s.predictor.visualizations import generate_confusion_matrix_with_metrics
 
     s3_resource = context.resources.s3
 
-    # Check if raw data has H2S measurements
-    h2s_cols = [col for col in raw_environmental_data.columns if col.upper() == 'H2S' or 'h2s' in col.lower()]
-
-    if not h2s_cols:
-        context.log.warning("⚠ No H2S column found in raw_environmental_data - skipping confusion matrix")
-        context.log.info(f"Available columns: {list(raw_environmental_data.columns)}")
-        context.log.info("To generate confusion matrix, ensure raw environmental data includes an 'H2S' or 'h2s' column with actual measurements")
-        context.add_output_metadata({
-            "status": "skipped",
-            "reason": "No H2S measurements in raw_environmental_data",
-            "available_columns": list(raw_environmental_data.columns)
-        })
+    # Load observation data from S3
+    context.log.info(f"Loading observation data from S3: {OBS_DATA_PATH}")
+    try:
+        obs_url = s3_resource.get_presigned_url(path=OBS_DATA_PATH, bucket=s3_resource.S3_BUCKET)
+        actuals_df = pd.read_parquet(obs_url)
+        context.log.info(f"✓ Loaded {len(actuals_df)} rows from S3")
+    except Exception as e:
+        context.log.warning(f"⚠ Could not load observation data from S3: {e}")
+        context.add_output_metadata({"status": "skipped", "reason": f"S3 load failed: {e}"})
         return
 
-    # Prepare actuals data
-    actuals_df = raw_environmental_data.copy()
+    # Check if H2S measurements are present
+    h2s_cols = [col for col in actuals_df.columns if col.upper() == 'H2S' or 'h2s' in col.lower()]
+    if not h2s_cols:
+        context.log.warning("⚠ No H2S column found in observation data - skipping confusion matrix")
+        context.add_output_metadata({
+            "status": "skipped",
+            "reason": "No H2S measurements in observation data",
+            "available_columns": list(actuals_df.columns)
+        })
+        return
 
     # Ensure actuals has 'time' column (case-insensitive check)
     if 'time' not in actuals_df.columns:
@@ -898,18 +528,16 @@ def confusion_matrix_viz(
     key_prefix="h2s",
     group_name="h2s_visualization",
     required_resource_keys={"s3"},
-    description="Model performance comparison plot (requires actual H2S data)",
+    description="Model performance comparison plot (requires actual H2S data from S3)",
     auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
     ins={
         "h2s_predictions": dg.AssetIn(key=_KEY("h2s_predictions")),
-        "raw_environmental_data": dg.AssetIn(key=_KEY("raw_environmental_data")),
         "h2s_model_artifacts": dg.AssetIn(key=_KEY("h2s_model_artifacts")),
     },
 )
 def model_comparison_viz(
     context: dg.AssetExecutionContext,
     h2s_predictions: pd.DataFrame,
-    raw_environmental_data: pd.DataFrame,
     h2s_model_artifacts,
 ) -> None:
     """Generate and upload model comparison plot to S3.
@@ -921,6 +549,17 @@ def model_comparison_viz(
 
     s3_resource = context.resources.s3
 
+    # Load observation data from S3
+    context.log.info(f"Loading observation data from S3: {OBS_DATA_PATH}")
+    try:
+        obs_url = s3_resource.get_presigned_url(path=OBS_DATA_PATH, bucket=s3_resource.S3_BUCKET)
+        actuals_df = pd.read_parquet(obs_url)
+        context.log.info(f"✓ Loaded {len(actuals_df)} rows from S3")
+    except Exception as e:
+        context.log.warning(f"⚠ Could not load observation data from S3: {e}")
+        context.add_output_metadata({"status": "skipped", "reason": f"S3 load failed: {e}"})
+        return
+
     # Prepare predictions DataFrame with time column
     predictions_df = h2s_predictions.copy()
     if 'time' not in predictions_df.columns:
@@ -929,9 +568,6 @@ def model_comparison_viz(
         else:
             context.log.error("❌ Predictions DataFrame missing both 'time' and 'date' columns")
             return
-
-    # Ensure actuals has required columns
-    actuals_df = raw_environmental_data.copy()
     if 'time' not in actuals_df.columns:
         time_cols = [col for col in actuals_df.columns if col.lower() == 'time']
         if time_cols:
@@ -990,37 +626,41 @@ def model_comparison_viz(
     auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
     ins={
         "h2s_predictions": dg.AssetIn(key=_KEY("h2s_predictions")),
-        "raw_environmental_data": dg.AssetIn(key=_KEY("raw_environmental_data")),
     },
 )
 def prediction_timeline_viz(
     context: dg.AssetExecutionContext,
     h2s_predictions: pd.DataFrame,
-    raw_environmental_data: pd.DataFrame
 ) -> None:
     """Generate and upload prediction timeline plot to S3.
 
     Shows predictions over time with environmental variables.
-    Includes actual H2S values if present in raw_environmental_data.
+    Includes actual H2S values if present in observation data from S3.
     """
     from h2s.predictor.visualizations import generate_prediction_timeline
 
     s3_resource = context.resources.s3
+
+    # Load observation data from S3 (optional — viz works without it)
+    obs_data = None
+    try:
+        obs_url = s3_resource.get_presigned_url(path=OBS_DATA_PATH, bucket=s3_resource.S3_BUCKET)
+        obs_data = pd.read_parquet(obs_url)
+        context.log.info(f"✓ Loaded {len(obs_data)} rows from observation data")
+        h2s_cols = [col for col in obs_data.columns if col.upper() == 'H2S' or 'h2s' in col.lower()]
+        if h2s_cols:
+            context.log.info("Generating prediction timeline (with H2S actuals)...")
+        else:
+            context.log.info("Generating prediction timeline (predictions + environmental variables)...")
+    except Exception as e:
+        context.log.info(f"No observation data available ({e}) — timeline will show predictions only")
 
     # Prepare predictions DataFrame with time column
     predictions_df = h2s_predictions.copy()
     if 'date' in predictions_df.columns and 'time' not in predictions_df.columns:
         predictions_df['time'] = predictions_df['date']
 
-    # Check if raw data has H2S measurements
-    h2s_cols = [col for col in raw_environmental_data.columns if col.upper() == 'H2S' or 'h2s' in col.lower()]
-
-    if h2s_cols:
-        context.log.info("Generating prediction timeline (with H2S actuals)...")
-    else:
-        context.log.info("Generating prediction timeline (predictions + environmental variables)...")
-
-    plot_bytes = generate_prediction_timeline(predictions_df, raw_environmental_data)
+    plot_bytes = generate_prediction_timeline(predictions_df, obs_data)
 
     # Upload to timestamped path
     timestamp = datetime.now().strftime("%Y-%m-%d")
@@ -1043,17 +683,13 @@ def prediction_timeline_viz(
     required_resource_keys={"s3"},
     description="Time-lagged cross-correlation between actual H2S and environmental drivers",
     auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
-    ins={
-        "raw_environmental_data": dg.AssetIn(key=_KEY("raw_environmental_data")),
-    },
 )
 def cross_correlation_viz(
     context: dg.AssetExecutionContext,
-    raw_environmental_data: pd.DataFrame,
 ) -> None:
     """Generate and upload cross-correlation plot to S3.
 
-    Requires actual H2S measurements in raw_environmental_data.
+    Loads actual H2S measurements from S3 observation data.
     Computes corr(H2S(t), feature(t - lag)) for each environmental driver
     at lags -24 h … +24 h, revealing which features *precede* H2S events.
     Skipped gracefully if no H2S measurements are present.
@@ -1062,16 +698,27 @@ def cross_correlation_viz(
 
     s3_resource = context.resources.s3
 
-    h2s_cols = [col for col in raw_environmental_data.columns
+    # Load observation data from S3
+    context.log.info(f"Loading observation data from S3: {OBS_DATA_PATH}")
+    try:
+        obs_url = s3_resource.get_presigned_url(path=OBS_DATA_PATH, bucket=s3_resource.S3_BUCKET)
+        obs_data = pd.read_parquet(obs_url)
+        context.log.info(f"✓ Loaded {len(obs_data)} rows from S3")
+    except Exception as e:
+        context.log.warning(f"⚠ Could not load observation data from S3: {e}")
+        context.add_output_metadata({"status": "skipped", "reason": f"S3 load failed: {e}"})
+        return
+
+    h2s_cols = [col for col in obs_data.columns
                 if col.upper() == "H2S" or "h2s" in col.lower()]
 
     if not h2s_cols:
-        context.log.warning("⚠ No H2S measurements in raw_environmental_data — skipping cross-correlation")
+        context.log.warning("⚠ No H2S measurements in observation data — skipping cross-correlation")
         context.add_output_metadata({"status": "skipped", "reason": "No H2S column"})
         return
 
-    h2s_col = "H2S" if "H2S" in raw_environmental_data.columns else h2s_cols[0]
-    n_valid = int(raw_environmental_data[h2s_col].notna().sum())
+    h2s_col = "H2S" if "H2S" in obs_data.columns else h2s_cols[0]
+    n_valid = int(obs_data[h2s_col].notna().sum())
 
     if n_valid < 48:
         context.log.warning(f"⚠ Only {n_valid} H2S measurements — need ≥48 for meaningful cross-correlation, skipping")
@@ -1080,7 +727,7 @@ def cross_correlation_viz(
 
     context.log.info(f"Computing cross-correlation over {n_valid} H2S measurements...")
 
-    plot_bytes = generate_cross_correlation_viz(raw_environmental_data, h2s_col=h2s_col)
+    plot_bytes = generate_cross_correlation_viz(obs_data, h2s_col=h2s_col)
 
     timestamp = datetime.now().strftime("%Y-%m-%d")
     timestamped_path = f"{VISUALIZATIONS_PATH}/{timestamp}/cross_correlation.png"

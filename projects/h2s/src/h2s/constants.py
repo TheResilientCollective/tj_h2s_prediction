@@ -27,6 +27,10 @@ STATION_MODELS_S3_BASE = 'tijuana/forecast/models/stations'
 MH_MODELS_S3_BASE = 'tijuana/forecast/models/multihorizon'
 MH_OUTPUT_PATH = 'tijuana/forecast/multihorizon'
 
+# Pre-featurized data paths
+OBS_DATA_PATH = 'latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet'
+FORECAST_DATA_PATH = 'latest/tijuana/forecast_data/model_forecast.parquet'
+
 # ==============================================================================
 # Station & Source Geography
 # ==============================================================================

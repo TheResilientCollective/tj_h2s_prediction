@@ -35,10 +35,6 @@ def defs():
     # Import prediction pipeline assets
     from h2s.defs.h2s_pipeline import (
         h2s_model_artifacts,
-        tidal_forecast,
-        sbiwtp_operational_data,
-        raw_environmental_data,
-        actual_h2s_data,
         preprocessed_features,
         h2s_predictions,
         h2s_alerts,
@@ -123,10 +119,6 @@ def defs():
         assets=[
             # Prediction Pipeline Assets
             h2s_model_artifacts,
-            tidal_forecast,
-            sbiwtp_operational_data,
-            raw_environmental_data,
-            actual_h2s_data,
             preprocessed_features,
             h2s_predictions,
             h2s_alerts,

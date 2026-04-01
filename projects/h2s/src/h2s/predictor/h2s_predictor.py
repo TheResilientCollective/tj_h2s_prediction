@@ -21,6 +21,8 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 
+from h2s.training.feature_builder import ensure_base_features
+
 # Default Hill/log-logistic parameters
 # c = EC50 (H2S concentration at 50% risk) = 5 ppb (green/yellow boundary)
 # b = Hill coefficient (slope) = 1.23
@@ -167,79 +169,12 @@ class H2SPredictor:
             df[time_col] = pd.to_datetime(df[time_col])
             df = df.sort_values(time_col).reset_index(drop=True)
 
-        # ---- Time cyclicals ----
-        ts = df.get(time_col)
-        if ts is not None:
-            ts = pd.to_datetime(ts)
-            if 'hour_sin' not in df.columns:
-                df['hour_sin'] = np.sin(2 * np.pi * ts.dt.hour / 24)
-                df['hour_cos'] = np.cos(2 * np.pi * ts.dt.hour / 24)
-            if 'month_sin' not in df.columns:
-                df['month_sin'] = np.sin(2 * np.pi * ts.dt.month / 12)
-                df['month_cos'] = np.cos(2 * np.pi * ts.dt.month / 12)
-            # Night flag
-            if 'is_night' not in df.columns:
-                hour = ts.dt.hour
-                df['is_night'] = ((hour < 6) | (hour >= 20)).astype(int)
+        # Normalize time column for feature_builder compatibility
+        if time_col == 'date':
+            df['time'] = df['date']
 
-        # ---- Source regime ----
-        if 'source_regime' not in df.columns:
-            def _src_regime(row):
-                if not row.get('is_night', 0):
-                    return 0
-                wd = row.get('wind_direction_10m', 0)
-                if 22.5 <= wd < 135:
-                    return 1
-                elif wd >= 247.5 or wd < 22.5:
-                    return 2
-                elif 135 <= wd < 247.5:
-                    return 3
-                return 0
-            df['source_regime'] = df.apply(_src_regime, axis=1)
-
-        # ---- Wind direction cyclical encoding ----
-        if 'wind_direction_10m' in df.columns:
-            if 'wind_direction_sin' not in df.columns:
-                df['wind_direction_sin'] = np.sin(np.radians(df['wind_direction_10m']))
-                df['wind_direction_cos'] = np.cos(np.radians(df['wind_direction_10m']))
-
-        # ---- Rolling wind features ----
-        if 'wind_speed_10m' in df.columns:
-            for h in (2, 3, 4):
-                col = f'wind_speed_10m_avg_{h}h'
-                if col not in df.columns:
-                    df[col] = df['wind_speed_10m'].rolling(h, min_periods=1).mean()
-        if 'wind_gusts_10m' in df.columns:
-            for h in (2, 3, 4):
-                col = f'wind_gusts_10m_max_{h}h'
-                if col not in df.columns:
-                    df[col] = df['wind_gusts_10m'].rolling(h, min_periods=1).max()
-
-        # ---- Interaction features ----
-        if 'wind_speed_10m' in df.columns and 'temperature_2m' in df.columns:
-            if 'wind_temp_interaction' not in df.columns:
-                df['wind_temp_interaction'] = df['wind_speed_10m'] * df['temperature_2m']
-        if 'relative_humidity_2m' in df.columns and 'temperature_2m' in df.columns:
-            if 'humidity_temp_interaction' not in df.columns:
-                df['humidity_temp_interaction'] = df['relative_humidity_2m'] * df['temperature_2m']
-
-        # ---- Atmospheric stability ----
-        if 'stable_atm' not in df.columns and 'wind_speed_10m' in df.columns:
-            df['stable_atm'] = ((df['wind_speed_10m'] < 5) & (df.get('is_night', 0) == 1)).astype(int)
-
-        # ---- Flow derivative features ----
-        flow_col = 'Flow (m^3/s)--Border'
-        if flow_col in df.columns:
-            if 'flow_log' not in df.columns:
-                df['flow_log'] = np.log1p(df[flow_col])
-            if 'flow_low' not in df.columns:
-                df['flow_low'] = (df[flow_col] < 1).astype(int)
-            if 'flow_high' not in df.columns:
-                df['flow_high'] = (df[flow_col] > 5).astype(int)
-            if 'flow_lag_6h' not in df.columns:
-                df['flow_lag_6h'] = df[flow_col].shift(6).fillna(df[flow_col].median() if len(df) > 0 else 2.0)
-            if 'flow_rolling_24h' not in df.columns:
-                df['flow_rolling_24h'] = df[flow_col].rolling(24, min_periods=1).mean()
+        # Add all base features (time cyclicals, source_regime, wind features, interactions, etc.)
+        df = ensure_base_features(df)
 
         # ---- H2S lag features (fill with 0 in forecast mode) ----
         h2s_col = next((c for c in ['H2S', 'h2s'] if c in df.columns), None)
@@ -260,29 +195,6 @@ class H2SPredictor:
             for col in ['h2s_lag_1h', 'h2s_lag_3h', 'h2s_lag_6h', 'h2s_rolling_6h', 'h2s_rolling_24h']:
                 if col not in df.columns:
                     df[col] = 0.0
-
-        # ---- Encode tidal state ----
-        if 'tidal_state' in df.columns and self.tidal_mapping:
-            df['tidal_state_encoded'] = df['tidal_state'].map(self.tidal_mapping).fillna(-1).astype(int)
-        elif 'tidal_state_encoded' not in df.columns:
-            tidal_numeric = {'flood': 0, 'ebb': 1, 'slack high': 2, 'slack low': 3}
-            if 'tidal_state' in df.columns:
-                df['tidal_state_encoded'] = df['tidal_state'].map(tidal_numeric).fillna(-1).astype(int)
-            else:
-                df['tidal_state_encoded'] = -1
-
-        # ---- SBIWTP pass-through (if present, else defaults) ----
-        sbiwtp_defaults = {
-            'sbiwtp_flow_mgd': 23.5,
-            'sbiwtp_anomaly': 0.0,
-            'sbiwtp_deficit': 0.0,
-            'sbiwtp_flow_x_temp': 23.5 * 18.0,  # flow × typical temp
-            'sbiwtp_hourly_mgd': 23.5 / 24,
-            'sbiwtp_sli': 0.0,
-        }
-        for col, default in sbiwtp_defaults.items():
-            if col not in df.columns:
-                df[col] = default
 
         # ---- Add missing columns with default values ----
         missing_cols = set(self.feature_cols) - set(df.columns)
