@@ -6,6 +6,7 @@ generates dashboard visualizations, and exports results.
 
 import io
 import json
+import os
 import pickle
 from datetime import datetime, timezone
 
@@ -553,11 +554,11 @@ def mh_slack_alerts(
 
     total_orange = int((mh_forecasts['risk'] == 'ORANGE').sum())
     total_yh = int((mh_forecasts['risk'] == 'YELLOW_HIGH').sum())
-
+    env_label = os.environ.get("ENV_LABEL", "PROD").upper()
     blocks: list = [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": "⚠ Multi-Horizon H2S Alert — Elevated Levels Forecast"},
+            "text": {"type": "plain_text", "text": f"{env_label} ⚠ Multi-Horizon H2S Alert — Elevated Levels Forecast"},
         },
         {
             "type": "section",

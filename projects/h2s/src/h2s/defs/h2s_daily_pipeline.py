@@ -13,6 +13,7 @@ Assets:
 
 import io
 import json
+import os
 import pickle
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -927,11 +928,11 @@ def daily_summary_json(
         time_range = f"{fc_start} → {fc_end} PT"
     else:
         time_range = "N/A"
-
+    env_label = os.environ.get("ENV_LABEL", "PROD").upper()
     blocks = [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": f"H2S Daily Summary — {ts}"},
+            "text": {"type": "plain_text", "text": f"{env_label} H2S Daily Summary — {ts}"},
         },
         {
             "type": "section",

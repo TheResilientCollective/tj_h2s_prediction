@@ -1,7 +1,11 @@
 import os
 from pathlib import Path
 
-from dagster import Definitions, EnvVar, definitions, load_from_defs_folder
+from dagster import (
+    Definitions, EnvVar, definitions, load_from_defs_folder,
+   RunFailureSensorContext
+)
+from dagster_slack import make_slack_on_run_failure_sensor
 
 from h2s.resources.minio import S3Resource
 from h2s.resources.slack import SlackAlertResource
@@ -20,6 +24,17 @@ s3_resource = S3Resource(
 slack_resource = SlackAlertResource(
     token=EnvVar('SLACK_TOKEN'),
     channel=os.environ.get('SLACK_CHANNEL', '#test'),
+)
+def slack_message_fn(context: RunFailureSensorContext) -> str:
+    return (
+        f"Job *[{context.dagster_run.job_name}]* failed! "
+        f"Error: {context.failure_event.message}"
+    )
+slack_on_run_failure = make_slack_on_run_failure_sensor(
+     os.environ.get("SLACK_CHANNEL_FAILURES", "#test_failure"),
+    os.getenv("SLACK_TOKEN"),
+    webserver_base_url=f'https://{os.environ.get("SCHED_HOSTNAME", "sched")}.{os.environ.get("HOST", "local")}/',
+    text_fn=slack_message_fn
 )
 
 resources = {
