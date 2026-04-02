@@ -6,6 +6,7 @@ and exports results to S3 with visualizations.
 """
 
 import json
+import os
 from datetime import datetime, timedelta
 from io import BytesIO
 from zoneinfo import ZoneInfo
@@ -29,6 +30,17 @@ STORE_ASSETS_AVAILABLE = True
 _KEY = lambda name: dg.AssetKey(["h2s", name])
 
 MODEL_VARIANTS = ["xgboost_base", "xgboost_smote", "random_forest"]
+
+
+# ==============================================================================
+# Partition Definition: Daily Forecast/Validation Runs
+# ==============================================================================
+
+forecast_daily_partitions = dg.DailyPartitionsDefinition(
+    start_date="2026-01-01",
+    end_offset=1,  # Include today's partition (0 would exclude it until day completes)
+    timezone="UTC",
+)
 
 
 # ==============================================================================
@@ -89,32 +101,102 @@ def h2s_model_artifacts(context: dg.AssetExecutionContext):
     required_resource_keys={"s3"},
     kinds={"python", "s3"},
     description="Preprocessed features ready for model prediction (loaded from pre-featurized S3 data)",
+    partitions_def=forecast_daily_partitions,
     auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
     ins={
-        "h2s_model_artifacts": dg.AssetIn(key=_KEY("h2s_model_artifacts")),
+        "h2s_model_artifacts": dg.AssetIn(
+            key=_KEY("h2s_model_artifacts"),
+            partition_mapping=dg.AllPartitionMapping()
+        ),
     },
 )
 def preprocessed_features(
     context: dg.AssetExecutionContext,
     h2s_model_artifacts,
 ) -> pd.DataFrame:
-    """Load pre-featurized forecast data from S3 and apply model preprocessing.
+    """Load forecast/observation data and apply model preprocessing.
 
-    Loads model_forecast.parquet from S3 (already contains 43 MODEL_FEATURES).
-    Applies H2SPredictor.preprocess_data() to add any missing features and
-    handle H2S lags (set to 0 in forecast mode).
+    Data source selection:
+    - Current partition (today): Load from FORECAST_DATA_PATH (forecast data)
+    - Historical partition (< today): Load from OBS_DATA_PATH (observation data for backfills)
+
+    Reads input data from PUBLIC_BUCKET (production sensor data).
+    Writes outputs to S3_BUCKET (predictions, visualizations).
     """
     s3 = context.resources.s3
+    partition_key = context.partition_key  # e.g., "2026-04-02"
+    today = datetime.now(ZoneInfo("UTC")).date().strftime("%Y-%m-%d")
 
-    context.log.info(f"Loading forecast data from S3: {FORECAST_DATA_PATH}")
+    # Read input data from PUBLIC_BUCKET (production data from sensors)
+    public_bucket = os.environ.get('PUBLIC_BUCKET', s3.S3_BUCKET)
 
-    try:
-        forecast_url = s3.get_presigned_url(path=FORECAST_DATA_PATH, bucket=s3.S3_BUCKET)
-        df = pd.read_parquet(forecast_url)
-        context.log.info(f"✓ Loaded {len(df)} rows from S3")
-        context.log.info(f"  Columns: {len(df.columns)}")
-    except Exception as e:
-        raise RuntimeError(f"Failed to load forecast data from S3 path '{FORECAST_DATA_PATH}': {e}")
+    # Determine data source based on partition
+    is_backfill = partition_key < today
+
+    if is_backfill:
+        # BACKFILL MODE: Use observation data (actual conditions that occurred)
+        data_path = OBS_DATA_PATH
+        context.log.info(f"🔄 Backfill mode: Loading observation data from {data_path}")
+        context.log.info(f"   Partition: {partition_key}, Today: {today}")
+        context.log.info(f"   Reading from PUBLIC_BUCKET: {public_bucket}")
+
+        try:
+            data_url = s3.get_presigned_url(path=data_path, bucket=public_bucket)
+            df = pd.read_parquet(data_url)
+            context.log.info(f"✓ Loaded {len(df)} rows from observation data")
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load observation data from S3 path '{data_path}': {e}\n"
+                f"Observation data is required for historical backfills (partition < today)."
+            )
+
+        # Filter to partition date (observation data spans full history)
+        df['time'] = pd.to_datetime(df['time'], utc=True)
+        partition_dt = datetime.strptime(partition_key, "%Y-%m-%d").replace(tzinfo=ZoneInfo("UTC"))
+        next_day = partition_dt + timedelta(days=1)
+
+        df_filtered = df[(df['time'] >= partition_dt) & (df['time'] < next_day)].copy()
+        context.log.info(f"✓ Filtered to partition date {partition_key}: {len(df_filtered)} rows")
+
+        if len(df_filtered) == 0:
+            # Find recent dates with data to help user
+            df['date_str'] = df['time'].dt.strftime('%Y-%m-%d')
+            available_dates = sorted(df['date_str'].unique(), reverse=True)[:10]
+
+            raise ValueError(
+                f"No observation data found for partition {partition_key} — sensors likely offline that day.\n"
+                f"Cannot backfill without observation data.\n"
+                f"Recent dates WITH available data: {', '.join(available_dates[:5])}\n"
+                f"Try backfilling one of these dates instead."
+            )
+
+        # Filter to valid measurements only
+        if 'h2s_measured' in df_filtered.columns:
+            df_filtered = df_filtered[df_filtered['h2s_measured'] == True].copy()
+            context.log.info(f"✓ Filtered to h2s_measured==True: {len(df_filtered)} rows")
+
+        # Drop H2S column if present (not used as input feature)
+        if 'H2S' in df_filtered.columns:
+            df_filtered = df_filtered.drop(columns=['H2S'])
+            context.log.info("✓ Dropped H2S column (target variable, not input)")
+
+        df = df_filtered
+
+    else:
+        # LIVE FORECAST MODE: Use forecast data (current/future predictions)
+        data_path = FORECAST_DATA_PATH
+        context.log.info(f"📡 Live forecast mode: Loading forecast data from {data_path}")
+        context.log.info(f"   Reading from PUBLIC_BUCKET: {public_bucket}")
+
+        try:
+            data_url = s3.get_presigned_url(path=data_path, bucket=public_bucket)
+            df = pd.read_parquet(data_url)
+            context.log.info(f"✓ Loaded {len(df)} rows from forecast data")
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load forecast data from S3 path '{data_path}': {e}\n"
+                f"Forecast data is required for current/future predictions (partition >= today)."
+            )
 
     # Apply model preprocessing (idempotent — fills only missing features)
     context.log.info("Applying model preprocessing...")
@@ -131,9 +213,13 @@ def preprocessed_features(
     group_name="h2s_prediction",
     kinds={"xgboost", "ml"},
     description="H2S category predictions with probabilities",
+    partitions_def=forecast_daily_partitions,
     auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
     ins={
-        "h2s_model_artifacts": dg.AssetIn(key=_KEY("h2s_model_artifacts")),
+        "h2s_model_artifacts": dg.AssetIn(
+            key=_KEY("h2s_model_artifacts"),
+            partition_mapping=dg.AllPartitionMapping()
+        ),
         "preprocessed_features": dg.AssetIn(key=_KEY("preprocessed_features")),
     },
 )
@@ -176,6 +262,7 @@ def h2s_predictions(
     group_name="h2s_prediction",
     kinds={"python"},
     description="Filtered predictions showing only alerts (orange/yellow)",
+    partitions_def=forecast_daily_partitions,
     auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
     ins={
         "h2s_predictions": dg.AssetIn(key=_KEY("h2s_predictions")),
@@ -204,6 +291,7 @@ def h2s_alerts(
     kinds={"slack"},
     required_resource_keys={"slack"},
     description="Send YELLOW_HIGH and ORANGE alerts to Slack",
+    partitions_def=forecast_daily_partitions,
     auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
     ins={
         "h2s_alerts": dg.AssetIn(key=_KEY("h2s_alerts")),
@@ -216,6 +304,15 @@ def slack_alerts(
     """Post H2S alert summary to Slack when YELLOW_HIGH or ORANGE predictions exist."""
     if h2s_alerts.empty:
         context.log.info("No alerts to send")
+        return
+
+    # Skip Slack notifications for backfills (only send for today's partition)
+    today = datetime.now(ZoneInfo("UTC")).date().strftime("%Y-%m-%d")
+    if context.partition_key != today:
+        context.log.info(
+            f"Skipping Slack notification for partition {context.partition_key} "
+            f"(only sending for today's partition: {today})"
+        )
         return
 
     orange_count = int((h2s_alerts['predicted_category'] == 'orange').sum())
@@ -280,6 +377,7 @@ def slack_alerts(
     required_resource_keys={"s3"},
     kinds={"ml", "xgboost"},
     description="Run predictions for each deployed model variant; skips missing variants",
+    partitions_def=forecast_daily_partitions,
 )
 def h2s_variant_predictions(
     context: dg.AssetExecutionContext,
@@ -320,6 +418,7 @@ def h2s_variant_predictions(
     group_name="h2s_prediction",
     kinds={"ml"},
     description="Ensemble predictions by averaging probabilities across all available variants",
+    partitions_def=forecast_daily_partitions,
 )
 def h2s_ensemble_predictions(
     context: dg.AssetExecutionContext,
@@ -388,9 +487,13 @@ def h2s_ensemble_predictions(
     group_name="h2s_visualization",
     required_resource_keys={"s3"},
     description="Feature importance visualization stored to S3",
+    partitions_def=forecast_daily_partitions,
     auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
     ins={
-        "h2s_model_artifacts": dg.AssetIn(key=_KEY("h2s_model_artifacts")),
+        "h2s_model_artifacts": dg.AssetIn(
+            key=_KEY("h2s_model_artifacts"),
+            partition_mapping=dg.AllPartitionMapping()
+        ),
     },
 )
 def feature_importance_viz(
@@ -411,7 +514,7 @@ def feature_importance_viz(
     )
 
     # Upload to timestamped path
-    timestamp = datetime.now().strftime("%Y-%m-%d")
+    timestamp = context.partition_key
     timestamped_path = f"{VISUALIZATIONS_PATH}/{timestamp}/feature_importance.png"
     s3_resource.putFile(plot_bytes.read(), timestamped_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
@@ -429,10 +532,14 @@ def feature_importance_viz(
     group_name="h2s_visualization",
     required_resource_keys={"s3"},
     description="Confusion matrix comparing predictions vs actuals (requires actual H2S data from S3)",
+    partitions_def=forecast_daily_partitions,
     auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
     ins={
         "h2s_predictions": dg.AssetIn(key=_KEY("h2s_predictions")),
-        "h2s_model_artifacts": dg.AssetIn(key=_KEY("h2s_model_artifacts")),
+        "h2s_model_artifacts": dg.AssetIn(
+            key=_KEY("h2s_model_artifacts"),
+            partition_mapping=dg.AllPartitionMapping()
+        ),
     },
 )
 def confusion_matrix_viz(
@@ -448,13 +555,14 @@ def confusion_matrix_viz(
     from h2s.predictor.visualizations import generate_confusion_matrix_with_metrics
 
     s3_resource = context.resources.s3
+    public_bucket = os.environ.get('PUBLIC_BUCKET', s3_resource.S3_BUCKET)
 
     # Load observation data from S3
     context.log.info(f"Loading observation data from S3: {OBS_DATA_PATH}")
     try:
-        obs_url = s3_resource.get_presigned_url(path=OBS_DATA_PATH, bucket=s3_resource.S3_BUCKET)
+        obs_url = s3_resource.get_presigned_url(path=OBS_DATA_PATH, bucket=public_bucket)
         actuals_df = pd.read_parquet(obs_url)
-        context.log.info(f"✓ Loaded {len(actuals_df)} rows from S3")
+        context.log.info(f"✓ Loaded {len(actuals_df)} rows from S3 (bucket: {public_bucket})")
     except Exception as e:
         context.log.warning(f"⚠ Could not load observation data from S3: {e}")
         context.add_output_metadata({"status": "skipped", "reason": f"S3 load failed: {e}"})
@@ -513,7 +621,7 @@ def confusion_matrix_viz(
     )
 
     # Upload to timestamped path
-    timestamp = datetime.now().strftime("%Y-%m-%d")
+    timestamp = context.partition_key
     timestamped_path = f"{VISUALIZATIONS_PATH}/{timestamp}/confusion_matrix.png"
     s3_resource.putFile(plot_bytes.read(), timestamped_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
@@ -531,10 +639,14 @@ def confusion_matrix_viz(
     group_name="h2s_visualization",
     required_resource_keys={"s3"},
     description="Model performance comparison plot (requires actual H2S data from S3)",
+    partitions_def=forecast_daily_partitions,
     auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
     ins={
         "h2s_predictions": dg.AssetIn(key=_KEY("h2s_predictions")),
-        "h2s_model_artifacts": dg.AssetIn(key=_KEY("h2s_model_artifacts")),
+        "h2s_model_artifacts": dg.AssetIn(
+            key=_KEY("h2s_model_artifacts"),
+            partition_mapping=dg.AllPartitionMapping()
+        ),
     },
 )
 def model_comparison_viz(
@@ -550,13 +662,14 @@ def model_comparison_viz(
     from h2s.predictor.visualizations import generate_model_comparison
 
     s3_resource = context.resources.s3
+    public_bucket = os.environ.get('PUBLIC_BUCKET', s3_resource.S3_BUCKET)
 
     # Load observation data from S3
     context.log.info(f"Loading observation data from S3: {OBS_DATA_PATH}")
     try:
-        obs_url = s3_resource.get_presigned_url(path=OBS_DATA_PATH, bucket=s3_resource.S3_BUCKET)
+        obs_url = s3_resource.get_presigned_url(path=OBS_DATA_PATH, bucket=public_bucket)
         actuals_df = pd.read_parquet(obs_url)
-        context.log.info(f"✓ Loaded {len(actuals_df)} rows from S3")
+        context.log.info(f"✓ Loaded {len(actuals_df)} rows from S3 (bucket: {public_bucket})")
     except Exception as e:
         context.log.warning(f"⚠ Could not load observation data from S3: {e}")
         context.add_output_metadata({"status": "skipped", "reason": f"S3 load failed: {e}"})
@@ -607,7 +720,7 @@ def model_comparison_viz(
     )
 
     # Upload to timestamped path
-    timestamp = datetime.now().strftime("%Y-%m-%d")
+    timestamp = context.partition_key
     timestamped_path = f"{VISUALIZATIONS_PATH}/{timestamp}/model_comparison.png"
     s3_resource.putFile(plot_bytes.read(), timestamped_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
@@ -625,6 +738,7 @@ def model_comparison_viz(
     group_name="h2s_visualization",
     required_resource_keys={"s3"},
     description="Prediction timeline plot showing H2S predictions with environmental variables",
+    partitions_def=forecast_daily_partitions,
     auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
     ins={
         "h2s_predictions": dg.AssetIn(key=_KEY("h2s_predictions")),
@@ -642,13 +756,14 @@ def prediction_timeline_viz(
     from h2s.predictor.visualizations import generate_prediction_timeline
 
     s3_resource = context.resources.s3
+    public_bucket = os.environ.get('PUBLIC_BUCKET', s3_resource.S3_BUCKET)
 
     # Load observation data from S3 (optional — viz works without it)
     obs_data = None
     try:
-        obs_url = s3_resource.get_presigned_url(path=OBS_DATA_PATH, bucket=s3_resource.S3_BUCKET)
+        obs_url = s3_resource.get_presigned_url(path=OBS_DATA_PATH, bucket=public_bucket)
         obs_data = pd.read_parquet(obs_url)
-        context.log.info(f"✓ Loaded {len(obs_data)} rows from observation data")
+        context.log.info(f"✓ Loaded {len(obs_data)} rows from observation data (bucket: {public_bucket})")
         h2s_cols = [col for col in obs_data.columns if col.upper() == 'H2S' or 'h2s' in col.lower()]
         if h2s_cols:
             context.log.info("Generating prediction timeline (with H2S actuals)...")
@@ -665,7 +780,7 @@ def prediction_timeline_viz(
     plot_bytes = generate_prediction_timeline(predictions_df, obs_data)
 
     # Upload to timestamped path
-    timestamp = datetime.now().strftime("%Y-%m-%d")
+    timestamp = context.partition_key
     timestamped_path = f"{VISUALIZATIONS_PATH}/{timestamp}/prediction_timeline.png"
     s3_resource.putFile(plot_bytes.read(), timestamped_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
 
@@ -684,6 +799,7 @@ def prediction_timeline_viz(
     name="cross_correlation_viz",
     required_resource_keys={"s3"},
     description="Time-lagged cross-correlation between actual H2S and environmental drivers",
+    partitions_def=forecast_daily_partitions,
     auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
 )
 def cross_correlation_viz(
@@ -699,13 +815,14 @@ def cross_correlation_viz(
     from h2s.predictor.visualizations import generate_cross_correlation_viz
 
     s3_resource = context.resources.s3
+    public_bucket = os.environ.get('PUBLIC_BUCKET', s3_resource.S3_BUCKET)
 
     # Load observation data from S3
     context.log.info(f"Loading observation data from S3: {OBS_DATA_PATH}")
     try:
-        obs_url = s3_resource.get_presigned_url(path=OBS_DATA_PATH, bucket=s3_resource.S3_BUCKET)
+        obs_url = s3_resource.get_presigned_url(path=OBS_DATA_PATH, bucket=public_bucket)
         obs_data = pd.read_parquet(obs_url)
-        context.log.info(f"✓ Loaded {len(obs_data)} rows from S3")
+        context.log.info(f"✓ Loaded {len(obs_data)} rows from S3 (bucket: {public_bucket})")
     except Exception as e:
         context.log.warning(f"⚠ Could not load observation data from S3: {e}")
         context.add_output_metadata({"status": "skipped", "reason": f"S3 load failed: {e}"})
@@ -739,7 +856,7 @@ def cross_correlation_viz(
 
     plot_bytes = generate_cross_correlation_viz(obs_data, h2s_col=h2s_col)
 
-    timestamp = datetime.now().strftime("%Y-%m-%d")
+    timestamp = context.partition_key
     timestamped_path = f"{VISUALIZATIONS_PATH}/{timestamp}/cross_correlation.png"
     s3_resource.putFile(plot_bytes.read(), timestamped_path, bucket=s3_resource.S3_BUCKET, content_type="image/png")
 
@@ -758,6 +875,7 @@ def cross_correlation_viz(
     required_resource_keys={"s3"},
     kinds={"s3", "export"},
     description="Predictions exported to S3 as CSV and JSON",
+    partitions_def=forecast_daily_partitions,
     auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
     ins={
         "h2s_predictions": dg.AssetIn(key=_KEY("h2s_predictions")),
@@ -780,14 +898,23 @@ def predictions_export(
 
     context.log.info("Using store_assets utility for export...")
 
-    now = datetime.now()
+    # Parse partition_key for Hive paths
+    partition_dt = datetime.strptime(context.partition_key, "%Y-%m-%d")
+
+    # Extract hour from schedule tag (default to 0 for backfills)
+    scheduled_time = context.run.tags.get("dagster/schedule_execution_time")
+    if scheduled_time:
+        hour = datetime.fromisoformat(scheduled_time.replace('Z', '+00:00')).hour
+    else:
+        hour = 0
+
     hive_path = (
         f"{HOURLY_PREDICTIONS_PATH}"
         f"/model=nestor_xgboost"
-        f"/year={now.strftime('%Y')}"
-        f"/month={now.strftime('%m')}"
-        f"/day={now.strftime('%d')}"
-        f"/hour={now.strftime('%H')}"
+        f"/year={partition_dt.strftime('%Y')}"
+        f"/month={partition_dt.strftime('%m')}"
+        f"/day={partition_dt.strftime('%d')}"
+        f"/hour={hour:02d}"
     )
     timestamped_path = hive_path
 
@@ -848,24 +975,30 @@ def predictions_export(
     group_name="h2s_validation",
     required_resource_keys={"s3"},
     kinds={"python", "s3"},
-    description="Daily report comparing previous day's 6-hourly predictions to actual H2S measurements",
+    description="Daily report comparing previous day's 6-hourly predictions to actual H2S measurements with metrics",
+    partitions_def=forecast_daily_partitions,
 )
 def daily_validation_report(context: dg.AssetExecutionContext) -> None:
     """Compare yesterday's 6-hourly predictions against actual H2S measurements.
 
     Loads predictions from each of the 4 hourly runs (_00, _06, _12, _18),
-    combines them, and generates validation plots uploaded to S3.
+    combines them, merges with actual observations, calculates performance metrics,
+    and generates validation plots and metrics.json uploaded to S3.
     Skips gracefully if predictions or actuals are unavailable.
     """
+    import json
     from h2s.predictor.visualizations import (
         generate_confusion_matrix_with_metrics,
         generate_model_comparison,
         generate_prediction_timeline,
     )
+    from h2s.training.validation import calculate_metrics, calculate_false_alarm_rate
 
     s3_resource = context.resources.s3
-    yesterday_dt = datetime.now() - timedelta(days=1)
-    yesterday = yesterday_dt.strftime("%Y-%m-%d")
+    public_bucket = os.environ.get('PUBLIC_BUCKET', s3_resource.S3_BUCKET)
+    validation_date = context.partition_key  # e.g., "2026-04-01"
+    yesterday_dt = datetime.strptime(validation_date, "%Y-%m-%d")
+    yesterday = validation_date
     y, m, d = yesterday_dt.strftime("%Y"), yesterday_dt.strftime("%m"), yesterday_dt.strftime("%d")
 
     # Load yesterday's 6-hourly predictions
@@ -888,46 +1021,152 @@ def daily_validation_report(context: dg.AssetExecutionContext) -> None:
     predictions_df = pd.concat(prediction_dfs, ignore_index=True)
     context.log.info(f"Combined {len(predictions_df)} predictions across {len(prediction_dfs)} runs")
 
-    # Ensure time column exists
+    # Ensure time column exists and is timezone-aware UTC
     if 'time' not in predictions_df.columns and 'date' in predictions_df.columns:
         predictions_df['time'] = pd.to_datetime(predictions_df['date'])
 
-    # Load actual H2S measurements
-    actuals_df = pd.DataFrame()
-    try:
-        csv_url = s3_resource.get_presigned_url(path="tijuana/forecast/actuals/latest.csv")
-        actuals_df = pd.read_csv(csv_url)
-        if 'time' in actuals_df.columns:
-            actuals_df['time'] = pd.to_datetime(actuals_df['time'])
-            # Filter to yesterday's date range
-            actuals_df = actuals_df[actuals_df['time'].dt.strftime("%Y-%m-%d") == yesterday].copy()
-        context.log.info(f"✓ Loaded {len(actuals_df)} actual H2S measurements for {yesterday}")
-    except Exception as e:
-        context.log.warning(f"Could not load actual H2S data: {e} — plots will be skipped")
+    predictions_df['time'] = pd.to_datetime(predictions_df['time'])
+    # Convert to UTC (handles both naive and timezone-aware datetimes)
+    if predictions_df['time'].dt.tz is None:
+        predictions_df['time'] = predictions_df['time'].dt.tz_localize('UTC')
+    else:
+        predictions_df['time'] = predictions_df['time'].dt.tz_convert('UTC')
+
+    # Load actual H2S measurements from OBS_DATA_PATH (FAIL if missing)
+    context.log.info(f"Loading observation data from {OBS_DATA_PATH} (bucket: {public_bucket})")
+    parquet_url = s3_resource.get_presigned_url(path=OBS_DATA_PATH, bucket=public_bucket)
+    actuals_df = pd.read_parquet(parquet_url)
+    context.log.info(f"✓ Loaded {len(actuals_df)} total observation rows from S3")
+
+    # Filter to NESTOR-BES (handle both name variants)
+    actuals_df = actuals_df[
+        actuals_df['site_name'].isin(['NESTOR__BES', 'NESTOR - BES'])
+    ].copy()
+
+    if 'time' not in actuals_df.columns:
+        raise ValueError(f"Missing 'time' column in observation data from {OBS_DATA_PATH}")
+
+    # Convert to UTC (handles both naive and timezone-aware datetimes)
+    actuals_df['time'] = pd.to_datetime(actuals_df['time'])
+    if actuals_df['time'].dt.tz is None:
+        # Assume Pacific time if naive, convert to UTC
+        actuals_df['time'] = actuals_df['time'].dt.tz_localize('America/Los_Angeles').dt.tz_convert('UTC')
+    else:
+        # Already timezone-aware, just convert to UTC
+        actuals_df['time'] = actuals_df['time'].dt.tz_convert('UTC')
+    # Filter to yesterday's date range
+    actuals_df = actuals_df[actuals_df['time'].dt.strftime("%Y-%m-%d") == yesterday].copy()
+
+    context.log.info(f"✓ Loaded {len(actuals_df)} actual H2S measurements for NESTOR-BES on {yesterday}")
+
+    if len(actuals_df) == 0:
+        context.log.warning(
+            f"No observation data found for NESTOR-BES on {yesterday} — sensors likely offline. "
+            f"Skipping validation report."
+        )
+        return
 
     validation_base = f"{VALIDATION_PATH}/{yesterday}"
 
-    # Generate and upload validation plots (only when actuals are available)
-    if not actuals_df.empty:
-        h2s_cols = [col for col in actuals_df.columns if col.upper() == 'H2S' or 'h2s' in col.lower()]
-        if h2s_cols:
-            if 'H2S' not in actuals_df.columns:
-                actuals_df['H2S'] = actuals_df[h2s_cols[0]]
+    # Calculate metrics and generate plots (FAIL if H2S data missing)
+    h2s_cols = [col for col in actuals_df.columns if col.upper() == 'H2S' or 'h2s' in col.lower()]
+    if not h2s_cols:
+        raise ValueError(f"No H2S column found in observation data (columns: {actuals_df.columns.tolist()})")
 
-            for plot_name, plot_fn, kwargs in [
-                ("confusion_matrix", generate_confusion_matrix_with_metrics, {"time_col": "time"}),
-                ("model_comparison", generate_model_comparison, {"model_name": "XGBoost Weighted", "time_col": "time"}),
-                ("prediction_timeline", generate_prediction_timeline, {}),
-            ]:
-                try:
-                    plot_bytes = plot_fn(predictions_df, actuals_df, **kwargs)
-                    s3_path = f"{validation_base}/{plot_name}.png"
-                    s3_resource.putFile(plot_bytes.read(), s3_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
-                    context.log.info(f"✓ Uploaded {plot_name} to {s3_path}")
-                except Exception as e:
-                    context.log.warning(f"Could not generate {plot_name}: {e}")
-        else:
-            context.log.warning("No H2S column in actuals data — skipping validation plots")
+    if 'H2S' not in actuals_df.columns:
+        actuals_df['H2S'] = actuals_df[h2s_cols[0]]
+
+    # Merge predictions with actuals on time
+    merged = predictions_df.merge(actuals_df[['time', 'H2S']], on='time', how='inner')
+    context.log.info(f"Merged {len(merged)} predictions with actuals (match rate: {len(merged)/len(predictions_df):.1%})")
+
+    if len(merged) == 0:
+        context.log.warning(
+            f"No predictions matched with actuals for {yesterday} — time alignment issue or sensors offline. "
+            f"Skipping validation report."
+        )
+        return
+
+    # Categorize actual H2S values
+    def categorize_h2s(value):
+        if pd.isna(value):
+            return None
+        if value < 5:
+            return 'green'
+        if value < 30:
+            return 'yellow'
+        return 'orange'
+
+    merged['actual_category'] = merged['H2S'].apply(categorize_h2s)
+    merged = merged[merged['actual_category'].notna()].copy()
+
+    if len(merged) == 0:
+        context.log.warning(
+            f"No valid H2S measurements for {yesterday} — sensors likely offline for maintenance. "
+            f"Skipping validation report."
+        )
+        return
+
+    # Convert string categories to integers (for calculate_metrics compatibility)
+    category_to_int = {'green': 0, 'yellow': 1, 'orange': 2}
+    y_true_int = merged['actual_category'].map(category_to_int)
+    y_pred_int = merged['predicted_category'].map(category_to_int)
+
+    # Calculate performance metrics (FAIL on error)
+    metrics_dict = calculate_metrics(
+        y_true=y_true_int,
+        y_pred=y_pred_int,
+        class_names=['green', 'yellow', 'orange']
+    )
+
+    # Calculate false alarm rate (orange predicted when actually green)
+    far = calculate_false_alarm_rate(
+        y_true=(merged['actual_category'] == 'orange').astype(int),
+        y_pred=(merged['predicted_category'] == 'orange').astype(int),
+        positive_class=1
+    )
+
+    # Build metrics output structure
+    metrics_output = {
+        "date": yesterday,
+        "timestamp": datetime.now().isoformat(),
+        "site": "NESTOR__BES",
+        "n_predictions": len(predictions_df),
+        "n_matched": len(merged),
+        "match_rate": float(len(merged) / len(predictions_df)),
+        "balanced_accuracy": float(metrics_dict['balanced_accuracy']),
+        "class_metrics": {
+            cls: {
+                "precision": float(metrics_dict.get(f'precision_{cls}', 0.0)),
+                "recall": float(metrics_dict.get(f'recall_{cls}', 0.0)),
+                "f1_score": float(metrics_dict.get(f'f1_{cls}', 0.0))
+            }
+            for cls in ['green', 'yellow', 'orange']
+        },
+        "confusion_matrix": metrics_dict['confusion_matrix'],  # Already a list
+        "false_alarm_rate": float(far)
+    }
+
+    # Upload metrics.json to S3
+    metrics_json = json.dumps(metrics_output, indent=2)
+    s3_resource.putFile(
+        metrics_json.encode('utf-8'),
+        f"{validation_base}/metrics.json",
+        bucket=s3_resource.S3_BUCKET,
+        content_type='application/json'
+    )
+    context.log.info(f"✓ Uploaded metrics.json (balanced_accuracy={metrics_output['balanced_accuracy']:.3f}, FAR={far:.3f})")
+
+    # Generate and upload validation plots (FAIL on error)
+    for plot_name, plot_fn, kwargs in [
+        ("confusion_matrix", generate_confusion_matrix_with_metrics, {"time_col": "time"}),
+        ("model_comparison", generate_model_comparison, {"model_name": "XGBoost Weighted", "time_col": "time"}),
+        ("prediction_timeline", generate_prediction_timeline, {}),
+    ]:
+        plot_bytes = plot_fn(predictions_df, actuals_df, **kwargs)
+        s3_path = f"{validation_base}/{plot_name}.png"
+        s3_resource.putFile(plot_bytes.read(), s3_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
+        context.log.info(f"✓ Uploaded {plot_name} to {s3_path}")
 
     # Export combined predictions CSV (historical record, no latest/ overwrite)
     metadata = store_assets.objectMetadata(
@@ -946,10 +1185,187 @@ def daily_validation_report(context: dg.AssetExecutionContext) -> None:
     )
 
     context.log.info(f"✓ Validation report saved to {validation_base}")
-    context.add_output_metadata({
+
+    # Add output metadata
+    metadata = {
         "date": yesterday,
         "prediction_runs": len(prediction_dfs),
         "total_predictions": len(predictions_df),
         "actuals_available": not actuals_df.empty,
         "s3_path": validation_base,
+    }
+
+    if metrics_output:
+        metadata.update({
+            "balanced_accuracy": metrics_output['balanced_accuracy'],
+            "false_alarm_rate": metrics_output['false_alarm_rate'],
+            "n_matched": metrics_output['n_matched'],
+            "match_rate": metrics_output['match_rate'],
+        })
+
+    context.add_output_metadata(metadata)
+
+
+@dg.asset(
+    key_prefix="h2s",
+    group_name="h2s_validation",
+    required_resource_keys={"s3"},
+    kinds={"python", "s3"},
+    description="Generate 30-day performance metrics dashboard from daily metrics.json files",
+    partitions_def=forecast_daily_partitions,
+)
+def monthly_performance_viz(context: dg.AssetExecutionContext) -> None:
+    """Generate monthly performance dashboard from daily metrics.
+
+    Loads last 30 days of metrics.json files and creates:
+    - Aggregate confusion matrix (30-day sum, normalized %)
+    - Balanced accuracy trend
+    - Per-class recall trends
+    - False alarm rate trend
+    """
+    import json
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+    import numpy as np
+    from io import BytesIO
+
+    s3_resource = context.resources.s3
+
+    # Load last 30 days of metrics (FAIL if insufficient data)
+    partition_dt = datetime.strptime(context.partition_key, "%Y-%m-%d").date()
+    today = partition_dt
+    metrics_list = []
+    missing_dates = []
+
+    for i in range(30):
+        date = today - timedelta(days=i+1)
+        date_str = date.strftime("%Y-%m-%d")
+        metrics_path = f"{VALIDATION_PATH}/{date_str}/metrics.json"
+
+        try:
+            metrics_bytes = s3_resource.getFile(metrics_path, bucket=s3_resource.S3_BUCKET)
+            metrics_data = json.loads(metrics_bytes.decode('utf-8'))
+            metrics_data['date_obj'] = date
+            metrics_list.append(metrics_data)
+            context.log.debug(f"✓ Loaded metrics for {date_str}")
+        except Exception as e:
+            missing_dates.append(date_str)
+            context.log.debug(f"Missing metrics for {date_str}: {e}")
+
+    if not metrics_list:
+        raise ValueError(f"No metrics found for last 30 days — cannot generate performance dashboard. Missing all dates.")
+
+    context.log.info(f"Loaded metrics for {len(metrics_list)} days (missing {len(missing_dates)} days)")
+
+    # Sort by date (oldest first for trends)
+    metrics_list.sort(key=lambda x: x['date_obj'])
+
+    # Extract data for plots
+    dates = [m['date_obj'] for m in metrics_list]
+    balanced_acc = [m['balanced_accuracy'] for m in metrics_list]
+
+    # Per-class recall
+    orange_recall = [m['class_metrics']['orange']['recall'] for m in metrics_list]
+    yellow_recall = [m['class_metrics']['yellow']['recall'] for m in metrics_list]
+    green_recall = [m['class_metrics']['green']['recall'] for m in metrics_list]
+
+    false_alarm_rate = [m.get('false_alarm_rate', 0) for m in metrics_list]
+
+    # Aggregate confusion matrix (sum counts)
+    cm_sum = np.zeros((3, 3))
+    for m in metrics_list:
+        cm_sum += np.array(m['confusion_matrix'])
+
+    # Normalize to percentages
+    cm_norm = cm_sum / cm_sum.sum(axis=1, keepdims=True) * 100
+
+    # Create 2×2 grid figure
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig.suptitle(f'{len(metrics_list)}-Day Performance Dashboard (NESTOR-BES)',
+                 fontsize=16, fontweight='bold')
+
+    # Panel 1: Aggregate Confusion Matrix
+    ax1 = axes[0, 0]
+    im = ax1.imshow(cm_norm, cmap='RdYlGn_r', aspect='auto', vmin=0, vmax=100)
+    ax1.set_xticks(range(3))
+    ax1.set_yticks(range(3))
+    ax1.set_xticklabels(['Green', 'Yellow', 'Orange'])
+    ax1.set_yticklabels(['Green', 'Yellow', 'Orange'])
+    ax1.set_xlabel('Predicted Category')
+    ax1.set_ylabel('Actual Category')
+    ax1.set_title(f'Confusion Matrix ({len(metrics_list)}-day aggregate, normalized)')
+
+    # Annotate cells
+    for i in range(3):
+        for j in range(3):
+            text = ax1.text(j, i, f'{cm_norm[i, j]:.1f}%\n({int(cm_sum[i, j])})',
+                           ha='center', va='center', fontsize=10,
+                           color='white' if cm_norm[i, j] > 50 else 'black')
+
+    plt.colorbar(im, ax=ax1, label='Percentage (%)')
+
+    # Panel 2: Balanced Accuracy Trend
+    ax2 = axes[0, 1]
+    ax2.plot(dates, balanced_acc, marker='o', linewidth=2, markersize=4)
+    ax2.axhline(0.61, color='red', linestyle='--', linewidth=1, label='Target (61%)')
+    ax2.set_ylabel('Balanced Accuracy')
+    ax2.set_title('Daily Balanced Accuracy')
+    ax2.grid(True, alpha=0.3)
+    ax2.legend()
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
+    ax2.tick_params(axis='x', rotation=45)
+
+    # Panel 3: Per-Class Recall
+    ax3 = axes[1, 0]
+    ax3.plot(dates, orange_recall, marker='o', label='Orange', color='#e74c3c', linewidth=2, markersize=3)
+    ax3.plot(dates, yellow_recall, marker='s', label='Yellow', color='#f39c12', linewidth=2, markersize=3)
+    ax3.plot(dates, green_recall, marker='^', label='Green', color='#27ae60', linewidth=2, markersize=3)
+    ax3.set_ylabel('Recall (Sensitivity)')
+    ax3.set_title('Daily Recall by Category')
+    ax3.grid(True, alpha=0.3)
+    ax3.legend()
+    ax3.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
+    ax3.tick_params(axis='x', rotation=45)
+
+    # Panel 4: False Alarm Rate
+    ax4 = axes[1, 1]
+    ax4.plot(dates, false_alarm_rate, marker='o', color='#e67e22', linewidth=2, markersize=4)
+    ax4.axhline(0.054, color='red', linestyle='--', linewidth=1, label='Target (5.4%)')
+    ax4.set_ylabel('False Alarm Rate')
+    ax4.set_title('Daily False Alarm Rate (Orange predicted | Actually Green)')
+    ax4.grid(True, alpha=0.3)
+    ax4.legend()
+    ax4.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
+    ax4.tick_params(axis='x', rotation=45)
+
+    plt.tight_layout()
+
+    # Save to BytesIO
+    buf = BytesIO()
+    plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+    buf.seek(0)
+    plt.close()
+
+    # Upload to S3 (timestamped + latest)
+    month_str = today.strftime("%Y-%m")
+    timestamped_path = f"{VALIDATION_PATH}/monthly/{month_str}/performance_dashboard.png"
+    latest_path = f"latest/{LATEST_FORECAST}/visualizations/performance_dashboard.png"
+
+    s3_resource.putFile(buf.read(), timestamped_path, bucket=s3_resource.S3_BUCKET,
+                       content_type='image/png')
+
+    buf.seek(0)
+    s3_resource.putFile(buf.read(), latest_path, bucket=s3_resource.S3_BUCKET,
+                       content_type='image/png')
+
+    context.log.info(f"✓ Performance dashboard uploaded to {timestamped_path} and {latest_path}")
+
+    # Add metadata
+    context.add_output_metadata({
+        "days_included": len(metrics_list),
+        "date_range": f"{dates[0]} to {dates[-1]}",
+        "avg_balanced_accuracy": float(np.mean(balanced_acc)),
+        "avg_false_alarm_rate": float(np.mean(false_alarm_rate)),
+        "timestamped_path": timestamped_path,
+        "latest_path": latest_path,
     })
