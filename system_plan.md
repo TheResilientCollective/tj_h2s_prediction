@@ -1,43 +1,59 @@
 # Tijuana River H2S Forecasting System
 
-This system uses machine learning prediction models to forecast hydrogen sulfide (H2S) levels at the NESTOR-BES wastewater treatment site, enabling proactive alerts for hazardous conditions.
+This system uses machine learning prediction models to forecast hydrogen sulfide (H2S) levels at wastewater treatment sites near the Tijuana River, enabling proactive alerts for hazardous conditions.
 
 ## Implementation Status
 
-### ✅ Current Implementation (v1.0)
-* Single pre-trained XGBoost model (NESTOR-BES site only)
+### ✅ Current Implementation (v2.0)
+
+**Hourly Forecast Pipeline** (`forecast_prediction_job`, every 6h)
+* Single production XGBoost model (NESTOR-BES site) loaded from S3
 * 3-category prediction: green (<5 ppb), yellow (5-30 ppb), orange (≥30 ppb)
-* Hourly forecast processing from S3
-* S3 storage for predictions and visualizations
-* 4 visualization types: feature importance, confusion matrix, model comparison, timeline
-* Production/test mode configuration (fail-fast, no silent fallbacks)
-* Dagster pipeline with 11 assets
-* Model performance: 61.3% orange detection rate, 5.4% false alarm rate
+* Variant predictions: `xgboost_base`, `xgboost_smote`, `random_forest` + ensemble
+* 5 visualization types: feature importance, confusion matrix, model comparison, timeline, cross-correlation
+* Slack alerts for yellow/orange predictions
+* S3 export (timestamped + latest paths)
+* Daily validation report (predictions vs actuals)
 
-### 🔄 In Progress
-* Automated alerting system
-* Performance monitoring dashboard
+**Daily Analysis Pipeline** (`daily_analysis_job`, every 6h)
+* Multi-station model loading (3 stations × 3 models = 9 models from S3)
+* Source attribution — last 7 days wind bearing + Gaussian plume analysis
+* 48h forward predictions per station (IB_CIVIC_CTR, NESTOR__BES, SAN_YSIDRO)
+* 5-row dashboard PNG visualization
+* JSON summary export for web dashboards
 
-### ✅ Recently Completed
-* **Monthly model retraining workflow with partitioning** (Jan 2026)
-  * Implemented MonthlyPartitionsDefinition starting from 2025-09-01
-  * Added partitions to all 5 assets in h2s_training_data group:
-    - monthly_training_data (cumulative data filtering)
-    - relabeled_training_data (new thresholds: Yellow 5-30 ppb, Orange ≥30 ppb)
-    - data_quality_report (validation checks)
-    - training_data (80/20 time-based split)
-    - validation_data (20% held-out set)
-  * Enables backfilling historical training runs
-  * Cumulative partitions: each month trains on all data from start → end of that month
-  * S3 path constants centralized in h2s/constants.py (MODEL_PATH, TRAINING_PATH, ARCHIVE_PATH)
+**Multi-Horizon Forecast Pipeline** (`mh_forecast_job`, every 6h, currently STOPPED)
+* 4 time horizons: 0-6h, 6-24h, 24-48h, 48-72h
+* Per-horizon honest feature sets (fresh vs stale lags)
+* Regression + binary classification (5 ppb and 10 ppb thresholds) per horizon per station
+* Dashboard viz + CSV/JSON export
+* Slack alerts
+
+**Model Training**
+* Monthly retraining with `MonthlyPartitionsDefinition` (cumulative data)
+* Multi-station training partitioned by station (3 partitions)
+* Multi-horizon training partitioned by station (currently STOPPED — pending validation)
+* Model seeding workflow (`seed_models_job`) for initial S3 population
+
+**Infrastructure**
+* Dagster orchestration with schedules, jobs, sensors
+* Slack `run_failure` sensor for pipeline errors
+* S3/MinIO storage for all artifacts
+* `ENV_LABEL` environment variable for dev/prod distinction
+
+---
+
+### 🔄 In Progress / Needs Validation
+* **Multi-horizon pipeline activation** — models trained and deployed to S3, schedules currently STOPPED pending live validation
+* **Dashboard accuracy** — daily_analysis_job and mh_forecast_job both run every 6h; confirm if daily_analysis should be daily instead
+
+---
 
 ### 📋 Future Roadmap
-* Multi-site support (expand beyond NESTOR-BES)
-* Enhanced threshold models (separate predictions for >5 ppb and >30 ppb)
-* Public-facing dashboard (Netlify deployment)
+* Public-facing dashboard (Netlify deployment — static site reading from S3 `latest/` paths)
 * SMS/webhook alert delivery
-* Automated model A/B testing
 * Historical performance API
+* Automated model A/B testing
 * Real-time streaming predictions
 
 ---
@@ -48,16 +64,68 @@ This system uses machine learning prediction models to forecast hydrogen sulfide
 * Use dagster assets, resources, schedules and sensors
 * Existing resources:
   * `projects/h2s/src/h2s/resources/minio.py` - S3/MinIO client
+  * `projects/h2s/src/h2s/resources/slack.py` - Slack alert resource
 * Utility class to store data in S3:
   * `projects/h2s/src/h2s/utils/store_assets.py`
 * Environment configuration:
-  * `.env` - S3 credentials and configuration
+  * `.env` - S3 credentials, Slack token, and configuration
 
-### Scheduling
-* Hourly prediction runs (aligned with forecast updates)
-* Monthly model retraining (1st of each month)
-* Daily validation runs (compare predictions vs actuals)
-* Weekly performance report generation
+### Schedules (all in `h2s_schedules.py`)
+| Schedule | Cron | Status |
+|---|---|---|
+| `forecast_prediction_schedule` | Every 6h | RUNNING |
+| `daily_analysis_schedule` | Every 6h | RUNNING |
+| `daily_validation_schedule` | 8 AM UTC daily | RUNNING |
+| `monthly_data_schedule` | 2 AM on 1st of month | RUNNING |
+| `monthly_model_training_schedule` | 4 AM on 1st of month | RUNNING |
+| `multi_station_training_schedule` | 2 AM on 1st of month | RUNNING |
+| `mh_training_schedule` | 3 AM on 1st of month | STOPPED |
+| `mh_forecast_schedule` | Every 6h | STOPPED |
+
+---
+
+## Pipeline Architecture
+
+### Jobs and Asset Dependency Chains
+
+**`forecast_prediction_job`** (6-hourly)
+```
+h2s_model_artifacts → preprocessed_features → h2s_predictions → h2s_alerts → slack_alerts
+                                                               → h2s_variant_predictions → h2s_ensemble_predictions
+                                                               → predictions_export
+h2s_model_artifacts → feature_importance_viz
+                    → confusion_matrix_viz
+                    → model_comparison_viz
+                    → prediction_timeline_viz
+                    → cross_correlation_viz
+```
+
+**`daily_analysis_job`** (6-hourly)
+```
+multi_station_model_artifacts → source_attribution → daily_station_forecasts → daily_dashboard_viz
+                                                                              → daily_summary_json
+```
+
+**`mh_forecast_job`** (6-hourly, STOPPED)
+```
+mh_model_artifacts → mh_observation_state → mh_forecasts → mh_dashboard_viz
+                                                          → mh_summary_export
+                                                          → mh_slack_alerts
+```
+
+**`multi_station_training_job`** (monthly, partitioned by station)
+```
+multi_station_training_data → per_station_trained_models → station_training_report
+```
+Then manually: `station_deployment_job` → uploads to S3
+
+**`mh_training_job`** (monthly, partitioned by station, STOPPED)
+```
+mh_training_data → mh_trained_models → mh_training_report
+```
+Then manually: `mh_deployment_job` → uploads to S3
+
+**`monthly_data_extraction_job`** + **`monthly_model_training_job`** (legacy single-model pipeline, kept for reference)
 
 ---
 
@@ -87,400 +155,146 @@ Retrieve data using the MinIO resource (named `s3`) and `store_assets` methods.
   * **Hydrological:** Flow (m^3/s)--Border, tide_height, tidal_state
 
 ### Model Storage (S3)
-* **Current production model:**
-  * Model: `{S3_BUCKET}/tijuana/forecast/models/nestor_xgboost_weighted_model.json` (4.2 MB)
-  * Preprocessing: `{S3_BUCKET}/tijuana/forecast/models/nestor_preprocessing_info.json` (948 bytes)
-* **Latest model symlink:**
-  * `{S3_BUCKET}/latest/tijuana/forecast/models/` (points to current production)
-* **Archived models:**
-  * `{S3_BUCKET}/tijuana/forecast/models/archive/{YYYY_MM}/`
-  * Includes: model files, preprocessing metadata, training metrics, validation results
+```
+tijuana/forecast/models/
+  nestor_xgboost_weighted_model.json    # production hourly model
+  nestor_preprocessing_info.json        # 43-feature preprocessing metadata
+  deployment_metadata.json              # deployment provenance
+  xgboost_base/model.json               # variant
+  xgboost_smote/model.json              # variant
+  random_forest/model.joblib            # variant
+  stations/
+    {station_key}/                      # IB_CIVIC_CTR, NESTOR__BES, SAN_YSIDRO
+      clf_5ppb.pkl                      # binary classifier (>5 ppb)
+      clf_10ppb.pkl                     # binary classifier (>10 ppb)
+      regression.pkl                    # regression
+  multihorizon/
+    {horizon}/                          # 0_6h, 6_24h, 24_48h, 48_72h
+      {station_key}/
+        clf_5ppb.pkl
+        clf_10ppb.pkl
+        regression.pkl
+    {station_key}/horizon_features.json
+```
 
 ### Output Storage (S3)
 * **Predictions (timestamped):**
   * `{S3_BUCKET}/tijuana/forecast/output/{YYYY-MM-DD_HH}/h2s_predictions.{csv,json,metadata.json}`
-  * **Output columns:** All input features plus:
-    * predicted_category (green/yellow/orange)
-    * probability_green (0-1)
-    * probability_yellow (0-1)
-    * probability_orange (0-1)
-    * confidence (max probability, 0-1)
-    * alert (boolean: True for yellow/orange)
 * **Predictions (latest):**
   * `{S3_BUCKET}/latest/tijuana/forecast_data/h2s_predictions.{csv,json}`
-  * Same column structure as timestamped predictions
-* **Visualizations (timestamped):**
-  * `{S3_BUCKET}/tijuana/forecast/output/visualizations/{YYYY-MM-DD}/`
-  * Files: feature_importance.png, confusion_matrix.png, model_comparison.png, prediction_timeline.png
-* **Visualizations (latest):**
-  * `{S3_BUCKET}/latest/tijuana/forecast_data/visualizations/`
-* **Performance metrics:**
-  * `{S3_BUCKET}/tijuana/forecast/validation/{YYYY_MM}/`
-  * Monthly validation reports, confusion matrices, performance trends
+* **Visualizations:**
+  * `{S3_BUCKET}/tijuana/forecast/output/visualizations/{YYYY-MM-DD}/` (timestamped)
+  * `{S3_BUCKET}/latest/tijuana/forecast_data/visualizations/` (latest)
+* **Daily analysis:**
+  * `{S3_BUCKET}/latest/tijuana/forecast_data/daily_summary.json`
+* **Multi-horizon forecast:**
+  * `{S3_BUCKET}/tijuana/forecast/multihorizon/{date}/forecast_mh.csv`
+  * `{S3_BUCKET}/latest/tijuana/forecast_data/multihorizon/` (latest)
 
 ---
 
 ## Modeling
 
-### Current Model
-* **Site:** NESTOR-BES (code should support multi-site selection for future)
-* **Algorithm:** XGBoost Classifier (gradient boosted decision trees)
-* **Features (20 total):**
-  * Weather: temperature_2m, wind_speed_10m, wind_direction_10m, relative_humidity_2m, surface_pressure, precipitation, cloud_cover, dewpoint_2m
-  * Tidal: flow_rate_cms, tide_height, tidal_state
-  * Temporal: hour_sin, hour_cos, day_of_week, month
-  * Derived: wind_direction_sin, wind_direction_cos, wind_temp_interaction, humidity_temp_interaction
-  * Encoded: wind_direction_cat_encoded, tidal_state_encoded
+### Current Models
 
-### H2S Categories (Current Implementation)
-* **Green:** H2S < 5 ppb (safe)
-* **Yellow:** 5 ≤ H2S < 30 ppb (caution)
-* **Orange:** H2S ≥ 30 ppb (alert)
+**Hourly Forecast Model (NESTOR-BES)**
+* **Algorithm:** XGBoost Classifier
+* **Features (43 total):** Weather, wind rolling averages/gusts, cyclical encodings, flow derivatives, H2S lags, SBIWTP features, stability/regime features
+* **Classes:** green (<5 ppb), yellow (5-30 ppb), orange (≥30 ppb)
+* **Performance:** 61.3% orange detection, 5.4% false alarm rate
 
-### Future Model Enhancements
-Expand predictions to test if we can improve performance:
+**Per-Station Models (3 stations)**
+* **Stations:** IB_CIVIC_CTR, NESTOR__BES, SAN_YSIDRO
+* **Tasks per station:** regression, clf_5ppb (binary >5 ppb), clf_10ppb (binary >10 ppb)
+* **Source:** Trained via `multi_station_training_job`, deployed via `station_deployment_job`
 
-**Single Category Models:**
-* Binary yellow threshold: >5 ppb
-* Binary orange threshold: >30 ppb (current)
-
-**Multi-Category Models:**
-* 3-class (current): green (0-5), yellow (5-30), orange (≥30)
-* Fine-grained: 5 ppb increments
+**Multi-Horizon Models (3 stations × 4 horizons × 3 tasks = 36 models)**
+* **Horizons:** 0-6h, 6-24h, 24-48h, 48-72h
+* **Honest feature sets:** each horizon only uses lags/stats available at that lead time
+* **Ensemble:** `EnsembleRegressor` / `EnsembleClassifier` (importable from `multihorizon_trainer.py`)
+* **Status:** Trained and deployed to S3; forecast pipeline currently STOPPED pending validation
 
 ---
 
-## Model Management & Versioning
+## Environment Configuration
 
-### Model Artifacts
-* **Naming convention:** `nestor_xgboost_{YYYY_MM}_v{version}.json`
-* **Metadata includes:**
-  * Training date and data range
-  * Performance metrics (balanced accuracy, precision, recall per class)
-  * Feature list and importance scores
-  * Hyperparameters
-  * Training/validation split details
+Create `.env` file (see `env.example`):
 
-### Deployment Strategy
-* **Champion/Challenger approach:**
-  * Keep previous model as fallback
-  * A/B testing for new models (10% traffic initially)
-  * Gradual rollout based on performance
-* **Rollback capability:**
-  * Automatic rollback if new model underperforms
-  * Manual rollback via configuration change
+```bash
+# S3/MinIO Configuration (required for Dagster pipeline)
+S3_BUCKET=test
+S3_ADDRESS=oss.resilientservice.mooo.com
+S3_PORT=443
+S3_USE_SSL=true
+S3_ACCESS_KEY=your_access_key
+S3_SECRET_KEY=your_secret_key
 
-### Model Retraining
-**Triggers:**
-* Monthly scheduled retraining (1st of each month)
-* Performance degradation detection (accuracy drops >5%)
-* Significant data drift detected
-* Manual trigger for emergency updates
+# Optional: Latest path configuration
+PUBLIC_BUCKET=test
+LATEST_BASEPATH=latest/
 
-**Process (with Partitioning):**
-1. **Data Extraction:** Load cumulative training data using MonthlyPartitionsDefinition
-   - Each partition includes all data from start → end of that month
-   - Enables backfilling historical training runs
-   - Example: `dg launch --assets monthly_training_data --partition 2025-09-01`
-2. **Relabeling:** Apply current H2S thresholds (Yellow: 5-30 ppb, Orange: ≥30 ppb)
-3. **Quality Validation:** Check data completeness, missing values, class balance
-4. **Train/Val Split:** Time-based 80/20 split on cumulative data
-5. **Model Training:** XGBoost with 5-fold time-series cross-validation
-6. **Validation:** Compare new model vs current production model on held-out set
-7. **Quality Gates:** Automated checks (balanced accuracy, orange recall/precision)
-8. **Manual Approval:** Human review before deployment
-9. **Archive & Deploy:** Backup current model, deploy new model to production
+# Slack alerting
+SLACK_TOKEN=xoxb-...
+SLACK_CHANNEL=#h2s-alerts
+SLACK_CHANNEL_FAILURES=#h2s-failures
 
-**Partition Backfilling:**
-* Retrain historical models: `dg launch --assets training_data --partition-range 2025-09-01...2025-12-01`
-* Each partition trains on progressively more data (cumulative approach)
-* Stored in S3 at `tijuana/forecast/models/training/{YYYY_MM}/`
+# Deployment context
+DAGSTER_DEPLOYMENT=local     # or production
+ENV_LABEL=DEV                # shown in dashboard titles
+SCHED_HOSTNAME=sched         # for Dagster UI URL in failure alerts
+HOST=local
+```
+
+**Dagster uses `EnvVar` for S3 and Slack credentials** - loaded at runtime, not at definitions.py import time.
 
 ---
 
-## Concept & Workflow
+## Operations & Runbooks
 
-### Real-Time Forecasting
-1. Hourly weather forecast updated in S3
-2. Dagster sensor detects new forecast data
-3. Pipeline materializes predictions
-4. Hazardous predictions (yellow/orange) trigger alerts
-5. Results stored in S3 with visualizations
+### Initial Deployment
 
-### Monthly Validation
-1. At end of month, rerun predictions using actual environmental data (modeldata_h2s.csv)
-2. Compare predictions vs actual H2S measurements
-3. Generate confusion matrix and performance statistics
-4. Update model performance dashboard
-5. Trigger retraining if performance degraded
+```bash
+cd projects/h2s
+uv sync
+cp .env.example .env   # fill in credentials
 
-### Historical Validation
-For each monthly model:
-* **September 2025 model:** Validate on October 2025 - Present
-* **December 2025 model:** Validate on January 2026 - Present
-* Track performance decay over time
-* Identify seasonal patterns in model accuracy
+# 1. Seed S3 with starter models
+uv run dg launch --job seed_models_job
 
----
+# 2. Run hourly forecast pipeline
+uv run dg launch --job forecast_prediction_job
 
-## Data Quality & Monitoring
+# 3. Run daily analysis
+uv run dg launch --job daily_analysis_job
+```
 
-### Input Data Validation
-* **Schema validation:**
-  * Check for required columns before prediction
-  * Validate data types and ranges
-  * Ensure timestamp format consistency
-* **Completeness checks:**
-  * Flag missing sensor readings
-  * Detect gaps in time series (>2 hours)
-  * Alert on incomplete forecasts
-* **Anomaly detection:**
-  * Statistical outliers in environmental variables
-  * Physically impossible values (temp >60°C, flow <0)
-  * Sudden jumps inconsistent with history
+### Rebuilding Per-Station Models
 
-### Data Freshness Monitoring
-* **Alerts triggered when:**
-  * S3 forecast data is stale (>2 hours old)
-  * modeldata_h2s.csv not updated in >4 hours
-  * Missing data for current hour
-* **Monitoring dashboard shows:**
-  * Last update timestamp for each data source
-  * Data completeness percentage (24h rolling)
-  * Source availability status
+```bash
+# 1. Train (partitioned by station)
+uv run dg launch --job multi_station_training_job
 
-### Feature Drift Monitoring
-* **Track over time:**
-  * Distribution of input features (mean, std, quantiles)
-  * Correlation structure between features
-  * Occurrence rates of rare conditions
-* **Alert on significant shifts:**
-  * KL divergence >0.1 from training distribution
-  * New feature value ranges not seen in training
-  * Changing correlations between predictors
+# 2. Review station_training_report in Dagster UI
 
----
+# 3. Deploy to S3 (this IS the approval gate)
+uv run dg launch --job station_deployment_job
+```
 
-## Alerting & Notifications
+### Activating Multi-Horizon Pipeline
 
-### Real-Time Alerts
-**Trigger conditions:**
-* Orange level predictions (H2S ≥30 ppb)
-* Critical: >30 ppb sustained for 2+ consecutive hours
-* Yellow alerts if confidence >80%
+```bash
+# 1. Verify models exist in S3 (should already be there from training)
+# 2. Test forecast manually
+uv run dg launch --job mh_forecast_job
 
-**Alert content:**
-* Predicted H2S level and category
-* Confidence score / probability distribution
-* Contributing factors (e.g., "High flow + low wind")
-* Forecast duration: next 1hr, 3hr, 6hr
-* Map with affected areas
-* Recommended actions
+# 3. If results look good, enable schedules in Dagster UI:
+#    - mh_forecast_schedule (STOPPED → RUNNING)
+#    - mh_training_schedule (STOPPED → RUNNING)
+```
 
-**Delivery channels:**
-* Email to registered recipients
-* SMS for critical alerts (>30 ppb)
-* Webhook to external monitoring systems
-* Public dashboard notification banner
+### Re-executing Failed daily_analysis_job
 
-**Alert recipients:**
-* Environmental health officials (County)
-* Site operators at NESTOR-BES
-* Emergency response coordinators
-* Public dashboard (optional, for yellow/orange only)
-
-### System Alerts
-* Model prediction failures
-* Data source unavailability
-* Pipeline execution errors
-* Performance degradation detected
-
----
-
-## Operations & Monitoring
-
-### SLAs (Service Level Agreements)
-* **Prediction latency:** <5 minutes from forecast availability to prediction completion
-* **Data freshness:** Forecasts <1 hour old, actuals <2 hours old
-* **System uptime:** 99.5% (excluding scheduled maintenance)
-* **Alert delivery:** <2 minutes from prediction to notification
-
-### Monitoring Dashboards
-**Real-time metrics:**
-* Current prediction status and latest forecast
-* Prediction counts by category (green/yellow/orange) - 24h rolling
-* Alert delivery success rate
-* Data pipeline health (asset materialization status)
-
-**Performance metrics:**
-* Model accuracy trends (monthly validation)
-* Precision/Recall by category
-* Confusion matrix (updated monthly)
-* Feature importance stability
-
-**System health:**
-* Asset execution success rate
-* S3 sync status and latency
-* Error rates by component
-* Resource utilization (CPU, memory, storage)
-
-### Logging
-* **Prediction logs:** All predictions logged to S3 with full inputs and outputs
-* **Asset execution logs:** Dagster captures all asset run details
-* **Alert logs:** Delivery confirmations, failures, recipient acknowledgments
-* **Error logs:** Structured logging with context for debugging
-* **Retention:** 90 days in active storage, 1 year in archive
-
----
-
-## Testing & Quality Assurance
-
-### Unit Tests
-* **Predictor class:**
-  * `test_predictor.py` - preprocessing, prediction, thresholds
-  * Model loading from S3 and local
-  * Feature engineering correctness
-* **Visualization functions:**
-  * `test_visualizations.py` - plot generation, BytesIO output
-  * Merge conflict handling
-  * Empty data edge cases
-* **S3 integration:**
-  * `test_s3_integration.py` - upload, download, streaming (with mocks)
-
-### Integration Tests
-* **Full pipeline execution:**
-  * `test_h2s_pipeline.py` - asset dependencies, data flow
-  * Test with local data: `use_local_data=True` for CI/CD
-  * Validate outputs in expected S3 paths
-* **End-to-end scenarios:**
-  * Forecast ingestion → prediction → visualization → export
-  * Historical validation workflow
-
-### Performance Tests
-* **Model inference:**
-  * Latency: <1 second per prediction
-  * Batch throughput: 4000+ samples in <10 seconds
-* **Pipeline execution:**
-  * Full materialization: <3 minutes
-  * Memory usage: <2 GB peak
-
-### Validation Tests
-* **Monthly model performance:**
-  * Automated validation against actual data
-  * Confusion matrix generation
-  * Precision/Recall tracking by category
-  * Statistical significance testing
-* **Regression tests:**
-  * Ensure predictions remain consistent for fixed inputs
-  * No degradation in test set performance
-
----
-
-## Error Handling & Recovery
-
-### Data Source Failures
-* **S3 unavailable:**
-  * Production mode: FAIL immediately (no fallback)
-  * Alert operator with clear error message
-  * Provide instructions for test mode if needed
-* **Forecast data missing:**
-  * Log error with timestamp and expected path
-  * Skip prediction for current hour
-  * Alert if consecutive failures (>2 hours)
-* **Corrupt or invalid data:**
-  * Log problematic data for investigation
-  * Attempt validation and cleanup
-  * Skip current run, wait for next scheduled execution
-
-### Model Failures
-* **Model file missing/corrupt:**
-  * Alert operator immediately
-  * Attempt to use previous model version from archive
-  * Prevent predictions until resolved
-* **Prediction errors (runtime):**
-  * Log full input data causing error
-  * Continue with next batch if batch processing
-  * Alert after 3 consecutive failures
-
-### Recovery Procedures
-* **Automatic retry:**
-  * Exponential backoff (1min, 2min, 5min)
-  * Maximum 3 retry attempts per run
-  * Different retry strategies for transient vs persistent errors
-* **Manual intervention:**
-  * Documented runbook for common failures
-  * Clear escalation path for critical issues
-  * Access to logs and debugging tools
-* **Backfill capability:**
-  * Script to rerun predictions for missed time periods
-  * Validates against actual data if available
-  * Stores backfilled results with metadata flag
-
----
-
-## Public Dashboard (Netlify Deployment)
-
-### Features
-* **Current status:**
-  * Live H2S forecast for next 24 hours
-  * Current category (green/yellow/orange) with color coding
-  * Last update timestamp
-* **Historical view:**
-  * Predictions vs actuals comparison chart
-  * Accuracy metrics over time
-  * Filter by date range and category
-* **Model comparison:**
-  * Monthly model performance side-by-side
-  * Interactive selection of model version
-  * Visualizations for each model (confusion matrix, feature importance)
-* **Environmental context:**
-  * Weather conditions (temp, wind, humidity)
-  * Tidal state and flow rates
-  * Interactive timeline with all variables
-* **Data access:**
-  * Downloadable prediction data (CSV/JSON)
-  * API endpoint for programmatic access (future)
-  * Historical archive access
-
-### Technology Stack
-* **Frontend:**
-  * Static site generator: Next.js or Gatsby
-  * UI framework: React with Tailwind CSS
-  * Charts: D3.js or Recharts
-* **Data source:**
-  * Fetch from S3 `latest/` paths
-  * Client-side data processing
-  * No backend required (fully static)
-* **Deployment:**
-  * Netlify hosting with CDN
-  * Auto-rebuild on new predictions (webhook trigger from Dagster)
-  * Branch previews for development
-
-### User Experience
-* **Mobile-responsive design**
-  * Touch-friendly interface
-  * Optimized for phones and tablets
-* **Color-coded alerts:**
-  * Green: Safe, subtle background
-  * Yellow: Caution, amber highlights
-  * Orange: Alert, prominent warning
-* **Accessibility:**
-  * WCAG 2.1 AA compliance
-  * Screen reader support
-  * Keyboard navigation
-* **Performance:**
-  * Initial load <2 seconds
-  * Interactive within 3 seconds
-  * Lazy loading for historical data
-
-### Visualization Details
-* **Actual H2S levels:** Line chart with measured values
-* **Prediction indicators:**
-  * Green: No marker (baseline)
-  * Yellow: Dot at 15 ppb threshold
-  * Orange: Dot at 30 ppb threshold
-* **Confidence bands:** Shaded area showing prediction uncertainty
-* **Environmental overlay:** Toggle to show wind, temp, flow on same chart
+Use **"Re-execute all"** in the Dagster UI — not "Re-execute failed steps". Re-executing only failed steps reads `multi_station_model_artifacts` from stale IO cache. Re-executing all steps reloads models fresh from S3.
 
 ---
 
@@ -490,86 +304,10 @@ For each monthly model:
 * **Python:** 3.10 or higher
 * **Dagster:** 1.x (latest stable)
 * **XGBoost:** 2.x
-* **Key libraries:**
-  * pandas, numpy - data processing
-  * matplotlib, seaborn - visualization
-  * minio - S3 client
-  * scikit-learn - metrics and preprocessing
-
-### Data Sources
-* **S3/MinIO storage:**
-  * Endpoint: oss.resilientservice.mooo.com
-  * Bucket: test (or configured in .env)
-* **OpenMeteo weather forecast API:**
-  * Hourly forecasts for Tijuana region
-  * Free tier with rate limiting
-* **Tidal data stream:**
-  * NOAA tidal predictions
-  * Updated daily
-* **Flow measurements:**
-  * Border monitoring station
-  * Real-time measurements from USGS/IBWC
+* **Key libraries:** pandas, numpy, matplotlib, seaborn, minio, scikit-learn, dagster-slack
 
 ### External Services
-* **Email/SMS provider:** (To be configured)
-  * SendGrid, Twilio, or AWS SNS
-  * API keys in .env
-* **Netlify:**
-  * Dashboard hosting
-  * Build hooks for auto-deployment
-* **Monitoring (future):**
-  * Datadog or Grafana for metrics
-  * Sentry for error tracking
-
----
-
-## Configuration Files
-
-### Environment Variables (.env)
-```bash
-# S3/MinIO Configuration
-S3_BUCKET=test
-S3_ADDRESS=oss.resilientservice.mooo.com
-S3_PORT=443
-S3_USE_SSL=true
-S3_ACCESS_KEY=your_access_key
-S3_SECRET_KEY=your_secret_key
-
-# Optional paths
-PUBLIC_BUCKET=test
-LATEST_BASEPATH=latest/
-
-# Alert configuration (future)
-ALERT_EMAIL_RECIPIENTS=alerts@example.com
-ALERT_SMS_RECIPIENTS=+1234567890
-SMTP_SERVER=smtp.example.com
-```
-
-### Dagster Configuration
-* **dagster.yaml:** Resource and execution configuration
-* **config_local_test.yaml:** Test mode configuration for local development
-* **Asset configs:** Per-asset settings for materialization
-
----
-
-## Future Enhancements
-
-### Short Term (3 months)
-* Complete monthly retraining automation
-* Implement basic email alerting
-* Add performance monitoring dashboard
-* Expand test coverage to >80%
-
-### Medium Term (6 months)
-* Public dashboard deployment (Netlify)
-* SMS alert integration
-* Multi-site model support (pilot 2nd site)
-* API for external integrations
-
-### Long Term (12 months)
-* Real-time streaming predictions (sub-minute latency)
-* Advanced ensemble models
-* Explainable AI features (SHAP values)
-* Mobile app with push notifications
-* Integration with regional air quality systems
-* Automated model optimization (AutoML)
+* **S3/MinIO:** oss.resilientservice.mooo.com
+* **OpenMeteo:** Hourly weather forecast API
+* **Slack:** Alert delivery (two channels: alerts + failures)
+* **Netlify:** (Future) Public dashboard hosting
