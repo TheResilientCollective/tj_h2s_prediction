@@ -63,6 +63,7 @@ def defs():
         cross_correlation_viz,
         predictions_export,
         daily_validation_report,
+        monthly_performance_viz,
     )
 
     # Import multi-station training pipeline assets
@@ -123,6 +124,7 @@ def defs():
         forecast_prediction_job,
         forecast_prediction_schedule,
         daily_validation_job,
+        daily_validation_metrics_job,
         daily_validation_schedule,
         multi_station_training_schedule,
         daily_analysis_schedule,
@@ -148,6 +150,7 @@ def defs():
             cross_correlation_viz,
             predictions_export,
             daily_validation_report,
+            monthly_performance_viz,
             # Multi-Station Training Pipeline Assets
             multi_station_training_data,
             per_station_trained_models,
@@ -178,6 +181,7 @@ def defs():
             # Prediction jobs
             forecast_prediction_job,
             daily_validation_job,
+            daily_validation_metrics_job,
             # Training jobs (old single-model pipeline — kept for reference)
             monthly_data_extraction_job,
             monthly_model_training_job,
