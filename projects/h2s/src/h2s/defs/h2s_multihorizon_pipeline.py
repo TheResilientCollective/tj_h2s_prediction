@@ -9,6 +9,7 @@ import json
 import os
 import pickle
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import dagster as dg
 import numpy as np
@@ -324,10 +325,13 @@ def mh_dashboard_viz(
     fig = plt.figure(figsize=(24, 20))
     fig.set_facecolor('#0f0f1a')
     gs = fig.add_gridspec(4, max(len(station_list), 1), hspace=0.35, wspace=0.25)
+    _pacific = ZoneInfo("America/Los_Angeles")
+    _t_min_pt = results["time"].min().astimezone(_pacific)
+    _t_max_pt = results["time"].max().astimezone(_pacific)
     fig.suptitle(
         f'H\u2082S Multi-Horizon Forecast\n'
-        f'{results["time"].min().strftime("%Y-%m-%d %H:%M")} \u2014 '
-        f'{results["time"].max().strftime("%Y-%m-%d %H:%M")} UTC',
+        f'{_t_min_pt.strftime("%Y-%m-%d %H:%M")} \u2014 '
+        f'{_t_max_pt.strftime("%Y-%m-%d %H:%M")} PT',
         fontsize=16, fontweight='bold', color='white', y=0.99
     )
 
@@ -603,11 +607,12 @@ def mh_slack_alerts(
             },
         })
 
-    t_min = mh_forecasts['time'].min()
-    t_max = mh_forecasts['time'].max()
+    pacific = ZoneInfo("America/Los_Angeles")
+    t_min = mh_forecasts['time'].min().astimezone(pacific).strftime("%-I %p %-m/%-d")
+    t_max = mh_forecasts['time'].max().astimezone(pacific).strftime("%-I %p %-m/%-d")
     blocks.append({
         "type": "context",
-        "elements": [{"type": "mrkdwn", "text": f"Forecast window: {t_min} — {t_max}"}],
+        "elements": [{"type": "mrkdwn", "text": f"Forecast window: {t_min} → {t_max} PT"}],
     })
 
     slack = context.resources.slack
