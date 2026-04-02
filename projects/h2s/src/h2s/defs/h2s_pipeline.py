@@ -8,6 +8,7 @@ and exports results to S3 with visualizations.
 import json
 from datetime import datetime, timedelta
 from io import BytesIO
+from zoneinfo import ZoneInfo
 
 import dagster as dg
 import pandas as pd
@@ -221,12 +222,13 @@ def slack_alerts(
     yellow_count = int((h2s_alerts['predicted_category'] == 'yellow').sum())
     total = len(h2s_alerts)
 
-    # Build time range
+    # Build time range in Pacific time
     time_col = 'time' if 'time' in h2s_alerts.columns else None
     if time_col:
-        t_min = h2s_alerts[time_col].min()
-        t_max = h2s_alerts[time_col].max()
-        time_range = f"{t_min} — {t_max}"
+        pacific = ZoneInfo("America/Los_Angeles")
+        t_min = h2s_alerts[time_col].min().astimezone(pacific).strftime("%-I %p %-m/%-d")
+        t_max = h2s_alerts[time_col].max().astimezone(pacific).strftime("%-I %p %-m/%-d")
+        time_range = f"{t_min} → {t_max} PT"
     else:
         time_range = "unknown"
 
