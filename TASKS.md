@@ -1,6 +1,6 @@
 # H2S Forecasting System - Task Tracker
 
-**Last Updated:** 2026-01-27
+**Last Updated:** 2026-04-02
 **Source:** `system_plan.md` - Keep synchronized when plan changes
 
 ## Legend
@@ -201,141 +201,237 @@ tijuana/forecast/
 
 ---
 
-## 🔄 In Progress
+### Multi-Station Training & Daily Analysis Pipeline ✅
+**Status:** COMPLETED (Mar 2026)
 
-### Epic 2: Automated Alerting System 🔴
-**Effort:** Medium (2-3 weeks)
-**Dependencies:** None
-**Reference:** [Alerting & Notifications](system_plan.md#alerting--notifications)
-
-#### Phase 1: Email Configuration
-- [ ] **Set up email infrastructure**
-  - [ ] Add SMTP settings to .env file
-    ```bash
-    ALERT_EMAIL_RECIPIENTS=alerts@example.com,ops@example.com
-    SMTP_SERVER=smtp.gmail.com
-    SMTP_PORT=587
-    SMTP_USERNAME=your-email@gmail.com
-    SMTP_PASSWORD=app-specific-password
-    ```
-  - [ ] Choose email provider (SendGrid, Gmail SMTP, or AWS SES)
-  - [ ] Test email connectivity
-
-- [ ] **Create email templates**
-  - [ ] Design HTML email template with H2S branding
-  - [ ] Add sections: prediction level, confidence, contributing factors
-  - [ ] Include forecast duration (1hr, 3hr, 6hr)
-  - [ ] Add recommended actions section
-  - [ ] Create plain-text fallback version
-
-#### Phase 2: Alert Detection Logic
-- [ ] **Create alert detection asset**
-  - [ ] Add `alert_detection` asset (depends on h2s_predictions)
-  - [ ] Implement trigger conditions:
-    - [ ] Orange predictions (H2S ≥15 ppb)
-    - [ ] Critical sustained (>30 ppb for 2+ consecutive hours)
-    - [ ] Yellow predictions with high confidence (>80%)
-  - [ ] Add cooldown logic (no duplicate alerts within 1 hour)
-  - [ ] Track alert history in local state or S3
-
-- [ ] **Add contributing factors analysis**
-  - [ ] Identify top 3 environmental factors from feature importance
-  - [ ] Format as human-readable text (e.g., "High flow + low wind speed")
-  - [ ] Include current values and thresholds
-
-#### Phase 3: Alert Delivery & Tracking
-- [ ] **Implement email delivery**
-  - [ ] Create email client with error handling
-  - [ ] Send alerts to recipients from .env
-  - [ ] Add retry logic (3 attempts with exponential backoff)
-  - [ ] Log delivery success/failure
-
-- [ ] **Add delivery tracking**
-  - [ ] Log all alerts to S3: `tijuana/forecast/alerts/{YYYY-MM-DD}/`
-  - [ ] Include: timestamp, prediction data, recipients, delivery status
-  - [ ] Create alert summary asset (daily digest)
-
-#### Phase 4: Testing & Monitoring
-- [ ] **Test alert system**
-  - [ ] Create test alert trigger (manual button in Dagster UI)
-  - [ ] Verify email formatting and delivery
-  - [ ] Test cooldown logic
-  - [ ] Confirm no duplicate alerts
-
-- [ ] **Add monitoring**
-  - [ ] Track alert delivery success rate
-  - [ ] Monitor alert frequency (alerts/day)
-  - [ ] Create dashboard for alert history
-
-**Acceptance Criteria:**
-- [ ] Emails sent for orange/critical predictions
-- [ ] Alert content includes prediction level, confidence, and contributing factors
-- [ ] Delivery success rate >95%
-- [ ] No duplicate alerts within 1 hour for same prediction
-- [ ] All alerts logged to S3
+- [x] Per-station models: 3 stations × 3 tasks = 9 models (clf_5ppb, clf_10ppb, regression)
+- [x] `multi_station_training_job` partitioned by station (IB_CIVIC_CTR, NESTOR__BES, SAN_YSIDRO)
+- [x] `station_deployment_job` — uploads approved models to S3
+- [x] `daily_analysis_job` — source attribution (wind bearing + Gaussian plume), 48h station forecasts, 5-row dashboard PNG, JSON summary
+- [x] Model seeding workflow (`seed_models_job`)
 
 ---
 
-### Epic 3: Performance Monitoring Dashboard 🔴
-**Effort:** Medium (2-3 weeks)
-**Dependencies:** None
-**Reference:** [Operations & Monitoring](system_plan.md#operations--monitoring)
+### Epic 2: Automated Alerting System ✅
+**Status:** COMPLETED (Slack) — Email/SMS remain future work
 
-#### Phase 1: Metrics Collection
-- [ ] **Add metrics tracking assets**
-  - [ ] Create `daily_metrics` asset
-  - [ ] Track prediction counts by category (green/yellow/orange)
-  - [ ] Calculate accuracy metrics (requires actual H2S data)
-  - [ ] Monitor data pipeline health (asset success/failure rates)
-  - [ ] Store metrics to S3: `tijuana/forecast/metrics/{YYYY-MM-DD}/`
+**Implemented:**
+- [x] `slack_alerts` asset in hourly forecast pipeline
+- [x] `mh_slack_alerts` asset in multi-horizon pipeline
+- [x] `SlackAlertResource` (`resources/slack.py`)
+- [x] `slack_on_run_failure` sensor for pipeline errors
+- [x] Two Slack channels: `SLACK_CHANNEL` (alerts) + `SLACK_CHANNEL_FAILURES` (pipeline errors)
+- [x] Pacific time display in alert messages
 
-- [ ] **Track model performance**
-  - [ ] Compare predictions vs actuals (when available)
-  - [ ] Calculate daily precision/recall by category
-  - [ ] Track confusion matrix updates
-  - [ ] Monitor feature importance stability
+**Remaining (future):**
+- [ ] Email delivery (SMTP/SendGrid)
+- [ ] SMS for critical alerts (Twilio)
 
-#### Phase 2: Dashboard Creation
-- [ ] **Choose dashboard framework**
-  - [ ] Option 1: Dagster built-in asset metadata
-  - [ ] Option 2: Streamlit dashboard
-  - [ ] Option 3: Grafana + data exports
-  - [ ] Make decision based on team familiarity
+---
 
-- [ ] **Build core dashboard views**
-  - [ ] **Real-time view:**
-    - [ ] Current prediction status
-    - [ ] Latest forecast timestamp
-    - [ ] 24h rolling prediction counts by category
-    - [ ] Alert delivery success rate
-  - [ ] **Performance view:**
-    - [ ] Monthly accuracy trends
-    - [ ] Precision/Recall by category charts
-    - [ ] Confusion matrix heatmap
-    - [ ] Feature importance comparison
-  - [ ] **System health view:**
-    - [ ] Asset execution success rates
-    - [ ] S3 sync status and latency
-    - [ ] Error rates by component
-    - [ ] Data freshness indicators
+### Epic 7: Multi-Site Model Support ✅
+**Status:** COMPLETED (Mar 2026) — 3 stations implemented
 
-#### Phase 3: Alerts & Automation
-- [ ] **Add dashboard alerts**
-  - [ ] Alert when accuracy drops >5%
-  - [ ] Alert when data becomes stale (>2 hours)
-  - [ ] Alert on pipeline failures
+- [x] IB_CIVIC_CTR, NESTOR__BES, SAN_YSIDRO
+- [x] Per-station training pipeline with partitioning
+- [x] Per-station 48h forecasts in `daily_station_forecasts`
+- [x] Source attribution identifies which station is at risk
 
-- [ ] **Schedule dashboard updates**
-  - [ ] Auto-refresh every 5 minutes
-  - [ ] Daily summary email
-  - [ ] Weekly performance report
+---
+
+## 🔄 In Progress
+
+### Multi-Horizon Pipeline Validation 🔴
+**Status:** Models trained and deployed to S3; forecast job created but schedules STOPPED
+
+- [x] 36 models trained (4 horizons × 3 stations × 3 tasks)
+- [x] `mh_forecast_job` pipeline complete with dashboard + Slack alerts
+- [ ] Run `mh_forecast_job` manually and validate output quality
+- [ ] Enable `mh_forecast_schedule` (STOPPED → RUNNING) once validated
+- [ ] Enable `mh_training_schedule` (STOPPED → RUNNING) once validated
+
+---
+
+### Epic 3: Performance Monitoring Dashboard 🟡
+**Status:** Forecast dashboard exists (`daily_dashboard_viz`); metrics tracking not implemented
+
+**Done:**
+- [x] `daily_dashboard_viz` — 5-row PNG: source attribution, station forecasts, weather context
+- [x] `daily_summary_json` — JSON for web dashboards
+
+**Remaining:**
+- [ ] Accuracy metrics tracking (predictions vs actuals over time) — **See Epic 15 below**
+- [ ] Model performance trends (precision/recall by category) — **See Epic 15 below**
+- [ ] System health indicators (pipeline success rates, data freshness)
+- [ ] Public-facing dashboard (Netlify — see Epic 5)
+
+---
+
+### Epic 15: Forecast Accuracy Metrics & Validation 🔴
+**Effort:** Small-Medium (1-2 weeks)
+**Dependencies:** None (enhances existing `daily_validation_report`)
+**Status:** PLANNING — Implementation plan ready for review
+
+#### Objectives
+Compare hourly H2S predictions against actual observations from `modeldata_h2s_nofill.parquet` to track forecast accuracy over time. Generate daily metrics and monthly performance dashboards.
+
+updated truncated h2s:
+s3://test/latest/tijuana/sd_apcd_air/h2s/apcd_h2s_latest.csv
+https://oss.resilientservice.mooo.com/test/latest/tijuana/sd_apcd_air/h2s/apcd_h2s_latest.parquet
+full h2s dataset:
+s3://test/latest/tijuana/sd_apcd_air/h2s_all/h2s_all.parquet
+https://oss.resilientservice.mooo.com/test/latest/tijuana/sd_apcd_air/h2s_all/h2s_all.parquet
+Examples are in the test bucket but the actual data source is the `OBS_DATA_PATH` constant in `h2s/constants.py`.
+
+#### Component 1: Fix & Enhance `daily_validation_report` Asset ✅
+**File:** `projects/h2s/src/h2s/defs/h2s_pipeline.py` (lines 846-1033)
+
+- [x] **Fix actuals data loading**
+  - [x] Change path from `tijuana/forecast/actuals/latest.csv` (broken) to `OBS_DATA_PATH` constant
+  - [x] Load parquet format: `pd.read_parquet(s3.get_presigned_url(path=OBS_DATA_PATH))`
+  - [x] Filter to NESTOR-BES: handle both `NESTOR__BES` and `NESTOR - BES` variants
+  - [x] Convert observation time from Pacific to UTC: `actuals['time'].dt.tz_convert('UTC')`
+  - [x] **FAIL HARD if data missing** (no graceful skips)
+
+- [x] **Calculate numerical metrics**
+  - [x] Import `calculate_metrics()` from `h2s.training.validation`
+  - [x] Categorize actual H2S values (green <5, yellow <30, orange ≥30)
+  - [x] Merge predictions + actuals on time column
+  - [x] Call `calculate_metrics(y_true, y_pred, class_names)`
+  - [x] Calculate false alarm rate using `calculate_false_alarm_rate()`
+  - [x] **FAIL HARD if merge produces 0 matches**
+
+- [x] **Store metrics.json to S3**
+  - [x] Create metrics JSON structure:
+    - `date`, `timestamp`, `site`
+    - `n_predictions`, `n_matched`, `match_rate`
+    - `balanced_accuracy`
+    - `class_metrics` (precision, recall, F1, support per class)
+    - `confusion_matrix` (3×3 array)
+    - `false_alarm_rate`
+  - [x] Upload to S3: `{VALIDATION_PATH}/{YYYY-MM-DD}/metrics.json`
+
+#### Component 2: New `monthly_performance_viz` Asset ✅
+**File:** `projects/h2s/src/h2s/defs/h2s_pipeline.py` (lines 1052-1204)
+
+- [x] **Load 30-day metrics history**
+  - [x] Iterate through last 30 days
+  - [x] Load each `metrics.json` from S3
+  - [x] Parse JSON and store in list with date objects
+  - [x] **FAIL HARD if <7 days of data** (need minimum for trends)
+
+- [x] **Create 4-panel performance dashboard**
+  - [x] **Panel 1:** Aggregate confusion matrix (30-day sum, normalized %)
+    - Annotate cells with percentage + raw counts
+    - Color scale: RdYlGn_r (red = poor, green = good)
+  - [x] **Panel 2:** Daily balanced accuracy trend line
+    - Reference line at 0.61 (target performance)
+    - Date axis with rotation
+  - [x] **Panel 3:** Per-class recall trends (3 lines)
+    - Orange, yellow, green recall over 30 days
+    - Color-coded by category
+  - [x] **Panel 4:** Daily false alarm rate trend
+    - Reference line at 0.054 (5.4% target)
+    - Orange predicted when actually green
+
+- [x] **Upload to S3**
+  - [x] Save as BytesIO PNG (150 dpi, 16×12 figure)
+  - [x] Timestamped: `{VALIDATION_PATH}/monthly/{YYYY-MM}/performance_dashboard.png`
+  - [x] Latest: `latest/{LATEST_FORECAST}/visualizations/performance_dashboard.png`
+
+#### Component 3: Job & Schedule Wiring ✅
+
+- [x] **Update `daily_validation_job`** (`h2s_schedules.py`)
+  - [x] Add `monthly_performance_viz` to asset selection
+  - [x] Both assets run together at 8 AM UTC daily
+
+- [x] **Register in definitions.py**
+  - [x] Import `monthly_performance_viz` from `h2s_pipeline`
+  - [x] Add to assets list (line ~152)
+
+#### Edge Cases & Error Handling ✅
+
+- [x] **No predictions for yesterday** → FAIL HARD (already handled in existing code)
+- [x] **No observation data** → **FAIL HARD** (raises ValueError)
+- [x] **No H2S column** → **FAIL HARD** (raises ValueError with column list)
+- [x] **No metrics history** → **FAIL HARD** (raises ValueError)
+- [x] **Partial history (<7 days)** → **FAIL HARD** (need minimum 7 days for trends)
+- [x] **Partial history (7-30 days)** → Works with available days (logs missing count)
+- [x] **Site name variants** → Filter both `NESTOR__BES` and `NESTOR - BES`
+- [x] **Timezone mismatches** → Convert to UTC before merge
+- [x] **Zero matches after merge** → **FAIL HARD** (raises ValueError)
+- [x] **All NaN H2S values** → **FAIL HARD** (raises ValueError)
+
+#### Testing
+
+- [ ] **Unit tests** (`test_h2s_pipeline.py`)
+  - [ ] Test metrics JSON structure
+  - [ ] Test categorization function (green/yellow/orange)
+  - [ ] Test timezone conversion logic
+  - [ ] Mock S3 `getFile()` for observation data
+
+- [ ] **Integration test**
+  - [ ] Run `uv run dg launch --job daily_validation_job`
+  - [ ] Verify `metrics.json` appears in S3 `validation/{date}/`
+  - [ ] Verify `performance_dashboard.png` uploads (timestamped + latest)
+  - [ ] Check logs for warnings/errors
 
 **Acceptance Criteria:**
-- [ ] Dashboard displays real-time prediction metrics
-- [ ] Historical performance trends visible
-- [ ] System health indicators accurate
-- [ ] Dashboard accessible to team
-- [ ] Auto-updates without manual intervention
+- [ ] `daily_validation_report` loads actuals from correct S3 path (parquet)
+- [ ] Metrics.json generated daily with all required fields
+- [ ] Monthly dashboard shows 4 panels (confusion matrix, balanced accuracy, recall trends, false alarms)
+- [ ] Dashboard runs daily showing trailing 30-day window
+- [ ] Graceful handling of missing data (no hard failures)
+- [ ] All visualizations upload to both timestamped and latest paths
+
+**S3 Output Structure:**
+```
+tijuana/forecast/validation/
+├── YYYY-MM-DD/
+│   ├── metrics.json                    (NEW)
+│   ├── daily_predictions_combined.csv
+│   ├── confusion_matrix.png
+│   ├── model_comparison.png
+│   └── prediction_timeline.png
+└── monthly/YYYY-MM/
+    └── performance_dashboard.png        (NEW)
+
+latest/tijuana/forecast/visualizations/
+└── performance_dashboard.png            (NEW - always current)
+```
+
+#### Design Questions for Review
+
+**Scheduling:**
+- [ ] **Q1:** Run `monthly_performance_viz` daily (trailing 30d window) or monthly only?
+  - **Recommendation:** Daily (low overhead, always current)
+  - **Alternative:** Monthly on 1st at 10 AM UTC
+
+**Scope:**
+- [ ] **Q2:** Validate only NESTOR-BES or extend to all 3 stations?
+  - **Current:** NESTOR-BES only (matches hourly pipeline)
+  - **Future:** Could add per-station validation for daily_analysis_job predictions
+
+**Dashboard:**
+- [ ] **Q3:** Is 30-day window appropriate? (Could make configurable: 7/30/90 days)
+- [ ] **Q4:** Are 4 panels sufficient or add more? (precision trends, support counts, hourly breakdown)
+- [ ] **Q5:** Should false alarm rate be "orange when green" or "orange when green OR yellow"?
+
+**Alerting:**
+- [ ] **Q6:** Add automated Slack alerts for metric degradation?
+  - Example: "⚠️ Balanced accuracy dropped to 55% yesterday (target: 61%)"
+  - Would add after metrics calculation in `daily_validation_report`
+
+**Multi-Horizon:**
+- [ ] **Q7:** Add similar validation for multi-horizon pipeline (3 stations × 4 horizons)?
+  - Would be separate asset (`mh_validation_report`) due to different structure
+
+**Implementation Files:**
+- `projects/h2s/src/h2s/defs/h2s_pipeline.py` — modify `daily_validation_report`, add `monthly_performance_viz`
+- `projects/h2s/src/h2s/defs/h2s_schedules.py` — update `daily_validation_job` selection
+- `projects/h2s/src/h2s/definitions.py` — register new asset
+- `projects/h2s/src/h2s/constants.py` — already has `OBS_DATA_PATH`, `VALIDATION_PATH`
+- `projects/h2s/src/h2s/training/validation.py` — already has `calculate_metrics()`, `calculate_false_alarm_rate()`
 
 ---
 
@@ -533,48 +629,6 @@ tijuana/forecast/
 - [ ] Message includes key info within 160 chars
 - [ ] Delivery success rate >95%
 - [ ] No spam (max 1 SMS per hour for same condition)
-
----
-
-### Epic 7: Multi-Site Model Support 🟡
-**Effort:** Large (4-6 weeks)
-**Dependencies:** Monthly retraining workflow
-**Reference:** [Modeling](system_plan.md#modeling)
-
-#### Phase 1: Data Preparation
-- [ ] **Identify pilot site (Site 2)**
-  - [ ] Confirm data availability for 2nd site
-  - [ ] Validate data quality and completeness
-  - [ ] Align with NESTOR-BES data format
-
-- [ ] **Refactor data pipeline for multi-site**
-  - [ ] Add site_name parameter to data assets
-  - [ ] Update S3 paths to include site identifier
-  - [ ] Modify raw_environmental_data to filter by site
-
-#### Phase 2: Model Architecture
-- [ ] **Implement site-specific models**
-  - [ ] Train separate model for Site 2
-  - [ ] Store models with site identifier: `{site}_xgboost_*.json`
-  - [ ] Update predictor to load site-specific models
-
-- [ ] **Add site selection to pipeline**
-  - [ ] Add site configuration to asset configs
-  - [ ] Support parallel predictions for multiple sites
-  - [ ] Separate S3 output paths by site
-
-#### Phase 3: Visualization & Reporting
-- [ ] **Update visualizations for multi-site**
-  - [ ] Add site name to all plots
-  - [ ] Support site comparison views
-  - [ ] Update dashboard to show multiple sites
-
-**Acceptance Criteria:**
-- [ ] Models trained for 2 sites (NESTOR-BES + Site 2)
-- [ ] Predictions generated independently per site
-- [ ] Separate S3 storage paths per site
-- [ ] Dashboard shows site selector
-- [ ] Code architecture supports easy addition of Site 3+
 
 ---
 
@@ -808,18 +862,15 @@ tijuana/forecast/
 
 ### Quick Stats
 
-- **Total Epics:** 15
-- **Completed:** 3 items ✅ (Epic 0, Epic 1, Infrastructure)
-- **In Progress:** 2 epics 🔄
-- **Short Term (3 mo):** 1 epic
-- **Medium Term (6 mo):** 4 epics
-- **Long Term (12+ mo):** 6 epics
+- **Completed:** Epic 0 (thresholds), Epic 1 (monthly retraining), Infrastructure, Multi-Station + Daily Analysis, Epic 2 (Slack alerting), Epic 7 (multi-site)
+- **In Progress:** Multi-horizon validation, Epic 3 (dashboard metrics), Epic 15 (forecast accuracy metrics - PLANNING)
+- **Short Term (3 mo):** Epic 4 (test coverage)
+- **Medium Term (6 mo):** Epic 5 (Netlify dashboard), Epic 6 (SMS), Epic 8 (API)
+- **Long Term (12+ mo):** Epics 9–14 (streaming, AutoML, mobile, etc.)
 
 ### Next Actions
 
-Priority tasks to start immediately:
-1. 🔴 Automated alerting system (Epic 2)
-2. 🔴 Performance monitoring dashboard (Epic 3)
+1. 🔴 Review and implement Epic 15 (Forecast Accuracy Metrics) — answers design questions, then implement
+2. 🔴 Validate and activate multi-horizon pipeline (`mh_forecast_job`)
 3. 🔴 Expand test coverage to >80% (Epic 4)
-
-**Recommended:** Run monthly retraining job to generate model with new H2S threshold labels
+4. 🟡 Public Netlify dashboard (Epic 5)

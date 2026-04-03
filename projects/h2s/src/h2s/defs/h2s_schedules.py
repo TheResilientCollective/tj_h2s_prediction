@@ -16,6 +16,7 @@ from datetime import timedelta
 import dagster as dg
 
 from h2s.defs.h2s_pipeline import (
+    forecast_daily_partitions,
     h2s_model_artifacts,
     preprocessed_features,
     h2s_predictions,
@@ -28,6 +29,7 @@ from h2s.defs.h2s_pipeline import (
     model_comparison_viz,
     prediction_timeline_viz,
     daily_validation_report,
+    monthly_performance_viz,
 )
 
 from h2s.defs.h2s_training_pipeline import (
@@ -233,6 +235,7 @@ forecast_prediction_job = dg.define_asset_job(
         model_comparison_viz,
         prediction_timeline_viz,
     ),
+    partitions_def=forecast_daily_partitions,
     tags={"environment": "production", "pipeline": "h2s_forecast"},
 )
 
@@ -241,10 +244,24 @@ forecast_prediction_job = dg.define_asset_job(
 # JOB 5: Daily Validation Report (unpartitioned)
 # ============================================================================
 
+daily_validation_metrics_job = dg.define_asset_job(
+    name="daily_validation_metrics_job",
+    description="Generate daily metrics only (useful for backfilling)",
+    selection=dg.AssetSelection.assets(
+        daily_validation_report,
+    ),
+    partitions_def=forecast_daily_partitions,
+    tags={"environment": "production", "pipeline": "h2s_validation"},
+)
+
 daily_validation_job = dg.define_asset_job(
     name="daily_validation_job",
-    description="Compare previous day's H2S predictions against actual measurements",
-    selection=dg.AssetSelection.assets(daily_validation_report),
+    description="Compare previous day's H2S predictions against actual measurements and generate performance dashboard",
+    selection=dg.AssetSelection.assets(
+        daily_validation_report,
+        monthly_performance_viz,
+    ),
+    partitions_def=forecast_daily_partitions,
     tags={"environment": "production", "pipeline": "h2s_validation"},
 )
 
@@ -261,9 +278,19 @@ daily_validation_job = dg.define_asset_job(
     tags={"environment": "production", "schedule_type": "forecast"},
 )
 def forecast_prediction_schedule(context: dg.ScheduleEvaluationContext):
-    """Trigger the full H2S prediction pipeline every 6 hours."""
+    """Trigger the full H2S prediction pipeline every 6 hours.
+
+    Each run materializes TODAY's partition (all 4 daily runs update same partition).
+    S3 hour paths differentiate individual runs.
+    """
+    today_utc = context.scheduled_execution_time.date().strftime("%Y-%m-%d")
+
     return dg.RunRequest(
+        partition_key=today_utc,
         run_key=f"forecast_{context.scheduled_execution_time.strftime('%Y-%m-%d_%H')}",
+        tags={
+            "dagster/schedule_execution_time": context.scheduled_execution_time.isoformat(),
+        },
     )
 
 
@@ -279,9 +306,15 @@ def forecast_prediction_schedule(context: dg.ScheduleEvaluationContext):
     tags={"environment": "production", "schedule_type": "validation"},
 )
 def daily_validation_schedule(context: dg.ScheduleEvaluationContext):
-    """Trigger daily validation report comparing predictions vs actuals."""
+    """Trigger daily validation report comparing predictions vs actuals.
+
+    Partition key is YESTERDAY's date (the day being validated).
+    """
+    yesterday_utc = (context.scheduled_execution_time - timedelta(days=1)).date().strftime("%Y-%m-%d")
+
     return dg.RunRequest(
-        run_key=f"validation_{context.scheduled_execution_time.strftime('%Y-%m-%d')}",
+        partition_key=yesterday_utc,
+        run_key=f"validation_{yesterday_utc}",
     )
 
 

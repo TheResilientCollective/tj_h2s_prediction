@@ -4,17 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Overview
 
-This is an H2S (Hydrogen Sulfide) prediction system for the NESTOR - BES wastewater treatment site. The repository contains two implementations:
+This is an H2S (Hydrogen Sulfide) prediction system for the Tijuana River region, covering three monitoring stations: IB_CIVIC_CTR, NESTOR__BES, and SAN_YSIDRO. The repository contains two implementations:
 
 1. **Standalone Python scripts** (`src/`) - Original prediction scripts for direct usage
 2. **Dagster orchestration pipeline** (`projects/h2s/`) - Production data pipeline with S3 integration
 
-The system uses an XGBoost classification model to predict H2S levels in three categories:
+The system predicts H2S levels in three categories:
 - **Green:** H2S < 5 ppb (safe)
 - **Yellow:** 5 ≤ H2S < 30 ppb (caution)
 - **Orange:** H2S ≥ 30 ppb (alert)
 
-**Model Performance:** 61.3% orange detection rate, 5.4% false alarm rate.
+**Model Performance (hourly pipeline):** 61.3% orange detection rate, 5.4% false alarm rate.
 
 ## Project Structure
 
@@ -24,30 +24,54 @@ tj_h2s_prediction/
 │   ├── predict_h2s.py           # Main prediction script
 │   ├── batch_predict.py         # Batch processing
 │   └── generate_visualizations.py
+├── multihorizon/                 # Local MH training/forecast scripts
+│   ├── train_multihorizon.py
+│   ├── forecast_multihorizon.py
+│   └── horizon_features.json
+├── data/
+│   ├── models_mh/               # Trained MH model pkl files (local)
+│   ├── models_v2/               # Trained per-station models (local)
+│   └── startmodels/             # Seed models for initial S3 upload
 ├── projects/h2s/                 # Dagster orchestration project
 │   ├── src/h2s/
-│   │   ├── definitions.py       # Dagster definitions (asset registration)
+│   │   ├── definitions.py       # Dagster definitions (asset + job registration)
+│   │   ├── constants.py         # S3 path constants + shared utilities
 │   │   ├── defs/
-│   │   │   └── h2s_pipeline.py  # 7 pipeline assets (data → prediction → export)
+│   │   │   ├── h2s_pipeline.py          # Hourly forecast pipeline (14 assets)
+│   │   │   ├── h2s_daily_pipeline.py    # Daily analysis: source attribution + station forecasts
+│   │   │   ├── h2s_multi_station_training.py  # Per-station model training (partitioned)
+│   │   │   ├── h2s_multihorizon_training.py   # MH model training (partitioned, STOPPED)
+│   │   │   ├── h2s_multihorizon_pipeline.py   # MH forecast pipeline (STOPPED)
+│   │   │   ├── h2s_training_pipeline.py       # Legacy single-model training pipeline
+│   │   │   ├── h2s_seed_models.py             # Seed models job for initial S3 upload
+│   │   │   └── h2s_schedules.py               # All schedules and job definitions
 │   │   ├── predictor/
-│   │   │   ├── h2s_predictor.py # H2SPredictor class with S3 loading
+│   │   │   ├── h2s_predictor.py  # H2SPredictor class with S3 loading
 │   │   │   └── visualizations.py # Plot generators returning BytesIO
+│   │   ├── training/
+│   │   │   ├── feature_builder.py       # ensure_base_features() for 43-feature set
+│   │   │   ├── model_trainer.py         # train_and_select() for XGBoost/RF
+│   │   │   ├── multi_station_trainer.py # Per-station training logic
+│   │   │   ├── multihorizon_trainer.py  # MH training + EnsembleRegressor/Classifier
+│   │   │   ├── relabeling.py            # H2S threshold relabeling
+│   │   │   └── validation.py            # Model validation utilities
 │   │   ├── resources/
-│   │   │   └── minio.py         # S3Resource (copied from resilient_workflows_public)
+│   │   │   ├── minio.py         # S3Resource
+│   │   │   └── slack.py         # SlackAlertResource
 │   │   └── utils/
-│   │       └── store_assets.py  # S3 storage utilities (simplified)
-│   ├── scripts/                 # Helper scripts for asset materialization
-│   │   ├── materialize_artiacts.sh  # Load model from S3
-│   │   └── materialize_data.sh      # Load environmental data
+│   │       └── store_assets.py  # S3 storage utilities
+│   ├── scripts/                 # Helper scripts
+│   │   ├── train_station_models.py  # Local per-station training
+│   │   └── seed_models_to_s3.py     # Seed models to S3 (also available as Dagster job)
 │   ├── tests/                   # Test suite
-│   │   ├── conftest.py         # Pytest configuration and fixtures
-│   │   ├── test_h2s_pipeline.py     # Asset logic tests
-│   │   ├── test_predictor.py        # H2SPredictor unit tests
-│   │   ├── test_s3_integration.py   # S3 operations tests (requires credentials)
-│   │   └── README.md           # Test documentation
-│   ├── pytest.ini               # Pytest configuration
-│   └── pyproject.toml           # Dependencies (dagster, xgboost, minio, pytest, etc.)
-├── nestor_xgboost_weighted_model.json  # 4.2 MB trained model
+│   │   ├── conftest.py
+│   │   ├── test_h2s_pipeline.py
+│   │   ├── test_predictor.py
+│   │   ├── test_s3_integration.py
+│   │   └── README.md
+│   ├── pytest.ini
+│   └── pyproject.toml
+├── nestor_xgboost_weighted_model.json  # 4.2 MB trained model (root copy)
 └── nestor_preprocessing_info.json      # Feature metadata (JSON, not pickle)
 ```
 
@@ -226,56 +250,57 @@ print(f'Model loaded: {len(predictor.feature_cols)} features')
 
 ## Architecture
 
-### Dagster Pipeline Flow
+### Active Pipelines
 
-The pipeline consists of 7 assets organized into 4 groups:
+**`forecast_prediction_job`** (every 6h) — hourly H2S forecast for NESTOR-BES
+```
+h2s_model_artifacts → preprocessed_features → h2s_predictions → h2s_alerts → slack_alerts
+                                                               → h2s_variant_predictions → h2s_ensemble_predictions
+                                                               → predictions_export
+h2s_model_artifacts → feature_importance_viz / confusion_matrix_viz / model_comparison_viz
+                    → prediction_timeline_viz / cross_correlation_viz
+```
 
-**1. Model Management (`h2s_model`)**
-- `h2s_model_artifacts` - Loads XGBoost model from S3 at `tijuana/forecast/models/`
-  - Uses `H2SPredictor.from_s3()` with tempfile workaround (XGBoost requires file path)
-  - Preprocessing metadata is JSON (not pickle) for S3 compatibility
+**`daily_analysis_job`** (every 6h) — multi-station source attribution + 48h forecasts
+```
+multi_station_model_artifacts → source_attribution → daily_station_forecasts → daily_dashboard_viz
+                                                                              → daily_summary_json
+```
 
-**2. Data Ingestion (`h2s_prediction`)**
-- `raw_environmental_data` - Loads weather/tidal data from S3 with local fallback
-  - Primary: `latest/tijuana/weather_forecast/latest.csv` (from openmeteo.py asset)
-  - Fallback: Local `/data/latest.csv` for testing
-
-**3. Prediction Pipeline (`h2s_prediction`)**
-- `preprocessed_features` - Applies feature engineering
-  - Cyclical encoding (sin/cos for hour, wind direction)
-  - Interaction features (wind×temp, humidity×temp)
-  - Categorical encoding using dict lookups (not sklearn LabelEncoder)
-- `h2s_predictions` - Generates predictions with probabilities
-  - Returns: predicted_category, probability_green/yellow/orange, confidence, alert
-- `h2s_alerts` - Filters to orange/yellow predictions only
-
-**4. Visualization & Export (`h2s_visualization`, `h2s_export`)**
-- `feature_importance_viz` - Generates and uploads plot to S3
-  - Returns BytesIO (not file) for direct S3 upload
-  - Stored in both timestamped and `latest/` paths
-- `predictions_export` - Exports predictions as CSV/JSON to S3
-  - Uses `store_assets.store_dataframe_to_s3()` utility
-  - Dual storage: `tijuana/forecast/output/` (timestamped) + `latest/tijuana/forecast_data/`
+**`mh_forecast_job`** (every 6h, currently STOPPED) — 72h multi-horizon forecast
+```
+mh_model_artifacts → mh_observation_state → mh_forecasts → mh_dashboard_viz
+                                                          → mh_summary_export → mh_slack_alerts
+```
 
 ### S3 Path Conventions
-
-Following `resilient_workflows_public` patterns:
 
 ```
 s3://test/
 ├── tijuana/forecast/
-│   ├── models/                         # Pre-trained model (uploaded once)
-│   │   ├── nestor_xgboost_weighted_model.json
-│   │   └── nestor_preprocessing_info.json
-│   └── output/                         # Timestamped predictions
-│       ├── YYYY-MM-DD_HH/h2s_predictions.{csv,json,metadata.json}
-│       └── visualizations/YYYY-MM-DD/feature_importance.png
-└── latest/
-    └── tijuana/
-        ├── weather_forecast/latest.csv  # Input data (from openmeteo.py)
-        └── forecast_data/              # Latest predictions
-            ├── h2s_predictions.{csv,json}
-            └── visualizations/feature_importance.png
+│   ├── models/
+│   │   ├── nestor_xgboost_weighted_model.json  # hourly pipeline model
+│   │   ├── nestor_preprocessing_info.json       # 43-feature preprocessing metadata
+│   │   ├── deployment_metadata.json
+│   │   ├── xgboost_base/model.json              # variants
+│   │   ├── xgboost_smote/model.json
+│   │   ├── random_forest/model.joblib
+│   │   ├── stations/{station_key}/              # IB_CIVIC_CTR, NESTOR__BES, SAN_YSIDRO
+│   │   │   ├── clf_5ppb.pkl
+│   │   │   ├── clf_10ppb.pkl
+│   │   │   └── regression.pkl
+│   │   └── multihorizon/{horizon}/{station_key}/{task}.pkl  # 36 MH models
+│   ├── output/YYYY-MM-DD_HH/                   # Timestamped hourly predictions
+│   └── multihorizon/{date}/forecast_mh.csv     # MH forecast output
+└── latest/tijuana/
+    ├── weather_forecast/latest.csv              # Input (from openmeteo.py)
+    ├── tides/latest.csv
+    ├── streamflow/latest.csv
+    └── forecast_data/
+        ├── h2s_predictions.{csv,json}
+        ├── daily_summary.json
+        ├── modeldata_h2s.csv                    # Historical H2S measurements
+        └── visualizations/
 ```
 
 ### Key Design Decisions
@@ -287,22 +312,16 @@ s3://test/
 
 **Why copy code from resilient_workflows_public?**
 - Avoids sys.path manipulation and import issues
-- Simplified `store_assets.py` without heavy dependencies (geopandas, pydantic_schemaorg)
+- Simplified `store_assets.py` without heavy dependencies
 - Self-contained S3Resource in `h2s/resources/minio.py`
 
 **Why tempfile for XGBoost model loading?**
 - XGBoost requires file path (not BytesIO)
-- `S3Resource.getFile()` returns raw bytes
-- Tempfile written, model loaded, tempfile deleted
+- `S3Resource.getFile()` returns raw bytes — write to tempfile, load, delete
 
-**Asset dependency chain:**
-```
-h2s_model_artifacts ────────────┐
-                                ├─→ preprocessed_features ─→ h2s_predictions ──┬─→ h2s_alerts
-raw_environmental_data ─────────┘                                             │
-                                                                               └─→ predictions_export
-h2s_model_artifacts ─────────────────────────────────────────────────────────────→ feature_importance_viz
-```
+**Why `EnsembleRegressor`/`EnsembleClassifier` in `multihorizon_trainer.py`?**
+- Pickle deserialization requires the class to be importable from a stable module path
+- Defined in `h2s.training.multihorizon_trainer` — do not move or rename
 
 ## Environment Configuration
 
@@ -320,24 +339,116 @@ S3_SECRET_KEY=your_secret_key
 # Optional: Latest path configuration
 PUBLIC_BUCKET=test
 LATEST_BASEPATH=latest/
+
+# Slack alerting
+SLACK_TOKEN=xoxb-...
+SLACK_CHANNEL=#h2s-alerts
+SLACK_CHANNEL_FAILURES=#h2s-failures
+
+# Deployment context
+DAGSTER_DEPLOYMENT=local     # or production
+ENV_LABEL=DEV                # shown in dashboard titles and Slack alerts
+SCHED_HOSTNAME=sched         # for Dagster UI URL in failure alerts
+HOST=local
 ```
 
-**Dagster uses `EnvVar` for S3 credentials** - environment variables are loaded at runtime, not at definitions.py import time.
+**Dagster uses `EnvVar` for S3 and Slack credentials** - environment variables are loaded at runtime, not at definitions.py import time.
 
 ## Model Files
 
 **Location:** Root directory and S3
 
-- `nestor_xgboost_weighted_model.json` - 4.2 MB trained XGBoost classifier
-- `nestor_preprocessing_info.json` - 948 bytes metadata (feature names, class mappings)
+- `nestor_xgboost_weighted_model.json` - 4.2 MB trained XGBoost classifier (hourly pipeline)
+- `nestor_preprocessing_info.json` - metadata (feature names, class mappings)
 
-**Features (20 total):**
-- Weather: temperature_2m, wind_speed_10m, wind_direction_10m, relative_humidity_2m, surface_pressure, precipitation, etc.
-- Tidal: flow_rate_cms, tide_height_m, tidal_state
-- Derived: hour_sin, hour_cos, wind_direction_sin, wind_direction_cos, wind_temp_interaction, humidity_temp_interaction
+**Features (43 total) — built by `feature_builder.py`:**
+- Weather: temperature_2m, wind_speed_10m, wind_direction_10m, relative_humidity_2m, surface_pressure, precipitation, cloud_cover, dewpoint_2m
+- Wind rolling averages (2h, 3h, 4h) + gusts rolling max
+- Cyclical encodings: hour_sin/cos, month_sin/cos, wind_direction_sin/cos
+- Flow: flow_rate_cms, flow_log, flow_low, flow_high, flow_lag_6h, flow_rolling_24h
+- H2S lags: h2s_lag_1h/3h/6h, h2s_rolling_6h/24h
+- SBIWTP: sbiwtp_flow_mgd, sbiwtp_anomaly, sbiwtp_deficit, etc.
+- Stability/regime: is_night, source_regime, stable_atm
 - Encoded: wind_direction_cat_encoded, tidal_state_encoded
 
 **Classes:** ['green', 'orange', 'yellow']
+
+## Daily Partitions and Validation Metrics
+
+### Partition System
+
+**Forecast and validation jobs use daily partitions** (start_date=2026-01-01, timezone=UTC):
+
+```bash
+# Run forecast for specific date
+uv run dg launch --job forecast_prediction_job --partition 2026-04-02
+
+# Run validation for specific date
+uv run dg launch --job daily_validation_metrics_job --partition 2026-04-02
+
+# Run full validation with monthly dashboard (requires >0 days of metrics)
+uv run dg launch --job daily_validation_job --partition 2026-04-02
+```
+
+**Jobs:**
+- `forecast_prediction_job` — Generates predictions for a date (uses forecast data from that date)
+- `daily_validation_metrics_job` — Creates metrics.json only (for backfilling)
+- `daily_validation_job` — Creates metrics.json + monthly dashboard (fails if zero metrics days available)
+
+### Validation Metrics Accumulation
+
+**Natural accumulation workflow** (recommended):
+
+1. **Day 1**: Forecast runs → predictions stored to S3
+2. **Day 2**: Validation runs → compares Day 1 predictions vs Day 1 actuals → creates metrics.json
+3. **Days 3-7**: Repeat daily
+4. **Day 8+**: Monthly dashboard generates successfully (uses last 30 days of metrics)
+
+**Daily schedules:**
+- `forecast_prediction_schedule`: Every 6 hours (00, 06, 12, 18 UTC) → materializes TODAY's partition
+- `daily_validation_schedule`: Daily at 8 AM UTC → materializes YESTERDAY's partition
+
+**Important:** Validation requires predictions and observations to have matching timestamps. The current system:
+- ✅ Works for daily production runs (forecast uses today's data, validation uses yesterday's data)
+- ❌ Cannot backfill historical validations (forecast data not partitioned by date)
+
+### Historical Backfills (Future Enhancement)
+
+**Current limitation:** `preprocessed_features` loads from `latest/tijuana/forecast_data/model_forecast.parquet` which always contains the most recent forecast, not historical forecasts. Backfilling partition `2026-03-26` loads today's forecast, generates predictions with today's timestamps, then validation finds zero matches with March 26 observations.
+
+**Solution:** Partition forecast data by generation date. See `projects/h2s/FORECAST_DATA_PARTITIONING.md` for detailed implementation guide to enable true historical backfills.
+
+### Metrics Storage
+
+```
+s3://test/tijuana/forecast/validation/
+  2026-04-01/
+    metrics.json          # Daily metrics (balanced accuracy, confusion matrix, FAR)
+    confusion_matrix.png  # Visualization
+    model_comparison.png
+  2026-04-02/
+    metrics.json
+    ...
+```
+
+**metrics.json structure:**
+```json
+{
+  "date": "2026-04-01",
+  "site": "NESTOR__BES",
+  "n_predictions": 462,
+  "n_matched": 450,
+  "match_rate": 0.974,
+  "balanced_accuracy": 0.856,
+  "false_alarm_rate": 0.034,
+  "class_metrics": {
+    "green": {"precision": 0.92, "recall": 0.95, "f1": 0.93},
+    "yellow": {"precision": 0.78, "recall": 0.71, "f1": 0.74},
+    "orange": {"precision": 0.88, "recall": 0.81, "f1": 0.84}
+  },
+  "confusion_matrix": [[240, 12, 3], [15, 145, 8], [2, 5, 20]]
+}
+```
 
 ## Troubleshooting
 
