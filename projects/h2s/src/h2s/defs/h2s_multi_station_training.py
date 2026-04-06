@@ -21,6 +21,7 @@ from h2s.constants import (
     STATION_MODELS_S3_BASE,
     STATION_PARTITION_MAP,
     STATIONS,
+    TRAINING_SNAPSHOTS_PATH,
 )
 from h2s.training.multi_station_trainer import (
     TRAIN_FRACTION,
@@ -59,12 +60,28 @@ def multi_station_training_data(context: dg.AssetExecutionContext) -> pd.DataFra
     bucket = context.op_config["s3_bucket"]
     s3_path = "latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet"
 
-    # Load training data from S3 via presigned URL
-    parquet_url = s3.get_presigned_url(path=s3_path, bucket=bucket)
-    raw_df = pd.read_parquet(parquet_url)
+    # Load training data bytes from S3 (so we can snapshot the exact input used)
+    raw_bytes = s3.getFile(path=s3_path, bucket=bucket)
+    raw_df = pd.read_parquet(io.BytesIO(raw_bytes))
     context.log.info(f"✓ Loaded training data from S3 ({bucket}/{s3_path}): {len(raw_df)} rows")
 
+    # Snapshot the exact parquet used for this training run to S3
+    snapshot_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%SZ")
+    snapshot_path = f"{TRAINING_SNAPSHOTS_PATH}/{snapshot_ts}/modeldata_h2s_nofill.parquet"
+    s3.putFile(
+        raw_bytes,
+        snapshot_path,
+        bucket=s3.S3_BUCKET,
+        content_type="application/octet-stream",
+    )
+    context.log.info(f"✓ Wrote training data snapshot to S3: {snapshot_path}")
+
     df = prepare_multi_station_features(raw_df)
+    df.attrs["training_snapshot_s3_path"] = snapshot_path
+    df.attrs["training_snapshot_bucket"] = s3.S3_BUCKET
+    df.attrs["training_snapshot_source_bucket"] = bucket
+    df.attrs["training_snapshot_source_path"] = s3_path
+    df.attrs["training_snapshot_timestamp"] = snapshot_ts
 
     context.log.info(f"✓ Feature engineering complete: {len(df)} clean rows")
     for site in df['site_name'].unique():
@@ -77,6 +94,8 @@ def multi_station_training_data(context: dg.AssetExecutionContext) -> pd.DataFra
         "features": len(MODEL_FEATURES),
         "date_min": str(df['time'].min()),
         "date_max": str(df['time'].max()),
+        "training_snapshot_s3_path": snapshot_path,
+        "training_snapshot_bucket": s3.S3_BUCKET,
     })
     return df
 
@@ -228,6 +247,13 @@ def station_training_report(
         'features': MODEL_FEATURES,
         'ensemble_margin': ensemble_margin,
         'tasks': tasks_metrics,
+        'training_snapshot': {
+            's3_path': multi_station_training_data.attrs.get('training_snapshot_s3_path'),
+            'bucket': multi_station_training_data.attrs.get('training_snapshot_bucket'),
+            'source_bucket': multi_station_training_data.attrs.get('training_snapshot_source_bucket'),
+            'source_path': multi_station_training_data.attrs.get('training_snapshot_source_path'),
+            'timestamp': multi_station_training_data.attrs.get('training_snapshot_timestamp'),
+        },
     }
 
     # Upload to S3
