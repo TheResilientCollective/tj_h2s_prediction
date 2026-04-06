@@ -24,6 +24,7 @@ LATEST_FORECAST = 'tijuana/forecast'
 VALIDATION_PATH = 'tijuana/forecast/validation'
 
 STATION_MODELS_S3_BASE = 'tijuana/forecast/models/stations'
+TRAINING_SNAPSHOTS_PATH = 'tijuana/forecast/training_snapshots'
 
 # Multi-horizon forecast paths
 MH_MODELS_S3_BASE = 'tijuana/forecast/models/multihorizon'
@@ -32,6 +33,10 @@ MH_OUTPUT_PATH = 'tijuana/forecast/multihorizon'
 # Pre-featurized data paths
 OBS_DATA_PATH = 'latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet'
 FORECAST_DATA_PATH = 'latest/tijuana/forecast_data/model_forecast.parquet'
+
+# Canonical class ordering (matches XGBoost LabelEncoder: alphabetical)
+H2S_CLASS_NAMES = ['green', 'orange', 'yellow']
+H2S_CLASS_TO_INT = {'green': 0, 'orange': 1, 'yellow': 2}
 
 # ==============================================================================
 # Station & Source Geography

@@ -5,7 +5,7 @@ Returns plots as BytesIO objects for direct S3 upload.
 """
 
 from io import BytesIO
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -659,4 +659,451 @@ def generate_prediction_timeline(predictions: pd.DataFrame, raw_environmental_da
     buf.seek(0)
     plt.close(fig)
 
+    return buf
+
+
+# ==============================================================================
+# Cell Comparison & Line Chart Visualizations
+# ==============================================================================
+
+CELL_COLORS = {
+    'green': '#2ecc71',
+    'yellow': '#f1c40f',
+    'orange': '#e74c3c',
+    None: '#d5d8dc',
+}
+
+
+def _categorize_h2s(value: float) -> Optional[str]:
+    """Convert H2S ppb value to category string."""
+    if pd.isna(value):
+        return None
+    if value < 5:
+        return 'green'
+    if value < 30:
+        return 'yellow'
+    return 'orange'
+
+
+def _prepare_cell_data(
+    predictions: pd.DataFrame,
+    actuals: pd.DataFrame,
+    time_col: str = 'time',
+) -> pd.DataFrame:
+    """Merge predictions and actuals, returning hourly cell data.
+
+    Returns DataFrame with columns: date, hour, actual_category, predicted_category
+    """
+    pred = predictions.copy()
+    act = actuals.copy()
+
+    pred[time_col] = pd.to_datetime(pred[time_col])
+    act[time_col] = pd.to_datetime(act[time_col])
+
+    # Strip timezone for consistent merging
+    if pred[time_col].dt.tz is not None:
+        pred[time_col] = pred[time_col].dt.tz_localize(None)
+    if act[time_col].dt.tz is not None:
+        act[time_col] = act[time_col].dt.tz_localize(None)
+
+    pred[time_col] = pred[time_col].dt.round('h')
+    act[time_col] = act[time_col].dt.round('h')
+
+    # Determine H2S column
+    h2s_col = 'H2S'
+    if h2s_col not in act.columns:
+        h2s_cols = [c for c in act.columns if c.upper() == 'H2S' or 'h2s' in c.lower()]
+        if h2s_cols:
+            h2s_col = h2s_cols[0]
+        else:
+            h2s_col = None
+
+    # Build actuals with categories
+    if h2s_col and h2s_col in act.columns:
+        act_slim = act[[time_col, h2s_col]].dropna(subset=[h2s_col]).copy()
+        act_slim['actual_category'] = act_slim[h2s_col].apply(_categorize_h2s)
+        act_slim = act_slim[[time_col, 'actual_category']].drop_duplicates(subset=[time_col], keep='last')
+    else:
+        act_slim = pd.DataFrame(columns=[time_col, 'actual_category'])
+
+    # Build predictions slim
+    pred_slim = pred[[time_col, 'predicted_category']].drop_duplicates(subset=[time_col], keep='last')
+
+    # Full outer merge
+    merged = pred_slim.merge(act_slim, on=time_col, how='outer')
+    merged['date'] = merged[time_col].dt.strftime('%Y-%m-%d')
+    merged['hour'] = merged[time_col].dt.hour
+
+    return merged.sort_values(time_col)
+
+
+def generate_cell_comparison_png(
+    predictions: pd.DataFrame,
+    actuals: pd.DataFrame,
+    stations: Optional[List[tuple]] = None,
+    time_col: str = 'time',
+) -> BytesIO:
+    """Generate cell comparison PNG showing actual vs predicted H2S per hour.
+
+    Args:
+        predictions: DataFrame with 'predicted_category' and time column.
+        actuals: DataFrame with H2S values and time column.
+            If it has a 'site_name' column, data is filtered per station.
+        stations: List of (display_name, site_key) tuples.
+            Defaults to [("NESTOR - BES", "NESTOR__BES")] if None.
+        time_col: Name of time column.
+
+    Returns:
+        BytesIO PNG image.
+    """
+    from matplotlib.patches import Patch
+
+    if stations is None:
+        stations = [("NESTOR - BES", "NESTOR__BES")]
+
+    has_site_col = 'site_name' in actuals.columns
+
+    # Collect data per station
+    station_data = []
+    for display_name, site_key in stations:
+        if has_site_col:
+            act_station = actuals[actuals['site_name'].isin([site_key, display_name])].copy()
+        else:
+            act_station = actuals.copy()
+
+        cell_df = _prepare_cell_data(predictions, act_station, time_col=time_col)
+        dates = sorted(cell_df['date'].unique())
+        station_data.append((display_name, cell_df, dates))
+
+    # Collect all unique dates across stations
+    all_dates = sorted(set(d for _, _, dates in station_data for d in dates))
+    if not all_dates:
+        fig, ax = plt.subplots(figsize=(10, 3))
+        ax.text(0.5, 0.5, 'No data available for cell comparison',
+                ha='center', va='center', fontsize=14)
+        ax.axis('off')
+        buf = BytesIO()
+        plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+        buf.seek(0)
+        plt.close(fig)
+        return buf
+
+    hours = list(range(24))
+    n_dates = len(all_dates)
+    n_stations = len(stations)
+    n_rows = n_dates * n_stations * 2
+
+    fig_height = max(3, n_rows * 0.4 + 1.5)
+    fig, ax = plt.subplots(figsize=(16, fig_height))
+
+    row_labels = []
+    row_idx = 0
+
+    for date_str in all_dates:
+        for display_name, cell_df, _ in station_data:
+            day_data = cell_df[cell_df['date'] == date_str]
+            hour_actual = dict(zip(day_data['hour'], day_data['actual_category']))
+            hour_pred = dict(zip(day_data['hour'], day_data['predicted_category']))
+
+            # Actual row
+            for h in hours:
+                cat = hour_actual.get(h)
+                color = CELL_COLORS.get(cat, CELL_COLORS[None])
+                rect = plt.Rectangle((h, n_rows - row_idx - 1), 1, 1,
+                                     facecolor=color, edgecolor='white', linewidth=0.5)
+                ax.add_patch(rect)
+            row_labels.append(f"{date_str}  {display_name} - Actual")
+            row_idx += 1
+
+            # Predicted row
+            for h in hours:
+                cat = hour_pred.get(h)
+                color = CELL_COLORS.get(cat, CELL_COLORS[None])
+                rect = plt.Rectangle((h, n_rows - row_idx - 1), 1, 1,
+                                     facecolor=color, edgecolor='white', linewidth=0.5)
+                ax.add_patch(rect)
+            row_labels.append(f"{'':>10}  {display_name} - Predicted")
+            row_idx += 1
+
+    ax.set_xlim(0, 24)
+    ax.set_ylim(0, n_rows)
+    ax.set_xticks([h + 0.5 for h in hours])
+    ax.set_xticklabels([f'{h:02d}' for h in hours], fontsize=8)
+    ax.set_yticks([i + 0.5 for i in range(n_rows)])
+    ax.set_yticklabels(list(reversed(row_labels)), fontsize=7, family='monospace')
+    ax.set_xlabel('Hour (UTC)', fontsize=10, fontweight='bold')
+    ax.set_title('H2S Predictions vs Actuals — Cell Comparison', fontsize=13, fontweight='bold')
+
+    legend_elements = [
+        Patch(facecolor=CELL_COLORS['green'], label='Green (<5 ppb)'),
+        Patch(facecolor=CELL_COLORS['yellow'], label='Yellow (5-30 ppb)'),
+        Patch(facecolor=CELL_COLORS['orange'], label='Orange (>=30 ppb)'),
+        Patch(facecolor=CELL_COLORS[None], label='No data'),
+    ]
+    ax.legend(handles=legend_elements, loc='upper right', fontsize=8, ncol=4,
+              bbox_to_anchor=(1.0, -0.05))
+
+    ax.tick_params(left=False, bottom=False)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+    plt.tight_layout()
+
+    buf = BytesIO()
+    plt.savefig(buf, format='png', dpi=200, bbox_inches='tight')
+    buf.seek(0)
+    plt.close(fig)
+    return buf
+
+
+def generate_cell_comparison_html(
+    predictions: pd.DataFrame,
+    actuals: pd.DataFrame,
+    stations: Optional[List[tuple]] = None,
+    time_col: str = 'time',
+) -> BytesIO:
+    """Generate scrollable HTML cell comparison of actual vs predicted H2S per hour.
+
+    Args:
+        predictions: DataFrame with 'predicted_category' and time column.
+        actuals: DataFrame with H2S values and time column.
+        stations: List of (display_name, site_key) tuples.
+        time_col: Name of time column.
+
+    Returns:
+        BytesIO with UTF-8 encoded HTML.
+    """
+    if stations is None:
+        stations = [("NESTOR - BES", "NESTOR__BES")]
+
+    has_site_col = 'site_name' in actuals.columns
+    hours = list(range(24))
+
+    # Gather per-station cell data
+    station_cells = {}
+    all_dates = set()
+    total_matches = 0
+    total_mismatches = 0
+
+    for display_name, site_key in stations:
+        if has_site_col:
+            act_station = actuals[actuals['site_name'].isin([site_key, display_name])].copy()
+        else:
+            act_station = actuals.copy()
+
+        cell_df = _prepare_cell_data(predictions, act_station, time_col=time_col)
+        station_cells[display_name] = cell_df
+        all_dates.update(cell_df['date'].unique())
+
+        # Count matches/mismatches
+        matched = cell_df.dropna(subset=['actual_category', 'predicted_category'])
+        total_matches += int((matched['actual_category'] == matched['predicted_category']).sum())
+        total_mismatches += int((matched['actual_category'] != matched['predicted_category']).sum())
+
+    all_dates = sorted(all_dates)
+    total_compared = total_matches + total_mismatches
+    match_rate = (total_matches / total_compared * 100) if total_compared > 0 else 0
+
+    # Build HTML
+    html_parts = [f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>H2S Cell Comparison</title>
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: #1a1a2e; color: #eee; margin: 0; padding: 16px; }}
+  h1 {{ font-size: 18px; margin: 0 0 8px; }}
+  .stats {{ font-size: 13px; color: #aab; margin-bottom: 12px; }}
+  .scroll-container {{ overflow-x: auto; max-width: 100%; }}
+  table {{ border-collapse: collapse; font-size: 12px; white-space: nowrap; }}
+  th {{ background: #16213e; padding: 4px 6px; font-weight: 600;
+       position: sticky; top: 0; z-index: 2; border: 1px solid #2a2a4a; }}
+  td {{ padding: 0; width: 28px; height: 24px; text-align: center;
+       border: 1px solid #2a2a4a; }}
+  td.label {{ padding: 2px 6px; text-align: left; font-weight: 500;
+             background: #16213e; position: sticky; left: 0; z-index: 1; }}
+  td.station-label {{ left: 80px; min-width: 108px; }}
+  td.type-label {{ left: 190px; min-width: 72px; }}
+  .cell-green {{ background: #2ecc71; }}
+  .cell-yellow {{ background: #f1c40f; }}
+  .cell-orange {{ background: #e74c3c; }}
+  .cell-none {{ background: #34344a; }}
+  .cell-mismatch {{ box-shadow: inset 0 0 0 2px #fff; }}
+  tr.date-separator td {{ border-top: 3px solid #4a4a6a; }}
+  .legend {{ display: flex; gap: 16px; margin-top: 12px; font-size: 12px; flex-wrap: wrap; }}
+  .legend-item {{ display: flex; align-items: center; gap: 4px; }}
+  .legend-swatch {{ width: 16px; height: 16px; border-radius: 3px; display: inline-block; }}
+</style>
+</head>
+<body>
+<h1>H2S Predictions vs Actuals &mdash; Cell Comparison</h1>
+<div class="stats">
+  Dates: {all_dates[0] if all_dates else 'N/A'} to {all_dates[-1] if all_dates else 'N/A'} |
+  Stations: {len(stations)} |
+  Match rate: {match_rate:.1f}% ({total_matches}/{total_compared}) |
+  Mismatches: {total_mismatches}
+</div>
+<div class="scroll-container">
+<table>
+<thead>
+<tr>
+  <th>Date</th>
+  <th>Station</th>
+  <th>Type</th>
+  {"".join(f'<th>{h:02d}</th>' for h in hours)}
+</tr>
+</thead>
+<tbody>
+"""]
+
+    for date_idx, date_str in enumerate(all_dates):
+        for st_idx, (display_name, _site_key) in enumerate(stations):
+            cell_df = station_cells[display_name]
+            day_data = cell_df[cell_df['date'] == date_str]
+            hour_actual = dict(zip(day_data['hour'], day_data['actual_category']))
+            hour_pred = dict(zip(day_data['hour'], day_data['predicted_category']))
+
+            separator_class = ' class="date-separator"' if (date_idx > 0 and st_idx == 0) else ''
+
+            # Actual row
+            date_label = date_str if st_idx == 0 else ''
+            html_parts.append(f'<tr{separator_class}>')
+            html_parts.append(f'<td class="label">{date_label}</td>')
+            html_parts.append(f'<td class="label">{display_name}</td>')
+            html_parts.append(f'<td class="label">Actual</td>')
+            for h in hours:
+                cat = hour_actual.get(h)
+                cls = f'cell-{cat}' if cat else 'cell-none'
+                html_parts.append(f'<td class="{cls}"></td>')
+            html_parts.append('</tr>\n')
+
+            # Predicted row
+            html_parts.append('<tr>')
+            html_parts.append('<td class="label"></td>')
+            html_parts.append(f'<td class="label"></td>')
+            html_parts.append(f'<td class="label">Predicted</td>')
+            for h in hours:
+                cat = hour_pred.get(h)
+                actual_cat = hour_actual.get(h)
+                cls = f'cell-{cat}' if cat else 'cell-none'
+                if cat and actual_cat and cat != actual_cat:
+                    cls += ' cell-mismatch'
+                html_parts.append(f'<td class="{cls}"></td>')
+            html_parts.append('</tr>\n')
+
+    html_parts.append("""</tbody>
+</table>
+</div>
+<div class="legend">
+  <div class="legend-item"><span class="legend-swatch" style="background:#2ecc71"></span> Green (&lt;5 ppb)</div>
+  <div class="legend-item"><span class="legend-swatch" style="background:#f1c40f"></span> Yellow (5-30 ppb)</div>
+  <div class="legend-item"><span class="legend-swatch" style="background:#e74c3c"></span> Orange (&ge;30 ppb)</div>
+  <div class="legend-item"><span class="legend-swatch" style="background:#34344a"></span> No data</div>
+  <div class="legend-item"><span class="legend-swatch" style="background:#e74c3c; box-shadow: inset 0 0 0 2px #fff"></span> Mismatch</div>
+</div>
+</body>
+</html>""")
+
+    html_content = ''.join(html_parts)
+    buf = BytesIO()
+    buf.write(html_content.encode('utf-8'))
+    buf.seek(0)
+    return buf
+
+
+def generate_h2s_line_chart(
+    actuals: pd.DataFrame,
+    stations: Optional[List[tuple]] = None,
+    time_col: str = 'time',
+    h2s_col: str = 'H2S',
+) -> BytesIO:
+    """Generate line chart of actual H2S values with threshold zones.
+
+    Args:
+        actuals: DataFrame with H2S measurements, time column, and optionally site_name.
+        stations: List of (display_name, site_key) tuples.
+        time_col: Name of time column.
+        h2s_col: Name of H2S column.
+
+    Returns:
+        BytesIO PNG image.
+    """
+    if stations is None:
+        stations = [("NESTOR - BES", "NESTOR__BES")]
+
+    # Find H2S column
+    if h2s_col not in actuals.columns:
+        h2s_candidates = [c for c in actuals.columns if c.upper() == 'H2S' or 'h2s' in c.lower()]
+        if h2s_candidates:
+            h2s_col = h2s_candidates[0]
+        else:
+            fig, ax = plt.subplots(figsize=(12, 4))
+            ax.text(0.5, 0.5, 'No H2S column found', ha='center', va='center', fontsize=14)
+            ax.axis('off')
+            buf = BytesIO()
+            plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+            buf.seek(0)
+            plt.close(fig)
+            return buf
+
+    has_site_col = 'site_name' in actuals.columns
+    n_stations = len(stations)
+    fig, axes = plt.subplots(n_stations, 1, figsize=(14, 3.5 * n_stations), sharex=True, squeeze=False)
+
+    station_colors = {'NESTOR__BES': '#2ecc71', 'IB_CIVIC_CTR': '#3498db', 'SAN_YSIDRO': '#e74c3c'}
+
+    for i, (display_name, site_key) in enumerate(stations):
+        ax = axes[i, 0]
+
+        if has_site_col:
+            df = actuals[actuals['site_name'].isin([site_key, display_name])].copy()
+        else:
+            df = actuals.copy()
+
+        if time_col in df.columns:
+            df[time_col] = pd.to_datetime(df[time_col])
+            df = df.sort_values(time_col)
+
+        if len(df) == 0 or h2s_col not in df.columns:
+            ax.text(0.5, 0.5, f'{display_name}: No data', ha='center', va='center',
+                    transform=ax.transAxes, fontsize=12)
+            ax.set_ylabel(display_name, fontsize=10, fontweight='bold')
+            continue
+
+        times = df[time_col]
+        h2s_values = df[h2s_col]
+
+        # Background threshold zones
+        y_max = max(h2s_values.max() * 1.1, 35)
+        ax.axhspan(0, 5, color='#2ecc71', alpha=0.1)
+        ax.axhspan(5, 30, color='#f1c40f', alpha=0.1)
+        ax.axhspan(30, y_max, color='#e74c3c', alpha=0.1)
+
+        # Threshold lines
+        ax.axhline(5, color='#f1c40f', linestyle='--', linewidth=1, alpha=0.7, label='5 ppb')
+        ax.axhline(30, color='#e74c3c', linestyle='--', linewidth=1, alpha=0.7, label='30 ppb')
+
+        # H2S line
+        color = station_colors.get(site_key, '#3498db')
+        ax.plot(times, h2s_values, color=color, linewidth=1.5, label=f'{display_name} H2S')
+        ax.fill_between(times, h2s_values, alpha=0.15, color=color)
+
+        ax.set_ylabel('H2S (ppb)', fontsize=10, fontweight='bold')
+        ax.set_title(display_name, fontsize=11, fontweight='bold')
+        ax.set_ylim(0, y_max)
+        ax.legend(fontsize=8, loc='upper right')
+        ax.grid(True, alpha=0.3)
+
+    axes[-1, 0].set_xlabel('Time', fontsize=10, fontweight='bold')
+    plt.xticks(rotation=45)
+
+    fig.suptitle('Actual H2S Measurements', fontsize=13, fontweight='bold', y=1.01)
+    plt.tight_layout()
+
+    buf = BytesIO()
+    plt.savefig(buf, format='png', dpi=200, bbox_inches='tight')
+    buf.seek(0)
+    plt.close(fig)
     return buf

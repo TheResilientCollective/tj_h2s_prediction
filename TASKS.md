@@ -246,9 +246,9 @@ tijuana/forecast/
 
 - [x] 36 models trained (4 horizons × 3 stations × 3 tasks)
 - [x] `mh_forecast_job` pipeline complete with dashboard + Slack alerts
-- [ ] Run `mh_forecast_job` manually and validate output quality
-- [ ] Enable `mh_forecast_schedule` (STOPPED → RUNNING) once validated
-- [ ] Enable `mh_training_schedule` (STOPPED → RUNNING) once validated
+- [ x] Run `mh_forecast_job` manually and validate output quality
+- [x ] Enable `mh_forecast_schedule` (STOPPED → RUNNING) once validated
+- [ x] Enable `mh_training_schedule` (STOPPED → RUNNING) once validated
 
 ---
 

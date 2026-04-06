@@ -17,6 +17,8 @@ import pandas as pd
 from h2s.utils import store_assets
 from h2s.constants import (
     FORECAST_DATA_PATH,
+    H2S_CLASS_NAMES,
+    H2S_CLASS_TO_INT,
     HOURLY_PREDICTIONS_PATH,
     LATEST_FORECAST,
     MODEL_PATH,
@@ -550,9 +552,22 @@ def confusion_matrix_viz(
     """Generate and upload confusion matrix plot to S3.
 
     Loads actual H2S measurements from S3 observation data.
-    Skips if H2S measurements are not available in the data.
+    Skips if H2S measurements are not available in the data or partition is today/future.
     """
+    from datetime import date
     from h2s.predictor.visualizations import generate_confusion_matrix_with_metrics
+
+    partition_date = datetime.strptime(context.partition_key, "%Y-%m-%d").date()
+    if partition_date >= date.today():
+        context.log.info(
+            f"Skipping confusion matrix for partition {context.partition_key} — "
+            f"no actuals available yet for current/future forecasts"
+        )
+        context.add_output_metadata({
+            "status": "skipped",
+            "reason": "Partition is today or future — no actuals available yet",
+        })
+        return
 
     s3_resource = context.resources.s3
     public_bucket = os.environ.get('PUBLIC_BUCKET', s3_resource.S3_BUCKET)
@@ -658,8 +673,22 @@ def model_comparison_viz(
 
     Shows balanced accuracy, recall, precision, and confusion matrix.
     Requires actual H2S measurements to compare against predictions.
+    Skips if partition is today/future (no actuals available).
     """
+    from datetime import date
     from h2s.predictor.visualizations import generate_model_comparison
+
+    partition_date = datetime.strptime(context.partition_key, "%Y-%m-%d").date()
+    if partition_date >= date.today():
+        context.log.info(
+            f"Skipping model comparison for partition {context.partition_key} — "
+            f"no actuals available yet for current/future forecasts"
+        )
+        context.add_output_metadata({
+            "status": "skipped",
+            "reason": "Partition is today or future — no actuals available yet",
+        })
+        return
 
     s3_resource = context.resources.s3
     public_bucket = os.environ.get('PUBLIC_BUCKET', s3_resource.S3_BUCKET)
@@ -988,7 +1017,10 @@ def daily_validation_report(context: dg.AssetExecutionContext) -> None:
     """
     import json
     from h2s.predictor.visualizations import (
+        generate_cell_comparison_html,
+        generate_cell_comparison_png,
         generate_confusion_matrix_with_metrics,
+        generate_h2s_line_chart,
         generate_model_comparison,
         generate_prediction_timeline,
     )
@@ -1031,6 +1063,8 @@ def daily_validation_report(context: dg.AssetExecutionContext) -> None:
         predictions_df['time'] = predictions_df['time'].dt.tz_localize('UTC')
     else:
         predictions_df['time'] = predictions_df['time'].dt.tz_convert('UTC')
+    # Round to nearest hour for consistent merging with actuals
+    predictions_df['time'] = predictions_df['time'].dt.round('h')
 
     # Load actual H2S measurements from OBS_DATA_PATH (FAIL if missing)
     context.log.info(f"Loading observation data from {OBS_DATA_PATH} (bucket: {public_bucket})")
@@ -1054,6 +1088,8 @@ def daily_validation_report(context: dg.AssetExecutionContext) -> None:
     else:
         # Already timezone-aware, just convert to UTC
         actuals_df['time'] = actuals_df['time'].dt.tz_convert('UTC')
+    # Round to nearest hour for consistent merging with predictions
+    actuals_df['time'] = actuals_df['time'].dt.round('h')
     # Filter to yesterday's date range
     actuals_df = actuals_df[actuals_df['time'].dt.strftime("%Y-%m-%d") == yesterday].copy()
 
@@ -1075,6 +1111,13 @@ def daily_validation_report(context: dg.AssetExecutionContext) -> None:
 
     if 'H2S' not in actuals_df.columns:
         actuals_df['H2S'] = actuals_df[h2s_cols[0]]
+
+    # Deduplicate predictions per hour (keep latest run's prediction for overlapping forecast hours)
+    predictions_df = predictions_df.sort_values('run_hour', ascending=False).drop_duplicates(subset=['time'], keep='first')
+
+    # Diagnostic logging for time alignment
+    context.log.info(f"  Predictions time range: {predictions_df['time'].min()} to {predictions_df['time'].max()}")
+    context.log.info(f"  Actuals time range: {actuals_df['time'].min()} to {actuals_df['time'].max()}")
 
     # Merge predictions with actuals on time
     merged = predictions_df.merge(actuals_df[['time', 'H2S']], on='time', how='inner')
@@ -1108,15 +1151,14 @@ def daily_validation_report(context: dg.AssetExecutionContext) -> None:
         return
 
     # Convert string categories to integers (for calculate_metrics compatibility)
-    category_to_int = {'green': 0, 'yellow': 1, 'orange': 2}
-    y_true_int = merged['actual_category'].map(category_to_int)
-    y_pred_int = merged['predicted_category'].map(category_to_int)
+    y_true_int = merged['actual_category'].map(H2S_CLASS_TO_INT)
+    y_pred_int = merged['predicted_category'].map(H2S_CLASS_TO_INT)
 
     # Calculate performance metrics (FAIL on error)
     metrics_dict = calculate_metrics(
         y_true=y_true_int,
         y_pred=y_pred_int,
-        class_names=['green', 'yellow', 'orange']
+        class_names=H2S_CLASS_NAMES,
     )
 
     # Calculate false alarm rate (orange predicted when actually green)
@@ -1158,6 +1200,12 @@ def daily_validation_report(context: dg.AssetExecutionContext) -> None:
     context.log.info(f"✓ Uploaded metrics.json (balanced_accuracy={metrics_output['balanced_accuracy']:.3f}, FAR={far:.3f})")
 
     # Generate and upload validation plots (FAIL on error)
+    all_stations = [
+        ("NESTOR - BES", "NESTOR__BES"),
+        ("IB CIVIC CTR", "IB_CIVIC_CTR"),
+        ("SAN YSIDRO", "SAN_YSIDRO"),
+    ]
+
     for plot_name, plot_fn, kwargs in [
         ("confusion_matrix", generate_confusion_matrix_with_metrics, {"time_col": "time"}),
         ("model_comparison", generate_model_comparison, {"model_name": "XGBoost Weighted", "time_col": "time"}),
@@ -1167,6 +1215,24 @@ def daily_validation_report(context: dg.AssetExecutionContext) -> None:
         s3_path = f"{validation_base}/{plot_name}.png"
         s3_resource.putFile(plot_bytes.read(), s3_path, bucket=s3_resource.S3_BUCKET, content_type='image/png')
         context.log.info(f"✓ Uploaded {plot_name} to {s3_path}")
+
+    # Cell comparison PNG (all 3 stations)
+    cell_png = generate_cell_comparison_png(predictions_df, actuals_df, stations=all_stations, time_col='time')
+    s3_resource.putFile(cell_png.read(), f"{validation_base}/cell_comparison.png",
+                        bucket=s3_resource.S3_BUCKET, content_type='image/png')
+    context.log.info(f"✓ Uploaded cell_comparison.png to {validation_base}")
+
+    # Cell comparison HTML (scrollable, all 3 stations)
+    cell_html = generate_cell_comparison_html(predictions_df, actuals_df, stations=all_stations, time_col='time')
+    s3_resource.putFile(cell_html.read(), f"{validation_base}/cell_comparison.html",
+                        bucket=s3_resource.S3_BUCKET, content_type='text/html')
+    context.log.info(f"✓ Uploaded cell_comparison.html to {validation_base}")
+
+    # H2S line chart (all 3 stations)
+    line_chart = generate_h2s_line_chart(actuals_df, stations=all_stations, time_col='time')
+    s3_resource.putFile(line_chart.read(), f"{validation_base}/h2s_line_chart.png",
+                        bucket=s3_resource.S3_BUCKET, content_type='image/png')
+    context.log.info(f"✓ Uploaded h2s_line_chart.png to {validation_base}")
 
     # Export combined predictions CSV (historical record, no latest/ overwrite)
     metadata = store_assets.objectMetadata(
