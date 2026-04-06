@@ -66,6 +66,13 @@ def defs():
         monthly_performance_viz,
     )
 
+    # Import two-tier alert system
+    from h2s.defs.h2s_alert_system import (
+        h2s_alert_dispatcher,
+        h2s_alert_sensor,
+        h2s_alert_job,
+    )
+
     # Import multi-station training pipeline assets
     from h2s.defs.h2s_multi_station_training import (
         multi_station_training_data,
@@ -141,6 +148,7 @@ def defs():
             h2s_predictions,
             h2s_alerts,
             slack_alerts,
+            h2s_alert_dispatcher,
             h2s_variant_predictions,
             h2s_ensemble_predictions,
             feature_importance_viz,
@@ -198,6 +206,8 @@ def defs():
             mh_training_job,
             mh_deployment_job,
             mh_forecast_job,
+            # Two-tier alert job
+            h2s_alert_job,
         ],
         schedules=[
             forecast_prediction_schedule,
@@ -209,7 +219,7 @@ def defs():
             mh_training_schedule,
             mh_forecast_schedule,
         ],
-        sensors=[slack_on_run_failure],
+        sensors=[slack_on_run_failure, h2s_alert_sensor],
         resources=resources[deployment_name]
     )
 
