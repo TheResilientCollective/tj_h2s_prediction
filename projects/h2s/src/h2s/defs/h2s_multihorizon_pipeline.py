@@ -645,7 +645,7 @@ def mh_slack_alerts(
     context.add_output_metadata({
         "orange_hours": total_orange,
         "yellow_high_hours": total_yh,
-        "stations_alerted": int(elevated['station'].nunique()),
+        "stations_alerted": int(mh_forecasts[mh_forecasts['risk'].isin(['ORANGE', 'YELLOW_HIGH'])]['station'].nunique()),
     })
 
 
