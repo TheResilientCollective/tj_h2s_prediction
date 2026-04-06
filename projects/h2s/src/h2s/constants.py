@@ -99,6 +99,38 @@ PROB_5_CAUTION = 0.25
 PROB_5_ALERT = 0.5
 PROB_10_ALERT = 0.5
 
+H2S_THRESHOLD_EXTREME = 100  # ppb — extreme event trigger
+
+# S3 path for extreme event summaries
+EXTREME_EVENT_PATH = 'tijuana/forecast/extreme_events'
+
+# ==============================================================================
+# Two-Tier H2S Alert System
+# ==============================================================================
+
+ALERT_TIERS = {
+    "watch": {
+        "label":     "WATCH",
+        "threshold": 30.0,
+        "audience":  "Monitoring staff",
+    },
+    "critical": {
+        "label":     "CRITICAL",
+        "threshold": 100.0,
+        "audience":  "Agency decision-makers",
+    },
+}
+
+ALERT_SITE_NAME          = "NESTOR"
+ALERT_QUIET_HOURS        = 3      # hours below threshold before new event can open
+ALERT_CLOSE_WAIT_HOURS   = 1.5    # hours after last exceedance before summary fires
+ALERT_LOCAL_TZ           = "America/Los_Angeles"
+ALERT_SBIWTP_BASELINE_MGD = 23.5  # long-run median flow — used for deficit display
+
+ALERT_STATE_S3_PATH       = "tijuana/forecast/alerts/h2s_alert_state.json"
+ALERT_SUMMARY_ARCHIVE_PATH = EXTREME_EVENT_PATH
+ALERT_SUMMARY_LATEST_PATH  = f"{LATEST_BASEPATH}/forecast_data/extreme_event_summary.json"
+
 
 def classify_risk(prob_5: float, prob_10: float, h2s_pred: float) -> str:
     """Assign risk tier from predictions (SD County guidance).
