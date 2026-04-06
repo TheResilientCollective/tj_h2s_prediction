@@ -62,7 +62,7 @@ HORIZON_BOUNDS = [
     ('0_6h',   0,  6),
     ('6_24h',  6,  24),
     ('24_48h', 24, 48),
-    ('48_72h', 48, 999),
+    ('48_72h', 48, 72),
 ]
 
 # BASE_FEATURES imported from h2s.constants

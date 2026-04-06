@@ -556,8 +556,26 @@ def mh_slack_alerts(
         context.add_output_metadata({"status": "skipped", "reason": "all green/yellow_low"})
         return
 
-    total_orange = int((mh_forecasts['risk'] == 'ORANGE').sum())
-    total_yh = int((mh_forecasts['risk'] == 'YELLOW_HIGH').sum())
+    # Count unique hours per horizon where ANY station shows elevated risk
+    hz_summary_parts = []
+    total_orange = 0
+    total_yh = 0
+    for hz_key, hz_label in _HZ_LABELS.items():
+        hz_df = mh_forecasts[mh_forecasts['horizon'] == hz_key]
+        if hz_df.empty:
+            hz_summary_parts.append(f"{hz_label}: 🟢 0h")
+            continue
+        hz_hourly = hz_df.groupby('time')['risk'].agg(
+            lambda x: 'ORANGE' if 'ORANGE' in x.values
+            else ('YELLOW_HIGH' if 'YELLOW_HIGH' in x.values else x.iloc[0])
+        )
+        hz_orange = int((hz_hourly == 'ORANGE').sum())
+        hz_yh = int((hz_hourly == 'YELLOW_HIGH').sum())
+        total_orange += hz_orange
+        total_yh += hz_yh
+        worst = 'ORANGE' if hz_orange > 0 else ('YELLOW_HIGH' if hz_yh > 0 else 'GREEN')
+        elevated = hz_orange + hz_yh
+        hz_summary_parts.append(f"{hz_label}: {_RISK_EMOJI[worst]} {elevated}h")
 
     blocks: list = [
         {
@@ -566,10 +584,13 @@ def mh_slack_alerts(
         },
         {
             "type": "section",
-            "fields": [
-                {"type": "mrkdwn", "text": f"*🟠 Orange (>30 ppb):*\n{total_orange} hours"},
-                {"type": "mrkdwn", "text": f"*🟡 Yellow-High (10-30 ppb):*\n{total_yh} hours"},
-            ],
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"*🟠 Orange:* {total_orange}h  |  *🟡 Yellow-High:* {total_yh}h\n"
+                    + " | ".join(hz_summary_parts)
+                ),
+            },
         },
         {"type": "divider"},
     ]
@@ -579,18 +600,16 @@ def mh_slack_alerts(
         if sf.empty:
             continue
 
-        site_orange = int((sf['risk'] == 'ORANGE').sum())
-        site_yh = int((sf['risk'] == 'YELLOW_HIGH').sum())
-        if site_orange == 0 and site_yh == 0:
-            continue
-
         max_pred = float(sf['h2s_pred'].max())
-        worst_risk = 'ORANGE' if site_orange > 0 else 'YELLOW_HIGH'
+        worst_risk = next(
+            (r for r in _RISK_ORDER if (sf['risk'] == r).any()), 'GREEN'
+        )
 
         hz_parts = []
         for hz_key, hz_label in _HZ_LABELS.items():
             hz = sf[sf['horizon'] == hz_key]
             if hz.empty:
+                hz_parts.append(f"{hz_label}: {_RISK_EMOJI['GREEN']} 0h")
                 continue
             worst_hz = next((r for r in _RISK_ORDER if (hz['risk'] == r).any()), 'GREEN')
             elevated_h = int((hz['risk'].isin(['ORANGE', 'YELLOW_HIGH'])).sum())
@@ -618,7 +637,7 @@ def mh_slack_alerts(
     slack = context.resources.slack
     slack.get_client().chat_postMessage(
         channel=slack.channel,
-        text=f"MH H2S Alert: {total_orange} orange, {total_yh} yellow-high hours across all stations/horizons",
+        text=f"MH H2S Alert: {total_orange} orange, {total_yh} yellow-high unique hours",
         blocks=blocks,
     )
 
