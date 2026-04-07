@@ -626,6 +626,14 @@ def daily_dashboard_viz(
     ax.contourf(lon_grid, lat_grid, prob_grid, levels=levels, cmap=cmap)
     ax.contour(lon_grid, lat_grid, prob_grid, levels=[0.5, 0.7, 0.9],
                colors=['#ff9800', '#ff5722', '#d50000'], linewidths=[0.6, 1.0, 1.5], alpha=0.7)
+    from matplotlib.lines import Line2D
+    contour_legend = [
+        Line2D([0], [0], color='#ff9800', linewidth=0.6, alpha=0.7, label='50% probability'),
+        Line2D([0], [0], color='#ff5722', linewidth=1.0, alpha=0.7, label='70% probability'),
+        Line2D([0], [0], color='#d50000', linewidth=1.5, alpha=0.7, label='90% probability'),
+    ]
+    ax.legend(handles=contour_legend, loc='lower left', fontsize=7, framealpha=0.75,
+              facecolor='#1a1a2e', labelcolor='white', edgecolor='#555')
     for site, info in STATIONS.items():
         ax.plot(info['lon'], info['lat'], '^', markersize=10, color=info['color'],
                 markeredgecolor='white', markeredgewidth=1.5, zorder=20)
@@ -944,13 +952,15 @@ def daily_summary_json(
             "elements": [
                 {"type": "mrkdwn", "text": f"*Forecast window:* {time_range}"},
                 {"type": "mrkdwn", "text": f"*Active sources:* {source_text}"},
+                {"type": "mrkdwn", "text": f"<{context.resources.s3.publicUrl(f'{DAILY_SUMMARY_PATH}/{ts}/daily_dashboard.png', bucket=context.resources.s3.S3_BUCKET)}|View Dashboard>"},
             ],
         },
     ]
 
     try:
         slack = context.resources.slack
-        slack.get_client().chat_postMessage(
+        client = slack.get_client()
+        client.chat_postMessage(
             channel=slack.channel,
             text=f"H2S Daily Summary {ts}",
             blocks=blocks,

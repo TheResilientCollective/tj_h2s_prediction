@@ -532,9 +532,9 @@ _HZ_LABELS = {'0_6h': '0-6h', '6_24h': '6-24h', '24_48h': '24-48h', '48_72h': '4
 @dg.asset(
     key_prefix="h2s",
     group_name="h2s_mh_forecast",
-    required_resource_keys={"slack"},
+    required_resource_keys={"slack", "s3"},
     kinds={"slack"},
-    description="Send multi-horizon H2S elevated-risk alerts to Slack",
+    description="Send multi-horizon H2S elevated-risk alerts to Slack with forecast chart",
     ins={"mh_forecasts": dg.AssetIn(key=_KEY("mh_forecasts"))},
 )
 def mh_slack_alerts(
@@ -629,13 +629,20 @@ def mh_slack_alerts(
     pacific = ZoneInfo("America/Los_Angeles")
     t_min = mh_forecasts['time'].min().astimezone(pacific).strftime("%-I %p %-m/%-d")
     t_max = mh_forecasts['time'].max().astimezone(pacific).strftime("%-I %p %-m/%-d")
+    s3 = context.resources.s3
+    date_str = mh_forecasts['time'].min().strftime('%Y-%m-%d')
+    dashboard_url = s3.publicUrl(f"{MH_OUTPUT_PATH}/visualizations/{date_str}/mh_dashboard.png", bucket=s3.S3_BUCKET)
     blocks.append({
         "type": "context",
-        "elements": [{"type": "mrkdwn", "text": f"Forecast window: {t_min} → {t_max} PT"}],
+        "elements": [
+            {"type": "mrkdwn", "text": f"Forecast window: {t_min} → {t_max} PT"},
+            {"type": "mrkdwn", "text": f"<{dashboard_url}|View Dashboard>"},
+        ],
     })
 
     slack = context.resources.slack
-    slack.get_client().chat_postMessage(
+    client = slack.get_client()
+    client.chat_postMessage(
         channel=slack.channel,
         text=f"MH H2S Alert: {total_orange} orange, {total_yh} yellow-high unique hours",
         blocks=blocks,

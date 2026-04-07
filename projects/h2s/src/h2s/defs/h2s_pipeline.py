@@ -291,23 +291,21 @@ def h2s_alerts(
     key_prefix="h2s",
     group_name="h2s_alerts",
     kinds={"slack"},
-    required_resource_keys={"slack"},
-    description="Send YELLOW_HIGH and ORANGE alerts to Slack",
+    required_resource_keys={"slack", "s3"},
+    description="Send H2S forecast summary to Slack",
     partitions_def=forecast_daily_partitions,
     auto_materialize_policy=dg.AutoMaterializePolicy.eager(),
     ins={
         "h2s_alerts": dg.AssetIn(key=_KEY("h2s_alerts")),
+        "h2s_predictions": dg.AssetIn(key=_KEY("h2s_predictions")),
     },
 )
 def slack_alerts(
     context: dg.AssetExecutionContext,
     h2s_alerts: pd.DataFrame,
+    h2s_predictions: pd.DataFrame,
 ) -> None:
-    """Post H2S alert summary to Slack when YELLOW_HIGH or ORANGE predictions exist."""
-    if h2s_alerts.empty:
-        context.log.info("No alerts to send")
-        return
-
+    """Post H2S forecast summary to Slack with 48h chart."""
     # Skip Slack notifications for backfills (only send for today's partition)
     today = datetime.now(ZoneInfo("UTC")).date().strftime("%Y-%m-%d")
     if context.partition_key != today:
@@ -317,29 +315,32 @@ def slack_alerts(
         )
         return
 
-    orange_count = int((h2s_alerts['predicted_category'] == 'orange').sum())
-    yellow_count = int((h2s_alerts['predicted_category'] == 'yellow').sum())
+    orange_count = int((h2s_alerts['predicted_category'] == 'orange').sum()) if not h2s_alerts.empty else 0
+    yellow_count = int((h2s_alerts['predicted_category'] == 'yellow').sum()) if not h2s_alerts.empty else 0
     total = len(h2s_alerts)
 
-    # Build time range in Pacific time
-    time_col = 'time' if 'time' in h2s_alerts.columns else None
-    if time_col:
-        pacific = ZoneInfo("America/Los_Angeles")
-        t_min = h2s_alerts[time_col].min().astimezone(pacific).strftime("%-I %p %-m/%-d")
-        t_max = h2s_alerts[time_col].max().astimezone(pacific).strftime("%-I %p %-m/%-d")
+    # Build time range from full predictions in Pacific time
+    pacific = ZoneInfo("America/Los_Angeles")
+    time_col = 'time' if 'time' in h2s_predictions.columns else None
+    if time_col and not h2s_predictions.empty:
+        t_min = h2s_predictions[time_col].min().astimezone(pacific).strftime("%-I %p %-m/%-d")
+        t_max = h2s_predictions[time_col].max().astimezone(pacific).strftime("%-I %p %-m/%-d")
         time_range = f"{t_min} → {t_max} PT"
     else:
         time_range = "unknown"
 
     # Peak risk info
-    max_confidence = float(h2s_alerts['confidence'].max()) if 'confidence' in h2s_alerts.columns else 0
-    max_risk = float(h2s_alerts['h2s_risk'].max()) if 'h2s_risk' in h2s_alerts.columns else 0
+    max_confidence = float(h2s_alerts['confidence'].max()) if not h2s_alerts.empty and 'confidence' in h2s_alerts.columns else 0
+    max_risk = float(h2s_alerts['h2s_risk'].max()) if not h2s_alerts.empty and 'h2s_risk' in h2s_alerts.columns else 0
+
+    all_green = h2s_alerts.empty
+    header_text = "H2S Forecast — All Green ✓" if all_green else "H2S Alert — Elevated Levels Forecast"
 
     # Compose Slack message using Block Kit
     blocks = [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": "H2S Alert — Elevated Levels Forecast"},
+            "text": {"type": "plain_text", "text": header_text},
         },
         {
             "type": "section",
@@ -354,6 +355,7 @@ def slack_alerts(
             "type": "context",
             "elements": [
                 {"type": "mrkdwn", "text": f"Forecast window: {time_range} | Max confidence: {max_confidence:.0%}"},
+                {"type": "mrkdwn", "text": f"<{context.resources.s3.publicUrl(f'{VISUALIZATIONS_PATH}/{context.partition_key}/prediction_timeline.png', bucket=context.resources.s3.S3_BUCKET)}|View Dashboard>"},
             ],
         },
     ]

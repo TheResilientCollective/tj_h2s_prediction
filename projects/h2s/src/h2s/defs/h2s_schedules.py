@@ -274,7 +274,7 @@ daily_validation_job = dg.define_asset_job(
     job=forecast_prediction_job,
     cron_schedule=SCHEDULE_6HR,
     description="Run H2S forecast every 6 hours (00:00, 06:00, 12:00, 18:00 UTC)",
-    default_status=dg.DefaultScheduleStatus.RUNNING,
+    default_status=dg.DefaultScheduleStatus.STOPPED,
     tags={"environment": "production", "schedule_type": "forecast"},
 )
 def forecast_prediction_schedule(context: dg.ScheduleEvaluationContext):

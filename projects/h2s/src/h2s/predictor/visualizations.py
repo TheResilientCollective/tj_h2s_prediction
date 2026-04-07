@@ -1107,3 +1107,283 @@ def generate_h2s_line_chart(
     buf.seek(0)
     plt.close(fig)
     return buf
+
+
+def generate_daily_slack_chart(daily_station_forecasts: pd.DataFrame, env_label: str = "") -> BytesIO:
+    """Generate a 3-panel 48h forecast chart for the daily pipeline Slack message.
+
+    Args:
+        daily_station_forecasts: Output of the daily_station_forecasts asset with columns:
+            time, station, h2s_pred, risk, temp, wind_speed.
+        env_label: Optional environment label (e.g. "DEV") for the title.
+
+    Returns:
+        BytesIO PNG image.
+    """
+    import matplotlib.dates as mdates
+    from zoneinfo import ZoneInfo
+
+    pacific = ZoneInfo("America/Los_Angeles")
+    station_colors = {"IB_CIVIC_CTR": "#1565c0", "NESTOR__BES": "#6a1b9a", "SAN_YSIDRO": "#2e7d32"}
+
+    df = daily_station_forecasts.copy()
+    if "time" in df.columns:
+        df["time_pt"] = df["time"].apply(
+            lambda t: t.astimezone(pacific) if hasattr(t, "astimezone") else t
+        )
+    else:
+        df["time_pt"] = range(len(df))
+
+    stations = df["station"].unique() if "station" in df.columns else []
+
+    fig, axes = plt.subplots(3, 1, figsize=(12, 6), gridspec_kw={"height_ratios": [3, 1.5, 1.5]}, sharex=True)
+    fig.patch.set_facecolor("#f8f9fa")
+    for ax in axes:
+        ax.set_facecolor("#ffffff")
+
+    label_suffix = f" [{env_label}]" if env_label else ""
+    fig.suptitle(f"H2S 48h Station Forecast{label_suffix}", fontsize=12, fontweight="bold", y=1.01)
+
+    # Panel 1: h2s_pred per station + threshold lines
+    ax = axes[0]
+    for station in stations:
+        sdf = df[df["station"] == station].sort_values("time_pt")
+        color = station_colors.get(station, "#555555")
+        ax.plot(sdf["time_pt"], sdf["h2s_pred"], color=color, linewidth=1.8, label=station.replace("__", " / "))
+    ax.axhline(5, color="#ffc107", linewidth=1.0, linestyle="--", alpha=0.8, label="5 ppb")
+    ax.axhline(30, color="#f44336", linewidth=1.0, linestyle="--", alpha=0.8, label="30 ppb")
+    ax.set_ylim(bottom=0)
+    ax.set_ylabel("H2S (ppb)", fontsize=9, fontweight="bold")
+    ax.set_title("Predicted H2S", fontsize=10, fontweight="bold", loc="left")
+    ax.legend(fontsize=7, loc="upper right", ncol=2)
+    ax.grid(True, alpha=0.25)
+
+    # Panel 2: Temperature (use first station — same weather for all)
+    ax = axes[1]
+    if "temp" in df.columns:
+        ref = df[df["station"] == stations[0]].sort_values("time_pt") if len(stations) else df.sort_values("time_pt")
+        ax.plot(ref["time_pt"], ref["temp"], color="#e53935", linewidth=1.8)
+        ax.fill_between(ref["time_pt"], ref["temp"], alpha=0.15, color="#e53935")
+        ax.set_ylabel("°C", fontsize=9, fontweight="bold")
+    else:
+        ax.text(0.5, 0.5, "Temperature unavailable", ha="center", va="center", transform=ax.transAxes)
+    ax.set_title("Temperature", fontsize=10, fontweight="bold", loc="left")
+    ax.grid(True, alpha=0.25)
+
+    # Panel 3: Wind speed
+    ax = axes[2]
+    if "wind_speed" in df.columns:
+        ref = df[df["station"] == stations[0]].sort_values("time_pt") if len(stations) else df.sort_values("time_pt")
+        times = ref["time_pt"].tolist()
+        bar_width_days = ((times[1] - times[0]).total_seconds() / 3600 * 0.85 / 24) if len(times) > 1 and hasattr(times[0], "toordinal") else 0.03
+        ax.bar(ref["time_pt"], ref["wind_speed"], width=bar_width_days, color="#1565c0", alpha=0.7)
+        ax.set_ylabel("m/s", fontsize=9, fontweight="bold")
+    else:
+        ax.text(0.5, 0.5, "Wind data unavailable", ha="center", va="center", transform=ax.transAxes)
+    ax.set_title("Wind Speed", fontsize=10, fontweight="bold", loc="left")
+    ax.grid(True, alpha=0.25, axis="y")
+
+    if "time_pt" in df.columns and len(df) > 1 and hasattr(df["time_pt"].iloc[0], "toordinal"):
+        axes[-1].xaxis.set_major_formatter(mdates.DateFormatter("%-I %p\n%-m/%-d", tz=pacific))
+        axes[-1].xaxis.set_major_locator(mdates.HourLocator(interval=6))
+        plt.setp(axes[-1].xaxis.get_majorticklabels(), fontsize=7)
+
+    plt.tight_layout()
+    buf = BytesIO()
+    plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    buf.seek(0)
+    plt.close(fig)
+    return buf
+
+
+def generate_mh_slack_chart(mh_forecasts: pd.DataFrame, env_label: str = "") -> BytesIO:
+    """Generate a forecast chart for the multi-horizon pipeline Slack message.
+
+    Shows predicted H2S per station across time, with risk-colored background bands.
+
+    Args:
+        mh_forecasts: Output of the mh_forecasts asset with columns:
+            time, station, horizon, h2s_pred, risk.
+        env_label: Optional environment label (e.g. "DEV") for the title.
+
+    Returns:
+        BytesIO PNG image.
+    """
+    import matplotlib.dates as mdates
+    from zoneinfo import ZoneInfo
+
+    pacific = ZoneInfo("America/Los_Angeles")
+    station_colors = {"IB_CIVIC_CTR": "#1565c0", "NESTOR__BES": "#6a1b9a", "SAN_YSIDRO": "#2e7d32"}
+
+    df = mh_forecasts.copy()
+    if "time" in df.columns:
+        df["time_pt"] = df["time"].apply(
+            lambda t: t.astimezone(pacific) if hasattr(t, "astimezone") else t
+        )
+    else:
+        df["time_pt"] = range(len(df))
+
+    stations = list(df["station"].unique()) if "station" in df.columns else []
+    n = len(stations)
+    if n == 0:
+        n = 1
+        stations = ["unknown"]
+
+    fig, axes = plt.subplots(n, 1, figsize=(12, max(4, n * 2.5)), sharex=True, squeeze=False)
+    fig.patch.set_facecolor("#f8f9fa")
+    for row in axes:
+        for ax in row:
+            ax.set_facecolor("#ffffff")
+
+    label_suffix = f" [{env_label}]" if env_label else ""
+    fig.suptitle(f"Multi-Horizon H2S Forecast{label_suffix}", fontsize=12, fontweight="bold", y=1.01)
+
+    for i, station in enumerate(stations):
+        ax = axes[i][0]
+        sdf = df[df["station"] == station].sort_values("time_pt") if "station" in df.columns else df.sort_values("time_pt")
+        color = station_colors.get(station, "#555555")
+
+        # Plot each horizon as a separate line (dashed for longer horizons)
+        linestyles = {"0_6h": "-", "6_24h": "--", "24_48h": "-.", "48_72h": ":"}
+        if "horizon" in sdf.columns:
+            for hz, ls in linestyles.items():
+                hdf = sdf[sdf["horizon"] == hz]
+                if hdf.empty:
+                    continue
+                ax.plot(hdf["time_pt"], hdf["h2s_pred"], color=color, linewidth=1.6, linestyle=ls,
+                        label=hz.replace("_", "-") + "h", alpha=0.9)
+        elif "h2s_pred" in sdf.columns:
+            ax.plot(sdf["time_pt"], sdf["h2s_pred"], color=color, linewidth=1.8)
+
+        # Threshold bands
+        ax.axhline(5, color="#ffc107", linewidth=0.9, linestyle="--", alpha=0.7)
+        ax.axhline(30, color="#f44336", linewidth=0.9, linestyle="--", alpha=0.7)
+        ax.set_ylim(bottom=0)
+        ax.set_ylabel("ppb", fontsize=8, fontweight="bold")
+        ax.set_title(station.replace("__", " / "), fontsize=10, fontweight="bold", loc="left")
+        ax.legend(fontsize=7, loc="upper right", ncol=4)
+        ax.grid(True, alpha=0.25)
+
+    if "time_pt" in df.columns and len(df) > 1 and hasattr(df["time_pt"].iloc[0], "toordinal"):
+        axes[-1][0].xaxis.set_major_formatter(mdates.DateFormatter("%-I %p\n%-m/%-d", tz=pacific))
+        axes[-1][0].xaxis.set_major_locator(mdates.HourLocator(interval=12))
+        plt.setp(axes[-1][0].xaxis.get_majorticklabels(), fontsize=7)
+
+    plt.tight_layout()
+    buf = BytesIO()
+    plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    buf.seek(0)
+    plt.close(fig)
+    return buf
+
+
+def generate_forecast_slack_chart(predictions: pd.DataFrame, env_label: str = "") -> BytesIO:
+    """Generate a 3-panel 48h forecast chart for Slack alerts.
+
+    Args:
+        predictions: Full h2s_predictions DataFrame with time, predicted_category,
+            probability_orange, h2s_risk, temperature_2m, and wind_gusts_10m columns.
+        env_label: Optional environment label (e.g. "DEV") appended to the chart title.
+
+    Returns:
+        BytesIO PNG image.
+    """
+    import matplotlib.dates as mdates
+    from matplotlib.patches import Patch
+    from zoneinfo import ZoneInfo
+
+    pacific = ZoneInfo("America/Los_Angeles")
+    category_colors = {"green": "#4caf50", "yellow": "#ffc107", "orange": "#f44336"}
+
+    df = predictions.copy()
+
+    if "time" in df.columns:
+        df["time_pt"] = df["time"].apply(
+            lambda t: t.astimezone(pacific) if hasattr(t, "astimezone") else t
+        )
+    else:
+        df["time_pt"] = range(len(df))
+
+    times = df["time_pt"].tolist()
+    has_time = len(times) > 1
+
+    # Bar width in matplotlib date units (days)
+    if has_time and hasattr(times[0], "toordinal"):
+        dt_hours = (times[1] - times[0]).total_seconds() / 3600
+        bar_width_days = dt_hours * 0.85 / 24
+    else:
+        bar_width_days = 0.03
+
+    fig, axes = plt.subplots(
+        3, 1,
+        figsize=(12, 6),
+        gridspec_kw={"height_ratios": [3, 1.5, 1.5]},
+        sharex=True,
+    )
+    fig.patch.set_facecolor("#f8f9fa")
+    for ax in axes:
+        ax.set_facecolor("#ffffff")
+
+    label_suffix = f" [{env_label}]" if env_label else ""
+    fig.suptitle(
+        f"H2S 48h Forecast — NESTOR / Berry Elementary School{label_suffix}",
+        fontsize=12,
+        fontweight="bold",
+        y=1.01,
+    )
+
+    # --- Panel 1: Category bars + probability_orange line ---
+    ax = axes[0]
+    if has_time and "predicted_category" in df.columns:
+        for _, row in df.iterrows():
+            color = category_colors.get(row.get("predicted_category", "green"), "#4caf50")
+            ax.bar(row["time_pt"], 1.0, width=bar_width_days, color=color, alpha=0.55, align="center")
+
+    if "probability_orange" in df.columns and has_time:
+        ax.plot(df["time_pt"], df["probability_orange"], color="#b71c1c", linewidth=1.8, label="P(orange)", zorder=5)
+        ax.axhline(0.33, color="#888", linewidth=0.8, linestyle="--", alpha=0.7)
+        ax.axhline(0.66, color="#555", linewidth=0.8, linestyle="--", alpha=0.7)
+        ax.set_ylabel("P(orange)", fontsize=9, fontweight="bold")
+    else:
+        ax.set_ylabel("Category", fontsize=9, fontweight="bold")
+
+    ax.set_ylim(0, 1.05)
+    legend_patches = [Patch(facecolor=c, alpha=0.6, label=k.capitalize()) for k, c in category_colors.items()]
+    ax.legend(handles=legend_patches, fontsize=8, loc="upper left")
+    ax.set_title("H2S Risk Category", fontsize=10, fontweight="bold", loc="left")
+    ax.grid(True, alpha=0.25, axis="y")
+
+    # --- Panel 2: Temperature ---
+    ax = axes[1]
+    if "temperature_2m" in df.columns and has_time:
+        ax.plot(df["time_pt"], df["temperature_2m"], color="#e53935", linewidth=1.8)
+        ax.fill_between(df["time_pt"], df["temperature_2m"], alpha=0.15, color="#e53935")
+        ax.set_ylabel("°C", fontsize=9, fontweight="bold")
+    else:
+        ax.text(0.5, 0.5, "Temperature unavailable", ha="center", va="center", transform=ax.transAxes)
+    ax.set_title("Temperature", fontsize=10, fontweight="bold", loc="left")
+    ax.grid(True, alpha=0.25)
+
+    # --- Panel 3: Wind gusts ---
+    ax = axes[2]
+    if "wind_gusts_10m" in df.columns and has_time:
+        ax.bar(df["time_pt"], df["wind_gusts_10m"], width=bar_width_days, color="#1565c0", alpha=0.7)
+        ax.set_ylabel("m/s", fontsize=9, fontweight="bold")
+    else:
+        ax.text(0.5, 0.5, "Wind gust data unavailable", ha="center", va="center", transform=ax.transAxes)
+    ax.set_title("Wind Gusts", fontsize=10, fontweight="bold", loc="left")
+    ax.grid(True, alpha=0.25, axis="y")
+
+    # X-axis time formatting
+    if has_time and hasattr(times[0], "toordinal"):
+        axes[-1].xaxis.set_major_formatter(mdates.DateFormatter("%-I %p\n%-m/%-d", tz=pacific))
+        axes[-1].xaxis.set_major_locator(mdates.HourLocator(interval=6))
+        plt.setp(axes[-1].xaxis.get_majorticklabels(), fontsize=7)
+
+    plt.tight_layout()
+
+    buf = BytesIO()
+    plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    buf.seek(0)
+    plt.close(fig)
+    return buf
