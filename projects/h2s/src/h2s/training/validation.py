@@ -44,25 +44,25 @@ def calculate_metrics(y_true: np.ndarray, y_pred: np.ndarray,
     y_true = np.asarray(y_true).ravel().astype(int)
     y_pred = np.asarray(y_pred).ravel().astype(int)
 
-    # Determine which labels are actually present in the data
-    unique_labels = sorted(np.union1d(y_true, y_pred).tolist())
+    # Always use all class labels so confusion matrix is consistently 3x3
+    all_labels = list(range(len(class_names)))
 
-    # Calculate precision, recall, f1 per class (only for present classes)
+    # Calculate precision, recall, f1 per class
     precision, recall, f1, _ = precision_recall_fscore_support(
         y_true, y_pred,
         average=None,
-        labels=unique_labels,
+        labels=all_labels,
         zero_division=0
     )
 
     # Build metrics dictionary
     metrics = {
         'balanced_accuracy': float(balanced_accuracy_score(y_true, y_pred)),
-        'confusion_matrix': sklearn_confusion_matrix(y_true, y_pred, labels=unique_labels).tolist()
+        'confusion_matrix': sklearn_confusion_matrix(y_true, y_pred, labels=all_labels).tolist()
     }
 
-    # Add per-class metrics (only for classes actually present)
-    for idx, label_idx in enumerate(unique_labels):
+    # Add per-class metrics
+    for idx, label_idx in enumerate(all_labels):
         # Map label index to class name
         if label_idx < len(class_names):
             class_name = class_names[label_idx]

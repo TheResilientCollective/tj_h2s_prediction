@@ -1338,9 +1338,17 @@ def monthly_performance_viz(context: dg.AssetExecutionContext) -> None:
     false_alarm_rate = [m.get('false_alarm_rate', 0) for m in metrics_list]
 
     # Aggregate confusion matrix (sum counts)
+    # Handle days where not all 3 classes were present (e.g., 2x2 matrix)
     cm_sum = np.zeros((3, 3))
     for m in metrics_list:
-        cm_sum += np.array(m['confusion_matrix'])
+        cm = np.array(m['confusion_matrix'])
+        if cm.shape == (3, 3):
+            cm_sum += cm
+        else:
+            context.log.warning(
+                f"Skipping {m.get('date', '?')} confusion matrix "
+                f"(shape {cm.shape}, expected 3x3)"
+            )
 
     # Normalize to percentages
     cm_norm = cm_sum / cm_sum.sum(axis=1, keepdims=True) * 100
