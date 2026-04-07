@@ -71,6 +71,16 @@ SOURCES = {
     "Goat Canyon PS":   {'lat': 32.543476, 'lon': -117.108026, 'color': '#aa44aa'},
     "Del Sol Canyon":   {'lat': 32.5393,   'lon': -117.06885,  'color': '#44aacc'},
     "Silva Drain":      {'lat': 32.539743, 'lon': -117.064269, 'color': '#88cc44'},
+    "Saturn Blvd Bridge": {'lat': 32.559383,'lon': -117.092992,  'color': '#4488cc'},
+    "Hollister St Bridge N":     {'lat': 32.554177,   'lon': -117.084135, 'color': '#ff6600'},
+    "Hollister St Bridge S":     {'lat': 32.551466,   'lon': -117.084021,  'color': '#ff6600'},
+    "Dairy Mart Bridge": {'lat': 32.548531,   'lon':  -117.064293,  'color': '#ff6600'},
+    "Oneonta Slough Near IB": {'lat': 32.570082,  'lon': -117.126724, 'color': '#0000ff'},
+    "Tijuana River Beach Outlet":    {'lat': 32.556206,   'lon': -117.126178,  'color': '#0000ff'},
+    "Tijuana River Crossing Camino De La Plaza W":      {'lat': 32.542103,   'lon': -117.054117,   'color': '#0000ff'},
+    "Tijuana River Crossing Camino De La Plaza E": {'lat': 32.542166,  'lon': -117.050325, 'color': '#0000ff'},
+    "San Diego Bay ponds Otay River Outlet": {'lat': 32.594557,    'lon': -117.113542,  'color': '#0000ff'},
+    "San Diego Bay Ponds near Fruitdale": {'lat': 32.595305,    'lon': -117.091869,  'color': '#0000ff'},
 }
 
 # ==============================================================================
@@ -81,6 +91,10 @@ FLOW_COL = 'Flow (m^3/s)--Border'
 WIND_COL = 'wind_direction_10m'
 SPEED_COL = 'wind_speed_10m'
 ALIGNMENT_THRESHOLD_DEG = 30
+# Minimum H2S (ppb) for an observation to contribute to the source probability grid.
+# Higher values focus the map on significant events; lower values increase coverage but
+# risk contamination from background readings. Tuned in h2s_daily_pipeline._compute_source_probability_grid.
+H2S_SOURCE_THRESHOLD = 10
 
 # ==============================================================================
 # Hazard Classification (SD County H2S Guidance)

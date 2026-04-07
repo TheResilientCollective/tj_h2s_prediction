@@ -25,6 +25,7 @@ import pandas as pd
 from h2s.constants import (
     ALIGNMENT_THRESHOLD_DEG,
     DAILY_SUMMARY_PATH,
+    H2S_SOURCE_THRESHOLD,
     FLOW_COL,
     MODEL_FEATURES,
     MODEL_PATH,
@@ -756,8 +757,16 @@ def _compute_source_probability_grid(obs_df: pd.DataFrame):
     lon_grid, lat_grid = np.meshgrid(lons, lats)
     prob = np.zeros_like(lon_grid)
 
+    # Nighttime-only filter: daytime sea breezes (predominantly W-NW) would
+    # otherwise swamp the southern-source signal from actual nocturnal events.
+    # Consistent with _find_aligned_source which discards all daytime hours.
+    if 'day_night' in recent.columns:
+        recent = recent[recent['day_night'] == 'night']
+    else:
+        recent = recent[(recent['time'].dt.hour < 6) | (recent['time'].dt.hour >= 20)]
+
     for site, info in STATIONS.items():
-        sdf = recent[(recent['site_name'] == site) & (recent['H2S'] > 1)]
+        sdf = recent[(recent['site_name'] == site) & (recent['H2S'] > H2S_SOURCE_THRESHOLD)]
         slat, slon = info['lat'], info['lon']
         dlat = lat_grid - slat
         dlon = lon_grid - slon
