@@ -78,14 +78,14 @@ class InversionConfig(dg.Config):
     date_end: str = "2026-04-01"
     h2s_threshold_ppb: float = 30.0
     n_particles: int = 2000
-    hours_back: int = 6
+    hours_back: int = 2  # Valley-scale: sources are 1-7 km away, 37 min max travel time @ 3 m/s
     max_events: int = 0   # 0 = all events
 
 
 class HysplitConfig(dg.Config):
     mode: str = "backward_traj"   # "backward_traj" | "backward_disp" | "forward_disp"
     met_dir: str = "/data/gdas"
-    hours_back: int = 12
+    hours_back: int = 3  # Valley-scale trajectories: sources within 10 km
     h2s_threshold_ppb: float = 30.0
     date_start: str = "2026-02-01"
     date_end: str = "2026-04-01"
