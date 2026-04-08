@@ -67,9 +67,25 @@ class LagrangianConfig:
     n_particles: int = 2000
     dt_seconds: float = 60.0
     hours_back: int = 6
+
+    # Wind-dependent diffusion parameterization (NEW)
+    # Atmospheric turbulence scales as sigma ~ U^exponent
+    # For Tijuana River Valley (mixed suburban/open terrain):
+    use_wind_dependent_diffusion: bool = True
+    sigma_u_coeff: float = 0.15   # baseline horizontal diffusion coefficient (m/s)
+    sigma_v_coeff: float = 0.15   # baseline horizontal diffusion coefficient (m/s)
+    sigma_w_coeff: float = 0.05   # baseline vertical diffusion coefficient (m/s)
+    sigma_u_exponent: float = 0.5  # wind speed scaling exponent (horizontal)
+    sigma_v_exponent: float = 0.5  # wind speed scaling exponent (horizontal)
+    sigma_w_exponent: float = 0.3  # wind speed scaling exponent (vertical, weaker)
+    min_wind_speed: float = 0.5    # minimum wind speed for diffusion calc (m/s, avoid div-by-zero)
+
+    # Fixed diffusion (LEGACY - kept for backward compatibility)
+    # Only used if use_wind_dependent_diffusion=False
     sigma_u: float = 0.3
     sigma_v: float = 0.3
     sigma_w: float = 0.05
+
     h2s_decay_hr: float = 1e6
     lat_min: float = 32.45
     lat_max: float = 32.65
@@ -128,14 +144,39 @@ def run_backward_particles(
 
     tau = 300.0
     alpha = np.exp(-dt / tau)
-    u_turb = rng.normal(0, cfg.sigma_u, n)
-    v_turb = rng.normal(0, cfg.sigma_v, n)
+
+    # Initialize turbulence (use wind-dependent or fixed diffusion)
+    if cfg.use_wind_dependent_diffusion:
+        # Initial wind speed for sigma calculation
+        u_init, v_init = interpolate_wind(met, event_time)
+        U_init = max(np.sqrt(u_init**2 + v_init**2), cfg.min_wind_speed)
+        sigma_u_init = cfg.sigma_u_coeff * (U_init ** cfg.sigma_u_exponent)
+        sigma_v_init = cfg.sigma_v_coeff * (U_init ** cfg.sigma_v_exponent)
+        u_turb = rng.normal(0, sigma_u_init, n)
+        v_turb = rng.normal(0, sigma_v_init, n)
+    else:
+        # Fixed diffusion (legacy)
+        u_turb = rng.normal(0, cfg.sigma_u, n)
+        v_turb = rng.normal(0, cfg.sigma_v, n)
+
     current_time = event_time
 
     for _ in range(n_steps):
         u_mean, v_mean = interpolate_wind(met, current_time)
-        u_turb = alpha * u_turb + np.sqrt(1 - alpha**2) * rng.normal(0, cfg.sigma_u, n)
-        v_turb = alpha * v_turb + np.sqrt(1 - alpha**2) * rng.normal(0, cfg.sigma_v, n)
+
+        # Compute wind-dependent diffusion coefficients
+        if cfg.use_wind_dependent_diffusion:
+            U = max(np.sqrt(u_mean**2 + v_mean**2), cfg.min_wind_speed)
+            sigma_u_local = cfg.sigma_u_coeff * (U ** cfg.sigma_u_exponent)
+            sigma_v_local = cfg.sigma_v_coeff * (U ** cfg.sigma_v_exponent)
+        else:
+            sigma_u_local = cfg.sigma_u
+            sigma_v_local = cfg.sigma_v
+
+        # Autoregressive turbulence evolution with wind-dependent sigma
+        u_turb = alpha * u_turb + np.sqrt(1 - alpha**2) * rng.normal(0, sigma_u_local, n)
+        v_turb = alpha * v_turb + np.sqrt(1 - alpha**2) * rng.normal(0, sigma_v_local, n)
+
         u_total = -(u_mean + u_turb)
         v_total = -(v_mean + v_turb)
         lats += v_total * dt / M_PER_DEG_LAT

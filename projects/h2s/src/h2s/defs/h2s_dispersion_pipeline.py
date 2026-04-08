@@ -39,7 +39,7 @@ from h2s.constants import (
     HYSPLIT_FORWARD_BUNDLE_PATH,
     LAGRANGIAN_ENSEMBLE_PATH,
     LAGRANGIAN_FOOTPRINT_PATH,
-    OBS_DATA_PATH,
+    OBS_DATA_PATH, LAGRANGIAN_FOOTPRINT_NAME,
 )
 from h2s.dispersion import (
     LagrangianConfig,
@@ -48,6 +48,7 @@ from h2s.dispersion import (
     run_inversion_window,
     source_attribution,
 )
+from h2s.utils import store_assets
 
 # Zone groupings: candidate source names → east / west / south
 _ZONE_MAP = {
@@ -109,6 +110,15 @@ class ForwardForecastConfig(dg.Config):
         "over inversion window. Loads obs data from S3, uploads ensemble JSON and "
         "footprint array to S3."
     ),
+    metadata={
+        "source": "San Diego APCD H2S location data",
+         "description": (
+        "Backward Lagrangian particle model: source footprints + ensemble attribution "
+        "over inversion window. Loads obs data from S3, uploads ensemble JSON and "
+        "footprint array to S3."
+    )
+    },
+
 )
 def lagrangian_source_attribution(
     context: dg.AssetExecutionContext,
@@ -116,6 +126,11 @@ def lagrangian_source_attribution(
 ) -> dg.MaterializeResult:
     log = context.log
     s3 = context.resources.s3
+    meta = context.assets_def.metadata_by_key[context.asset_key]
+    description = meta["description"]  # -> "value"
+    metadata = store_assets.objectMetadata(name=str(context.asset_key.path[-1]),
+                                           description=description,
+                                           )
 
     log.info(f"Loading obs data from S3: {OBS_DATA_PATH}")
     url = s3.get_presigned_url(OBS_DATA_PATH)
@@ -170,9 +185,13 @@ def lagrangian_source_attribution(
     log.info(f"Uploaded ensemble JSON → {LAGRANGIAN_ENSEMBLE_PATH}")
 
     # Upload footprint as parquet (lat index, lon columns — inspectable as a heatmap table)
-    buf = io.BytesIO()
-    ensemble_footprint.to_parquet(buf)
-    s3.putFile(buf.getvalue(), path=LAGRANGIAN_FOOTPRINT_PATH, content_type="application/octet-stream")
+    # buf = io.BytesIO()
+    # ensemble_footprint.to_parquet(buf)
+    # s3.putFile(buf.getvalue(), path=LAGRANGIAN_FOOTPRINT_PATH, content_type="application/octet-stream")
+
+    store_assets.store_dataframe_to_s3(ensemble_footprint, LAGRANGIAN_FOOTPRINT_PATH, LAGRANGIAN_FOOTPRINT_NAME, s3,
+                                      latestdatasetpath=LAGRANGIAN_FOOTPRINT_PATH, enable_latest_path=True,
+                                      formats=['csv', 'parquet','json'], metadata=metadata)
     log.info(f"Uploaded footprint parquet → {LAGRANGIAN_FOOTPRINT_PATH}")
 
     return dg.MaterializeResult(metadata={
@@ -201,11 +220,25 @@ def lagrangian_source_attribution(
         "is available."
     ),
     deps=[dg.AssetKey(["h2s", "lagrangian_source_attribution"])],
+    metadata={
+        #"source": "San Diego APCD H2S location data",
+        "description": (
+                "Derive per-zone emission rates (g/s) from Lagrangian ensemble footprint. "
+        "Groups candidate sources into east/west/south zones, scales to calibrated "
+        "total Q. Falls back to DISPERSION_DEFAULT_EMISSION_RATES_GS if no ensemble "
+        "is available."
+        )
+    },
 )
 def emission_rate_inversion(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     log = context.log
     s3 = context.resources.s3
 
+    meta = context.assets_def.metadata_by_key[context.asset_key]
+    description = meta["description"]  # -> "value"
+    metadata = store_assets.objectMetadata(name=str(context.asset_key.path[-1]),
+                                           description=description,
+                                           )
     try:
         ensemble_bytes = s3.getFile(LAGRANGIAN_ENSEMBLE_PATH)
         ensemble = json.loads(ensemble_bytes)
@@ -248,7 +281,9 @@ def emission_rate_inversion(context: dg.AssetExecutionContext) -> dg.Materialize
         "south_g_s": dg.MetadataValue.float(float(rates["south"])),
         "method":    dg.MetadataValue.text(method),
         "s3_path":   dg.MetadataValue.text(EMISSION_RATES_PATH),
-    })
+    },
+    value=json.dumps(payload, indent=2)
+    )
 
 
 # ==============================================================================
@@ -355,6 +390,14 @@ def hysplit_controls_generation(
         "rates from S3. Outputs per-sensor ppb timeseries."
     ),
     deps=[dg.AssetKey(["h2s", "emission_rate_inversion"])],
+    metadata={
+        # "source": "San Diego APCD H2S location data",
+        "description": (
+                "72h Gaussian plume forward forecast using FORECAST meteorology "
+        "(FORECAST_DATA_PATH / model_forecast.parquet). Loads calibrated emission "
+        "rates from S3. Outputs per-sensor ppb timeseries."
+        )
+    },
 )
 def gaussian_forward_forecast(
     context: dg.AssetExecutionContext,

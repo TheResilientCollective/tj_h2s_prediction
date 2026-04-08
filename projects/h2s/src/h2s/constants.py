@@ -207,8 +207,9 @@ DISPERSION_BASE_PATH = 'tijuana/dispersion'
 
 # Lagrangian inversion outputs (written weekly by dispersion_inversion_job)
 LAGRANGIAN_ENSEMBLE_PATH = 'tijuana/dispersion/lagrangian/ensemble.json'
-LAGRANGIAN_FOOTPRINT_PATH = 'tijuana/dispersion/lagrangian/footprint_ensemble.parquet'
-
+LAGRANGIAN_FOOTPRINT_PATH = 'tijuana/dispersion/lagrangian/'
+LAGRANGIAN_FOOTPRINT_NAME='footprint_ensemble'
+# filename within the .parquet archive
 # Emission rate inversion result — weekly job writes, 6h forecast job reads
 EMISSION_RATES_PATH = 'tijuana/dispersion/emission_rates.json'
 
