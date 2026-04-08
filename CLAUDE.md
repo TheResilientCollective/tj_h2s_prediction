@@ -380,10 +380,24 @@ s3://test/
 - This is the operational forecast use case — predicting future H2S based on weather forecasts
 - Lagrangian inversion uses OBS_DATA_PATH for backward attribution on historical events
 
-**Why calibrated default emission rates (east=20, west=10, south=137 g/s)?**
-- Derived from March 13 2026 extreme event (394 ppb @ NESTOR-BES)
-- Used as fallback when Lagrangian inversion has not yet run
-- Forward forecasts remain operational from day one while inversion converges over weeks
+**Why 2-hour backward integration time for Lagrangian inversion?**
+- Valley-scale sources: 1-7 km from sensor (travel time: 8-37 min @ 3 m/s wind)
+- 6-hour integration was 10× too long (particles travel 64 km, miss local sources)
+- 2-hour integration (21 km reach) is appropriate for Tijuana River Valley scale
+- Critical fix: 6h gave east=0%, 2h gives east=46% (east sources now correctly detected)
+
+**Current emission rates (from 2-hour Lagrangian inversion, Feb-Apr 2026):**
+- East: 76.1 g/s (Stewart's Drain, Silva Drain, TJ crossing: 45.6% of total)
+- West: 33.7 g/s (Tijuana Beach Outlet, Oneonta Slough: 20.2% of total)
+- South: 57.2 g/s (Goat Canyon, Smugglers Gulch: 34.3% of total)
+- Total: 167 g/s (conserved from March 13 2026 calibration event)
+
+**Wind speed dependency (critical finding):**
+- H2S strongly anti-correlated with wind speed (r = -0.246)
+- Low wind (0-1 m/s): mean H2S = 49.9 ppb (weak dilution)
+- High wind (>5 m/s): mean H2S = 6.4 ppb (strong dilution)
+- Current Lagrangian model uses fixed diffusion (sigma_u=0.3) — should be wind-dependent (sigma ~ U^0.5)
+- See WIND_SPEED_DEPENDENCY.md for recommended parameterization
 
 **Why upload HYSPLIT bundles but not execute?**
 - HYSPLIT requires ~20 GB GDAS meteorology files and specialized container environment
