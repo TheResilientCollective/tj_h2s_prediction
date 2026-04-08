@@ -39,6 +39,7 @@ tj_h2s_prediction/
 │   │   ├── defs/
 │   │   │   ├── h2s_pipeline.py          # Hourly forecast pipeline (14 assets)
 │   │   │   ├── h2s_daily_pipeline.py    # Daily analysis: source attribution + station forecasts
+│   │   │   ├── h2s_dispersion_pipeline.py  # Dispersion modeling: Lagrangian + Gaussian + HYSPLIT
 │   │   │   ├── h2s_multi_station_training.py  # Per-station model training (partitioned)
 │   │   │   ├── h2s_multihorizon_training.py   # MH model training (partitioned, STOPPED)
 │   │   │   ├── h2s_multihorizon_pipeline.py   # MH forecast pipeline (STOPPED)
@@ -48,6 +49,10 @@ tj_h2s_prediction/
 │   │   ├── predictor/
 │   │   │   ├── h2s_predictor.py  # H2SPredictor class with S3 loading
 │   │   │   └── visualizations.py # Plot generators returning BytesIO
+│   │   ├── dispersion/
+│   │   │   ├── lagrangian.py    # Backward particle tracking + source attribution
+│   │   │   ├── gaussian.py      # Forward Gaussian plume model
+│   │   │   └── hysplit_controls.py  # HYSPLIT CONTROL file generation
 │   │   ├── training/
 │   │   │   ├── feature_builder.py       # ensure_base_features() for 43-feature set
 │   │   │   ├── model_trainer.py         # train_and_select() for XGBoost/RF
@@ -134,11 +139,35 @@ uv run dg launch --job forecast_prediction_job
 
 # Daily source attribution + station forecasts + dashboard (auto-runs daily at 8am)
 uv run dg launch --job daily_analysis_job
+
+# Dispersion modeling: 72h Gaussian forward forecast + alert check (auto-runs every 6h)
+uv run dg launch --job dispersion_forecast_job
+
+# Dispersion modeling: Weekly Lagrangian source attribution (Monday 02:30 UTC, STOPPED by default)
+uv run dg launch --job dispersion_inversion_job
 ```
 
 ### Re-executing a Failed daily_analysis_job
 
 If `daily_analysis_job` fails partway through, use **"Re-execute all"** in the Dagster UI — not "Re-execute failed steps". Re-executing only the failed step reads `multi_station_model_artifacts` from a stale IO cache and will fail again. Running all steps re-loads models fresh from S3.
+
+### Dispersion Pipeline Operations
+
+**Forward forecast** (`dispersion_forecast_job`, runs every 6h):
+- Loads latest emission rates from S3 (or uses calibrated defaults: east=20, west=10, south=137 g/s)
+- Runs 72h Gaussian plume model using FORECAST meteorology
+- Checks next 6h for threshold crossings (30 ppb watch, 100 ppb critical)
+- Sends Slack alert if thresholds exceeded
+- Uploads HYSPLIT forward CONTROL bundle to S3 (no execution)
+
+**Source attribution** (`dispersion_inversion_job`, weekly Monday 02:30 UTC, STOPPED):
+- Runs Lagrangian backward particle tracking over inversion window (default: Feb 1 - Apr 1 2026)
+- Computes ensemble source fractions from 16 candidate sources
+- Groups sources into east/west/south zones, derives emission rates (g/s)
+- Uploads emission_rates.json to S3 for use by forward forecasts
+- Generates HYSPLIT backward CONTROL bundle (no execution)
+
+**HYSPLIT bundles**: Download from S3 (`tijuana/dispersion/hysplit/{backward|forward}_bundle_latest.zip`), unzip, and run `bash run_hysplit_*.sh` in a HYSPLIT container or submit to NOAA READY.
 
 ## Common Commands
 
@@ -273,6 +302,17 @@ mh_model_artifacts → mh_observation_state → mh_forecasts → mh_dashboard_vi
                                                           → mh_summary_export → mh_slack_alerts
 ```
 
+**`dispersion_inversion_job`** (weekly Monday 02:30 UTC, STOPPED by default) — backward source attribution
+```
+lagrangian_source_attribution → emission_rate_inversion → hysplit_controls_generation (backward CONTROL bundle)
+```
+
+**`dispersion_forecast_job`** (every 6h, RUNNING) — forward Gaussian plume forecast
+```
+emission_rate_inversion → gaussian_forward_forecast → dispersion_alert_check
+                                                    → hysplit_controls_generation (forward CONTROL bundle)
+```
+
 ### S3 Path Conventions
 
 ```
@@ -292,10 +332,22 @@ s3://test/
 │   │   └── multihorizon/{horizon}/{station_key}/{task}.pkl  # 36 MH models
 │   ├── output/YYYY-MM-DD_HH/                   # Timestamped hourly predictions
 │   └── multihorizon/{date}/forecast_mh.csv     # MH forecast output
+├── tijuana/dispersion/
+│   ├── lagrangian/
+│   │   ├── ensemble.json                        # Source attribution ensemble (16 candidate sources)
+│   │   └── footprint_ensemble.parquet           # Ensemble footprint heatmap (lat × lon)
+│   ├── emission_rates.json                      # Per-zone Q (east/west/south in g/s)
+│   ├── hysplit/
+│   │   ├── backward_bundle_{run_tag}.zip        # HYSPLIT backward CONTROL bundle
+│   │   ├── backward_bundle_latest.zip
+│   │   ├── forward_bundle_{run_tag}.zip         # HYSPLIT forward CONTROL bundle
+│   │   └── forward_bundle_latest.zip
+│   └── forward_forecast_{run_tag}.json          # Gaussian 72h plume forecast
 └── latest/tijuana/
     ├── weather_forecast/latest.csv              # Input (from openmeteo.py)
     ├── tides/latest.csv
     ├── streamflow/latest.csv
+    ├── dispersion/forward_forecast_latest.json  # Latest Gaussian forecast
     └── forecast_data/
         ├── h2s_predictions.{csv,json}
         ├── daily_summary.json
@@ -322,6 +374,22 @@ s3://test/
 **Why `EnsembleRegressor`/`EnsembleClassifier` in `multihorizon_trainer.py`?**
 - Pickle deserialization requires the class to be importable from a stable module path
 - Defined in `h2s.training.multihorizon_trainer` — do not move or rename
+
+**Why FORECAST_DATA_PATH for Gaussian forward forecast?**
+- `gaussian_forward_forecast` uses forecast meteorology (model_forecast.parquet), not observations
+- This is the operational forecast use case — predicting future H2S based on weather forecasts
+- Lagrangian inversion uses OBS_DATA_PATH for backward attribution on historical events
+
+**Why calibrated default emission rates (east=20, west=10, south=137 g/s)?**
+- Derived from March 13 2026 extreme event (394 ppb @ NESTOR-BES)
+- Used as fallback when Lagrangian inversion has not yet run
+- Forward forecasts remain operational from day one while inversion converges over weeks
+
+**Why upload HYSPLIT bundles but not execute?**
+- HYSPLIT requires ~20 GB GDAS meteorology files and specialized container environment
+- Bundles are generated as CONTROL files + shell scripts, uploaded to S3
+- User downloads and executes in local HYSPLIT container or submits to NOAA READY server
+- Keeps Dagster pipeline lightweight and portable
 
 ## Environment Configuration
 
