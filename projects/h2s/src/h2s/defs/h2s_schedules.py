@@ -75,6 +75,13 @@ from h2s.defs.h2s_multihorizon_pipeline import (
     mh_forecast_job,
 )
 from h2s.constants import SCHEDULE_6HR
+from h2s.defs.h2s_dispersion_pipeline import (
+    lagrangian_source_attribution,
+    emission_rate_inversion,
+    hysplit_controls_generation,
+    gaussian_forward_forecast,
+    dispersion_alert_check,
+)
 
 # ============================================================================
 # JOB 1: Monthly Data Extraction (monthly partitioned)
@@ -397,4 +404,96 @@ def mh_forecast_schedule(context: dg.ScheduleEvaluationContext):
     """Trigger daily multi-horizon forecast."""
     return dg.RunRequest(
         run_key=f"mh_forecast_{context.scheduled_execution_time.strftime('%Y-%m-%d')}",
+    )
+
+
+# ============================================================================
+# JOB 9: Weekly Dispersion Inversion (Lagrangian + emission rates + HYSPLIT backward bundle)
+# ============================================================================
+
+dispersion_inversion_job = dg.define_asset_job(
+    name="dispersion_inversion_job",
+    description=(
+        "Weekly source attribution: Lagrangian backward model → emission rate inversion "
+        "→ HYSPLIT backward CONTROL bundle upload. No HYSPLIT execution."
+    ),
+    selection=dg.AssetSelection.assets(
+        lagrangian_source_attribution,
+        emission_rate_inversion,
+        hysplit_controls_generation,
+    ),
+    config={
+        "ops": {
+            "h2s__hysplit_controls_generation": {
+                "config": {"mode": "backward_traj"}
+            }
+        }
+    },
+    tags={"environment": "production", "pipeline": "h2s_dispersion"},
+)
+
+
+# ============================================================================
+# JOB 10: 6-hourly Dispersion Forecast (Gaussian forward + alert check + HYSPLIT forward bundle)
+# ============================================================================
+
+dispersion_forecast_job = dg.define_asset_job(
+    name="dispersion_forecast_job",
+    description=(
+        "6-hourly Gaussian plume forward forecast using forecast meteorology, "
+        "dispersion alert check, and HYSPLIT forward CONTROL bundle upload."
+    ),
+    selection=dg.AssetSelection.assets(
+        emission_rate_inversion,
+        gaussian_forward_forecast,
+        dispersion_alert_check,
+        hysplit_controls_generation,
+    ),
+    config={
+        "ops": {
+            "h2s__hysplit_controls_generation": {
+                "config": {"mode": "forward_disp"}
+            }
+        }
+    },
+    tags={"environment": "production", "pipeline": "h2s_dispersion"},
+)
+
+
+# ============================================================================
+# SCHEDULE 9: Weekly Dispersion Inversion (Monday 02:30 UTC)
+# Offset 30min from monthly_data_schedule (02:00) to avoid collision on 1st of month.
+# Starts STOPPED — enable after reviewing first emission rate inversion results.
+# ============================================================================
+
+@dg.schedule(
+    job=dispersion_inversion_job,
+    cron_schedule="30 2 * * 1",
+    description="Weekly Lagrangian inversion + HYSPLIT backward bundle (Monday 02:30 UTC)",
+    default_status=dg.DefaultScheduleStatus.STOPPED,
+    tags={"environment": "production", "schedule_type": "dispersion_inversion"},
+)
+def dispersion_inversion_schedule(context: dg.ScheduleEvaluationContext):
+    """Re-run source attribution inversion weekly to capture new high-H2S events."""
+    return dg.RunRequest(
+        run_key=f"dispersion_inversion_{context.scheduled_execution_time.strftime('%Y-%m-%d')}",
+    )
+
+
+# ============================================================================
+# SCHEDULE 10: 6-hourly Dispersion Forecast (tied to SCHEDULE_6HR)
+# Starts RUNNING — uses calibrated default emission rates until first inversion completes.
+# ============================================================================
+
+@dg.schedule(
+    job=dispersion_forecast_job,
+    cron_schedule=SCHEDULE_6HR,
+    description="6-hourly Gaussian forward forecast + alert check + HYSPLIT forward bundle",
+    default_status=dg.DefaultScheduleStatus.RUNNING,
+    tags={"environment": "production", "schedule_type": "dispersion_forecast"},
+)
+def dispersion_forecast_schedule(context: dg.ScheduleEvaluationContext):
+    """Trigger 6-hourly dispersion forward forecast using current forecast meteorology."""
+    return dg.RunRequest(
+        run_key=f"dispersion_forecast_{context.scheduled_execution_time.strftime('%Y-%m-%d_%H')}",
     )

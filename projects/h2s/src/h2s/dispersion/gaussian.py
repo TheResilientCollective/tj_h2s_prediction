@@ -1,0 +1,288 @@
+"""
+Gaussian plume forward model for H2S dispersion forecasting.
+
+Implements a time-varying Gaussian plume with:
+  - Multiple simultaneous point sources (East/West/South zones)
+  - Pasquill-Gifford stability class derived from wind speed + is_night
+  - Hourly met updates from a forecast or observation DataFrame
+  - Sensor-point concentration extraction at NB, IB, SY
+
+Emission rates must be in g/s throughout. Always derive Q from backward
+inversion (Lagrangian ensemble or HYSPLIT cdump) before operational use.
+Default calibration values: east=20, west=10, south=137 g/s (March 13 2026 event).
+
+Adapted from modeling_sources/gaussian_forward.py for use as a library module.
+Key changes:
+  - Dagster @asset removed (lives in h2s_dispersion_pipeline.py)
+  - Emission rate units canonicalized to g/s (removing g/hr label confusion)
+  - ForwardModelResult.to_json() uses "emission_rates_g_s" key
+"""
+
+import json
+import argparse
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass, field
+from typing import Optional
+
+
+# --- Sensor locations ---
+
+SENSORS = {
+    "NESTOR - BES": {"lat": 32.567097, "lon": -117.090656},
+    "IB CIVIC CTR": {"lat": 32.576139, "lon": -117.115361},
+    "SAN YSIDRO":   {"lat": 32.552794, "lon": -117.047286},
+}
+
+# Three emission source zones
+SOURCES = {
+    "east":  {"lat": 32.541, "lon": -117.058, "name": "Stewart's Drain / Dairy Mart"},
+    "west":  {"lat": 32.570, "lon": -117.127, "name": "Oneonta Slough / PS"},
+    "south": {"lat": 32.537, "lon": -117.099, "name": "Goat Canyon / cross-border"},
+}
+
+# Pasquill-Gifford dispersion coefficients (Slade 1968, rural)
+# sigma_y = a * x^b, sigma_z = c * x^d  (x in km, sigma in m)
+PG_PARAMS = {
+    "A": (0.22, 0.894, 0.20, 0.894),
+    "B": (0.16, 0.894, 0.12, 0.894),
+    "C": (0.11, 0.894, 0.08, 0.894),
+    "D": (0.08, 0.894, 0.06, 0.894),
+    "E": (0.06, 0.894, 0.03, 0.894),
+    "F": (0.04, 0.894, 0.016, 0.894),
+}
+
+M_PER_DEG_LAT = 111_320.0
+M_PER_DEG_LON = 111_320.0 * np.cos(np.radians(32.55))
+MW_H2S = 34.08
+MOLAR_VOL_STP = 24.45  # L/mol at 20°C
+
+
+def stability_class(wind_speed_ms: float, is_night: bool) -> str:
+    if is_night:
+        if wind_speed_ms < 2.0:
+            return "F"
+        elif wind_speed_ms < 3.0:
+            return "E"
+        else:
+            return "D"
+    else:
+        if wind_speed_ms < 2.0:
+            return "B"
+        elif wind_speed_ms < 5.0:
+            return "C"
+        else:
+            return "D"
+
+
+def pg_sigmas(stab: str, x_km: float) -> tuple[float, float]:
+    a_y, b_y, a_z, b_z = PG_PARAMS[stab]
+    x_km = max(x_km, 0.01)
+    sigma_y = a_y * (x_km ** b_y) * 1000.0
+    sigma_z = a_z * (x_km ** b_z) * 1000.0
+    return sigma_y, sigma_z
+
+
+def ug_m3_to_ppb(conc_ug_m3: float, temp_c: float = 20.0) -> float:
+    molar_vol = MOLAR_VOL_STP * (273.15 + temp_c) / 293.15
+    return conc_ug_m3 * molar_vol / MW_H2S
+
+
+def gaussian_plume_concentration(
+    source_lat: float, source_lon: float,
+    emission_rate_g_s: float,
+    receptor_lat: float, receptor_lon: float,
+    wind_u: float, wind_v: float,
+    stab: str,
+    stack_height: float = 2.0,
+    receptor_height: float = 1.5,
+    sigma_theta_deg: float = 20.0,
+) -> float:
+    """
+    Steady-state Gaussian plume concentration (μg/m³) at receptor.
+
+    Includes Gifford (1961) wind meandering correction for light winds — critical
+    for stable nocturnal conditions (class E/F) where slow wind direction
+    oscillations broaden the time-averaged footprint.
+
+    Args:
+        emission_rate_g_s: Emission rate in g/s.
+
+    Returns 0 if receptor is upwind of source.
+    """
+    wind_speed = np.sqrt(wind_u**2 + wind_v**2)
+    wind_speed_eff = max(wind_speed, 0.3)
+
+    if wind_speed < 0.1:
+        dist_m = max(np.sqrt(
+            ((receptor_lat - source_lat) * M_PER_DEG_LAT) ** 2 +
+            ((receptor_lon - source_lon) * M_PER_DEG_LON) ** 2
+        ), 50.0)
+        mixing_height = 50.0
+        conc = emission_rate_g_s * 1e6 / (dist_m * dist_m * mixing_height)
+        return max(conc, 0.0)
+
+    u_hat = np.array([wind_u, wind_v]) / wind_speed
+    dx = (receptor_lon - source_lon) * M_PER_DEG_LON
+    dy = (receptor_lat - source_lat) * M_PER_DEG_LAT
+    r = np.array([dx, dy])
+
+    x_down = float(np.dot(r, u_hat))
+    if x_down <= 0:
+        return 0.0
+
+    y_cross = float(u_hat[0] * r[1] - u_hat[1] * r[0])
+    x_km = x_down / 1000.0
+    sigma_y, sigma_z = pg_sigmas(stab, x_km)
+
+    sigma_theta_rad = np.radians(sigma_theta_deg)
+    sigma_y_eff = np.sqrt(sigma_y**2 + (sigma_theta_rad * x_down)**2)
+
+    Q = emission_rate_g_s * 1e6
+    exp_y = np.exp(-0.5 * (y_cross / sigma_y_eff) ** 2)
+    exp_z_direct  = np.exp(-0.5 * ((receptor_height - stack_height) / sigma_z) ** 2)
+    exp_z_reflect = np.exp(-0.5 * ((receptor_height + stack_height) / sigma_z) ** 2)
+
+    conc = (Q / (np.pi * wind_speed_eff * sigma_y_eff * sigma_z)) * exp_y * (exp_z_direct + exp_z_reflect)
+    return max(conc, 0.0)
+
+
+@dataclass
+class ForwardModelResult:
+    times: list
+    concentrations: dict   # sensor_name → list of ppb values
+    emission_rates_g_s: dict   # zone → g/s
+    metadata: dict = field(default_factory=dict)
+
+    def to_dataframe(self) -> pd.DataFrame:
+        rows = []
+        for i, t in enumerate(self.times):
+            for sensor, ppb_vals in self.concentrations.items():
+                rows.append({"time": t, "sensor": sensor, "predicted_ppb": ppb_vals[i]})
+        return pd.DataFrame(rows)
+
+    def to_json(self) -> str:
+        d = {
+            "emission_rates_g_s": self.emission_rates_g_s,
+            "metadata": self.metadata,
+            "timeseries": {},
+        }
+        for sensor, vals in self.concentrations.items():
+            d["timeseries"][sensor] = [
+                {"time": str(t), "predicted_ppb": round(v, 3) if not np.isnan(v) else None}
+                for t, v in zip(self.times, vals)
+            ]
+        return json.dumps(d, indent=2)
+
+
+def run_forward_model(
+    df: pd.DataFrame,
+    emission_rates_g_s: dict[str, float],
+    start_time: pd.Timestamp,
+    hours: int = 72,
+    ref_sensor: str = "NESTOR - BES",
+) -> ForwardModelResult:
+    """
+    Run Gaussian plume forward model over a time window.
+
+    Args:
+        df: DataFrame with time, site_name, wind_speed_10m, wind_direction_10m,
+            temperature_2m, is_night columns. Can be forecast or observation data.
+        emission_rates_g_s: {"east": Q, "west": Q, "south": Q} in g/s.
+        start_time: Forecast start (tz-aware).
+        hours: Forecast duration in hours.
+        ref_sensor: Sensor to use for met when per-sensor data is unavailable.
+    """
+    times = pd.date_range(start_time, periods=hours, freq="1h")
+    concentrations = {sname: [] for sname in SENSORS}
+
+    for t in times:
+        for sensor_name, sensor_coords in SENSORS.items():
+            row = df[(df["time"] == t) & (df["site_name"] == sensor_name)]
+            if row.empty:
+                row = df[(df["time"] == t) & (df["site_name"] == ref_sensor)]
+            if row.empty:
+                concentrations[sensor_name].append(np.nan)
+                continue
+
+            ws = float(row["wind_speed_10m"].iloc[0])
+            wd_deg = float(row["wind_direction_10m"].iloc[0])
+            temp_c = float(row["temperature_2m"].iloc[0])
+            is_night = bool(row["is_night"].iloc[0])
+
+            wd_rad = np.radians(wd_deg)
+            u = -ws * np.sin(wd_rad)
+            v = -ws * np.cos(wd_rad)
+            stab = stability_class(ws, is_night)
+
+            total_ug_m3 = 0.0
+            for zone, src in SOURCES.items():
+                q = emission_rates_g_s.get(zone, 0.0)
+                if q <= 0:
+                    continue
+                total_ug_m3 += gaussian_plume_concentration(
+                    source_lat=src["lat"],
+                    source_lon=src["lon"],
+                    emission_rate_g_s=q,
+                    receptor_lat=sensor_coords["lat"],
+                    receptor_lon=sensor_coords["lon"],
+                    wind_u=u, wind_v=v,
+                    stab=stab,
+                )
+
+            concentrations[sensor_name].append(round(float(ug_m3_to_ppb(total_ug_m3, temp_c)), 3))
+
+    return ForwardModelResult(
+        times=list(times),
+        concentrations=concentrations,
+        emission_rates_g_s=emission_rates_g_s,
+        metadata={
+            "model": "Gaussian plume (Pasquill-Gifford, Slade 1968)",
+            "start_time": str(start_time),
+            "hours": hours,
+            "sources": SOURCES,
+        },
+    )
+
+
+if __name__ == "__main__":
+    import os
+    from pathlib import Path
+
+    def _parse_rates(s: str) -> dict[str, float]:
+        result = {}
+        for part in s.split(","):
+            k, v = part.split("=")
+            result[k.strip()] = float(v.strip())
+        return result
+
+    parser = argparse.ArgumentParser(description="Gaussian forward H2S dispersion model")
+    parser.add_argument("--data", default=os.environ.get("H2S_DATA_PATH", "modeldata_h2s_nofill.csv"))
+    parser.add_argument("--emission_rates", default="east=20,west=10,south=137",
+                        help="zone=Q(g/s) pairs, comma separated")
+    parser.add_argument("--start", default=None, help="Forecast start ISO (local time). Default: now.")
+    parser.add_argument("--hours", type=int, default=72)
+    parser.add_argument("--output", default="./forward_output")
+    args = parser.parse_args()
+
+    df = pd.read_csv(args.data) if args.data.endswith(".csv") else pd.read_parquet(args.data)
+    df["time"] = pd.to_datetime(df["time"], utc=True).dt.tz_convert("America/Los_Angeles")
+
+    if args.start:
+        start = pd.Timestamp(args.start).tz_localize("America/Los_Angeles")
+    else:
+        start = pd.Timestamp.now(tz="America/Los_Angeles").floor("1h")
+
+    rates = _parse_rates(args.emission_rates)
+    print(f"Forward model: sources={rates} g/s, start={start}, hours={args.hours}")
+
+    result = run_forward_model(df, rates, start, args.hours)
+
+    Path(args.output).mkdir(parents=True, exist_ok=True)
+    out_path = Path(args.output) / f"forecast_{start.strftime('%Y%m%d_%H')}.json"
+    out_path.write_text(result.to_json())
+    print(f"Saved → {out_path}")
+
+    df_out = result.to_dataframe()
+    print("\nPeak predicted concentrations (ppb):")
+    print(df_out.groupby("sensor")["predicted_ppb"].max().round(1).to_string())
