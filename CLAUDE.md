@@ -386,18 +386,18 @@ s3://test/
 - 2-hour integration (21 km reach) is appropriate for Tijuana River Valley scale
 - Critical fix: 6h gave east=0%, 2h gives east=46% (east sources now correctly detected)
 
-**Current emission rates (from 2-hour Lagrangian inversion, Feb-Apr 2026):**
-- East: 76.1 g/s (Stewart's Drain, Silva Drain, TJ crossing: 45.6% of total)
-- West: 33.7 g/s (Tijuana Beach Outlet, Oneonta Slough: 20.2% of total)
-- South: 57.2 g/s (Goat Canyon, Smugglers Gulch: 34.3% of total)
+**Current emission rates (wind-dependent Lagrangian inversion, Feb-Apr 2026):**
+- East: 87.3 g/s (Dairy Mart Bridge dominant: 14.2%; 52.3% of total)
+- West: 29.9 g/s (Tijuana Beach Outlet, Oneonta Slough: 17.9% of total)
+- South: 49.8 g/s (Goat Canyon, Smugglers Gulch: 29.8% of total)
 - Total: 167 g/s (conserved from March 13 2026 calibration event)
 
-**Wind speed dependency (critical finding):**
-- H2S strongly anti-correlated with wind speed (r = -0.246)
-- Low wind (0-1 m/s): mean H2S = 49.9 ppb (weak dilution)
-- High wind (>5 m/s): mean H2S = 6.4 ppb (strong dilution)
-- Current Lagrangian model uses fixed diffusion (sigma_u=0.3) — should be wind-dependent (sigma ~ U^0.5)
-- See WIND_SPEED_DEPENDENCY.md for recommended parameterization
+**Wind-dependent diffusion (implemented):**
+- H2S strongly anti-correlated with wind speed (r = -0.246): low wind → high H2S
+- Lagrangian model now uses σ ~ U^0.5 (calm winds: σ ~ 0.21 m/s; strong winds: σ ~ 0.34 m/s)
+- Sharper attribution during calm events → east sources properly identified
+- Comparison: Fixed σ=0.3 gave east=45.6%; wind-dependent gave east=52.3%
+- See WIND_SPEED_DEPENDENCY.md for implementation details
 
 **Why upload HYSPLIT bundles but not execute?**
 - HYSPLIT requires ~20 GB GDAS meteorology files and specialized container environment

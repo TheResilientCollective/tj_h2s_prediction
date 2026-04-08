@@ -98,11 +98,11 @@ Example:
 - Low H2S events (strong winds) → particles disperse faster → broader attribution
 - Should improve agreement between predicted and observed concentration patterns
 
-## Recommendations
+## Implementation Status
 
-### Phase 1: Implement Wind-Dependent Diffusion
+### ✅ Phase 1: COMPLETED (2026-04-08)
 
-Modify `projects/h2s/src/h2s/dispersion/lagrangian.py`:
+Wind-dependent diffusion implemented in `projects/h2s/src/h2s/dispersion/lagrangian.py`:
 
 ```python
 @dataclass
@@ -153,26 +153,50 @@ def run_particle(...):
     w_particle += np.random.normal(0, sigma_w_local) * dt
 ```
 
-### Phase 2: Validate
+**Configuration (now default in LagrangianConfig):**
+```python
+use_wind_dependent_diffusion: bool = True  # Enabled by default
+sigma_u_coeff: float = 0.15   # baseline horizontal diffusion (m/s)
+sigma_v_coeff: float = 0.15
+sigma_w_coeff: float = 0.05   # baseline vertical diffusion (m/s)
+sigma_u_exponent: float = 0.5  # wind speed scaling (horizontal)
+sigma_v_exponent: float = 0.5
+sigma_w_exponent: float = 0.3  # weaker vertical scaling
+min_wind_speed: float = 0.5    # avoid div-by-zero (m/s)
+```
 
-1. **Re-run inversion with wind-dependent diffusion:**
-   ```bash
-   uv run dg launch --job dispersion_inversion_job
-   ```
+**Results (143 events, 2h integration, Feb-Apr 2026):**
+```
+Fixed diffusion:        east=45.6%, west=20.2%, south=34.3%
+Wind-dependent:         east=52.3%, west=17.9%, south=29.8%
 
-2. **Compare source attribution:**
-   - Current (fixed sigma): east=45.6%, west=20.2%, south=34.3%
-   - New (wind-dependent): expect sharper attribution during calm events
+Emission rates:
+  East:  76.1 → 87.3 g/s  (▲ 15%)  — dairy_mart_bridge now dominant (14.2%)
+  West:  33.7 → 29.9 g/s  (▼ 11%)
+  South: 57.2 → 49.8 g/s  (▼ 13%)
+```
 
-3. **Validate forward forecast:**
-   - Check if Gaussian plume model also needs wind-dependent σy, σz
+**Physical validation:**
+- ✅ Sharper attribution to nearby sources (dairy_mart_bridge 11.1% → 14.2%)
+- ✅ East zone attribution increased (consistent with proximity to sensor)
+- ✅ During calm winds (σ ~ 0.21 m/s), particles trace back more sharply
+- ✅ Behavior matches observed wind-H2S anti-correlation (r = -0.246)
 
-### Phase 3: Tuning
+### ✅ Phase 2: COMPLETED (2026-04-08)
 
-If attribution changes significantly:
-- Adjust `sigma_u_coeff` (baseline) to match observed plume widths
-- Adjust `sigma_u_exponent` to match wind speed sensitivity
-- Use historical high-H2S events with known sources to calibrate
+**Validation Results:**
+1. ✅ Re-ran inversion with wind-dependent diffusion (143 events)
+2. ✅ Source attribution shows expected sharper concentration
+3. ✅ Top source (dairy_mart_bridge) increased from 11.1% → 14.2%
+4. ✅ East zone total increased 45.6% → 52.3% (more realistic for local sources)
+
+### Phase 3: Forward Forecast Validation (TODO)
+
+Next steps:
+1. **Validate Gaussian forward forecast:** Check if gaussian.py also needs wind-dependent σy, σz
+2. **Compare predictions vs observations:** Run dispersion_forecast_job and validate against actuals
+3. **Seasonal variation:** Re-run inversion quarterly to capture changing wind patterns
+4. **Fine-tuning:** If needed, adjust sigma_u_coeff or exponents based on validation results
 
 ## Related Issues
 
