@@ -54,7 +54,8 @@ from h2s.constants import (
     HYSPLIT_FORWARD_BUNDLE_PATH,
     LAGRANGIAN_ENSEMBLE_PATH,
     LAGRANGIAN_FOOTPRINT_PATH,
-    OBS_DATA_PATH, LAGRANGIAN_FOOTPRINT_NAME,
+    OBS_DATA_PATH,
+    LAGRANGIAN_FOOTPRINT_NAME,
 )
 from h2s.dispersion import (
     LagrangianConfig,
