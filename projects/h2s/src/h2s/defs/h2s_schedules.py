@@ -80,6 +80,7 @@ from h2s.defs.h2s_dispersion_pipeline import (
     emission_rate_inversion,
     hysplit_controls_generation,
     gaussian_forward_forecast,
+    gaussian_forward_forecast_detailed,
     dispersion_alert_check,
 )
 
@@ -441,11 +442,13 @@ dispersion_forecast_job = dg.define_asset_job(
     name="dispersion_forecast_job",
     description=(
         "6-hourly Gaussian plume forward forecast using forecast meteorology, "
-        "dispersion alert check, and HYSPLIT forward CONTROL bundle upload."
+        "dispersion alert check, and HYSPLIT forward CONTROL bundle upload. "
+        "Runs both 3-source coarse and 16-source detailed models in parallel."
     ),
     selection=dg.AssetSelection.assets(
         emission_rate_inversion,
         gaussian_forward_forecast,
+        gaussian_forward_forecast_detailed,
         dispersion_alert_check,
         hysplit_controls_generation,
     ),

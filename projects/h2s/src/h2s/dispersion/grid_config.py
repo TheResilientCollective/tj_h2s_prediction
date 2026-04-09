@@ -21,6 +21,14 @@ GRID_BOUNDS = {
     "west": -117.25,
 }
 
+# Visualization bounds (tighter focus on source/sensor region)
+VIZ_BOUNDS = {
+    "north": 32.60,
+    "south": 32.50,
+    "east": -117.00,
+    "west": -117.15,
+}
+
 GRID_RESOLUTION_METERS = 100  # 100 m cell size
 
 # Derived grid dimensions (computed once at import time)

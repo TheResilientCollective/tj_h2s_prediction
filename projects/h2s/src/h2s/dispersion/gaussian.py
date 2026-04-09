@@ -34,11 +34,33 @@ SENSORS = {
     "SAN YSIDRO":   {"lat": 32.552794, "lon": -117.047286},
 }
 
-# Three emission source zones
+# Three emission source zones (COARSE: for fast regional forecasts)
 SOURCES = {
     "east":  {"lat": 32.541, "lon": -117.058, "name": "Stewart's Drain / Dairy Mart"},
     "west":  {"lat": 32.570, "lon": -117.127, "name": "Oneonta Slough / PS"},
     "south": {"lat": 32.537, "lon": -117.099, "name": "Goat Canyon / cross-border"},
+}
+
+# Sixteen candidate sources (DETAILED: for high-resolution spatial forecasts)
+# Same source locations as lagrangian.py backward model
+CANDIDATE_SOURCES = {
+    "stewarts_drain":       {"lat": 32.54064,  "lon": -117.05801,  "name": "Stewart's Drain"},
+    "smugglers_gulch":      {"lat": 32.5377,   "lon": -117.08623,  "name": "Smuggler's Gulch"},
+    "hollister_ps":         {"lat": 32.5476,   "lon": -117.088374, "name": "Hollister PS"},
+    "goat_canyon":          {"lat": 32.5369,   "lon": -117.09916,  "name": "Goat Canyon"},
+    "goat_canyon_ps":       {"lat": 32.543476, "lon": -117.108026, "name": "Goat Canyon PS"},
+    "del_sol_canyon":       {"lat": 32.5393,   "lon": -117.06885,  "name": "Del Sol Canyon"},
+    "silva_drain":          {"lat": 32.539743, "lon": -117.064269, "name": "Silva Drain"},
+    "saturn_blvd_bridge":   {"lat": 32.559383, "lon": -117.092992, "name": "Saturn Blvd Bridge"},
+    "hollister_bridge_n":   {"lat": 32.554177, "lon": -117.084135, "name": "Hollister Bridge N"},
+    "hollister_bridge_s":   {"lat": 32.551466, "lon": -117.084021, "name": "Hollister Bridge S"},
+    "dairy_mart_bridge":    {"lat": 32.548531, "lon": -117.064293, "name": "Dairy Mart Bridge"},
+    "oneonta_slough":       {"lat": 32.570082, "lon": -117.126724, "name": "Oneonta Slough"},
+    "tijuana_beach_outlet": {"lat": 32.556206, "lon": -117.126178, "name": "Tijuana Beach Outlet"},
+    "tj_crossing_cdlp_w":   {"lat": 32.542103, "lon": -117.054117, "name": "TJ Crossing CDLP W"},
+    "tj_crossing_cdlp_e":   {"lat": 32.542166, "lon": -117.050325, "name": "TJ Crossing CDLP E"},
+    "sd_bay_otay_outlet":   {"lat": 32.594557, "lon": -117.113542, "name": "SD Bay Otay Outlet"},
+    "sd_bay_fruitdale":     {"lat": 32.595305, "lon": -117.091869, "name": "SD Bay Fruitdale"},
 }
 
 # Pasquill-Gifford dispersion coefficients (Slade 1968, rural)
@@ -245,6 +267,80 @@ def run_forward_model(
     )
 
 
+def run_forward_model_detailed(
+    df: pd.DataFrame,
+    emission_rates_per_source_g_s: dict[str, float],
+    start_time: pd.Timestamp,
+    hours: int = 72,
+    ref_sensor: str = "NESTOR - BES",
+) -> ForwardModelResult:
+    """
+    Run Gaussian plume forward model with 16 individual candidate sources.
+
+    This provides a more spatially accurate representation of the source
+    distribution compared to the 3-zone aggregated model.
+
+    Args:
+        df: DataFrame with time, site_name, wind_speed_10m, wind_direction_10m,
+            temperature_2m, is_night columns. Can be forecast or observation data.
+        emission_rates_per_source_g_s: {"stewarts_drain": Q, "goat_canyon": Q, ...} in g/s.
+        start_time: Forecast start (tz-aware).
+        hours: Forecast duration in hours.
+        ref_sensor: Sensor to use for met when per-sensor data is unavailable.
+    """
+    times = pd.date_range(start_time, periods=hours, freq="1h")
+    concentrations = {sname: [] for sname in SENSORS}
+
+    for t in times:
+        for sensor_name, sensor_coords in SENSORS.items():
+            row = df[(df["time"] == t) & (df["site_name"] == sensor_name)]
+            if row.empty:
+                row = df[(df["time"] == t) & (df["site_name"] == ref_sensor)]
+            if row.empty:
+                concentrations[sensor_name].append(np.nan)
+                continue
+
+            ws = float(row["wind_speed_10m"].iloc[0])
+            wd_deg = float(row["wind_direction_10m"].iloc[0])
+            temp_c = float(row["temperature_2m"].iloc[0])
+            is_night = bool(row["is_night"].iloc[0])
+
+            wd_rad = np.radians(wd_deg)
+            u = -ws * np.sin(wd_rad)
+            v = -ws * np.cos(wd_rad)
+            stab = stability_class(ws, is_night)
+
+            total_ug_m3 = 0.0
+            for src_name, src in CANDIDATE_SOURCES.items():
+                q = emission_rates_per_source_g_s.get(src_name, 0.0)
+                if q <= 0:
+                    continue
+                total_ug_m3 += gaussian_plume_concentration(
+                    source_lat=src["lat"],
+                    source_lon=src["lon"],
+                    emission_rate_g_s=q,
+                    receptor_lat=sensor_coords["lat"],
+                    receptor_lon=sensor_coords["lon"],
+                    wind_u=u, wind_v=v,
+                    stab=stab,
+                )
+
+            concentrations[sensor_name].append(round(float(ug_m3_to_ppb(total_ug_m3, temp_c)), 3))
+
+    return ForwardModelResult(
+        times=list(times),
+        concentrations=concentrations,
+        emission_rates_g_s=emission_rates_per_source_g_s,
+        metadata={
+            "model": "Gaussian plume (Pasquill-Gifford, Slade 1968, 16-source detailed)",
+            "start_time": str(start_time),
+            "hours": hours,
+            "n_sources": len(CANDIDATE_SOURCES),
+            "sources": CANDIDATE_SOURCES,
+        },
+    )
+
+
 def _build_grid_data(
     concentration_grid: np.ndarray,
     confidence_grid: np.ndarray,
@@ -408,6 +504,135 @@ def run_forward_model_gridded(
                 "wind_direction_deg": round(wd_deg, 1),
                 "stability_class": stab,
                 "emission_rates_g_s": {k: float(v) for k, v in emission_rates_g_s.items()},
+            },
+        ))
+
+    return frames
+
+
+def run_forward_model_gridded_detailed(
+    df: pd.DataFrame,
+    emission_rates_per_source_g_s: dict[str, float],
+    start_time: pd.Timestamp,
+    hours: int = 72,
+    ref_sensor: str = "NESTOR - BES",
+) -> list[dict]:
+    """Run Gaussian plume forward model with 16 sources and return per-hour GeoDemic GridData dicts.
+
+    This is the detailed version of ``run_forward_model_gridded()`` that uses
+    individual candidate sources instead of 3 aggregate zones. Provides more
+    spatially accurate concentration fields at the cost of ~5× slower execution.
+
+    Evaluates ``gaussian_plume_concentration()`` at every cell of the unified
+    grid (from ``grid_config``) for each forecast hour.  Returns a list of
+    GridData dicts (one per hour) suitable for direct upload to S3 and
+    consumption by GeoDemic's ``HeatMapLayer``.
+
+    Args:
+        df: Met DataFrame (same format as ``run_forward_model``).
+        emission_rates_per_source_g_s: {"stewarts_drain": Q, "goat_canyon": Q, ...} in g/s.
+        start_time: Forecast start (tz-aware).
+        hours: Forecast duration in hours.
+        ref_sensor: Fallback sensor for met when per-sensor data is missing.
+
+    Returns:
+        List of GridData dicts, one per forecast hour.
+    """
+    from h2s.dispersion.grid_config import (
+        GRID_BOUNDS,
+        GRID_LAT_CENTERS,
+        GRID_LON_CENTERS,
+        GRID_NROWS,
+        GRID_NCOLS,
+        GRID_RESOLUTION_METERS,
+    )
+
+    times = pd.date_range(start_time, periods=hours, freq="1h")
+
+    # Pre-build 2-D coordinate meshes (rows=lat, cols=lon)
+    lon_mesh, lat_mesh = np.meshgrid(GRID_LON_CENTERS, GRID_LAT_CENTERS)
+
+    sensor_coords = [(s["lat"], s["lon"]) for s in SENSORS.values()]
+
+    frames: list[dict] = []
+
+    for hour_idx, t in enumerate(times):
+        # Get met for this timestep (use ref_sensor as representative)
+        row = df[(df["time"] == t) & (df["site_name"] == ref_sensor)]
+        if row.empty:
+            # Try any sensor for this timestep
+            row = df[df["time"] == t]
+        if row.empty:
+            # No met available — produce an empty grid for this hour
+            frames.append(_build_grid_data(
+                concentration_grid=np.zeros((GRID_NROWS, GRID_NCOLS)),
+                confidence_grid=np.full((GRID_NROWS, GRID_NCOLS), 0.1),
+                lat_centers=GRID_LAT_CENTERS,
+                lon_centers=GRID_LON_CENTERS,
+                bounds=GRID_BOUNDS,
+                resolution_meters=GRID_RESOLUTION_METERS,
+                metadata={"time": str(t), "hour_index": hour_idx, "status": "no_met"},
+            ))
+            continue
+
+        row = row.iloc[0]
+        ws = float(row["wind_speed_10m"])
+        wd_deg = float(row["wind_direction_10m"])
+        temp_c = float(row.get("temperature_2m", 20.0))
+        is_night_val = bool(row.get("is_night", 0))
+
+        wd_rad = np.radians(wd_deg)
+        wind_u = -ws * np.sin(wd_rad)
+        wind_v = -ws * np.cos(wd_rad)
+        stab = stability_class(ws, is_night_val)
+
+        # Accumulate concentration from all 16 candidate sources
+        total_ppb = np.zeros((GRID_NROWS, GRID_NCOLS))
+
+        for src_name, src in CANDIDATE_SOURCES.items():
+            q = emission_rates_per_source_g_s.get(src_name, 0.0)
+            if q <= 0:
+                continue
+
+            # Vectorized plume evaluation over the grid
+            conc_ug = _gaussian_plume_grid(
+                source_lat=src["lat"],
+                source_lon=src["lon"],
+                emission_rate_g_s=q,
+                lat_grid=lat_mesh,
+                lon_grid=lon_mesh,
+                wind_u=wind_u,
+                wind_v=wind_v,
+                stab=stab,
+            )
+            total_ppb += _ug_grid_to_ppb(conc_ug, temp_c)
+
+        confidence = _confidence_from_distance(lat_mesh, lon_mesh, sensor_coords, forecast_lead_h=hour_idx)
+
+        # Compute top contributing sources for this hour (for metadata)
+        source_contributions = {}
+        for src_name, src in CANDIDATE_SOURCES.items():
+            q = emission_rates_per_source_g_s.get(src_name, 0.0)
+            if q > 0:
+                source_contributions[src_name] = round(q, 2)
+        top_3_sources = dict(sorted(source_contributions.items(), key=lambda x: -x[1])[:3])
+
+        frames.append(_build_grid_data(
+            concentration_grid=np.round(total_ppb, 3),
+            confidence_grid=np.round(confidence, 3),
+            lat_centers=GRID_LAT_CENTERS,
+            lon_centers=GRID_LON_CENTERS,
+            bounds=GRID_BOUNDS,
+            resolution_meters=GRID_RESOLUTION_METERS,
+            metadata={
+                "time": str(t),
+                "hour_index": hour_idx,
+                "wind_speed_ms": round(ws, 2),
+                "wind_direction_deg": round(wd_deg, 1),
+                "stability_class": stab,
+                "n_sources": len(CANDIDATE_SOURCES),
+                "top_3_sources_g_s": top_3_sources,
+                "emission_rates_per_source_g_s": {k: float(v) for k, v in emission_rates_per_source_g_s.items() if v > 0},
             },
         ))
 
