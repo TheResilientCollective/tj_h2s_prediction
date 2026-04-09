@@ -31,6 +31,10 @@ from h2s.constants import (
     DISPERSION_DEFAULT_EMISSION_RATES_GS,
     DISPERSION_FORECAST_LATEST_PATH,
     DISPERSION_FORECAST_PATH,
+    DISPERSION_FORWARD_GRID_FRAMES_LATEST_PATH,
+    DISPERSION_FORWARD_GRID_LATEST_PATH,
+    DISPERSION_FORWARD_GRID_PATH,
+    DISPERSION_SOURCE_FOOTPRINT_GRID_LATEST_PATH,
     EMISSION_RATES_PATH,
     FORECAST_DATA_PATH,
     HYSPLIT_BACKWARD_BUNDLE_LATEST,
@@ -45,8 +49,18 @@ from h2s.dispersion import (
     LagrangianConfig,
     generate_hysplit_bundle,
     run_forward_model,
+    run_forward_model_gridded,
+    footprint_to_grid_data,
     run_inversion_window,
     source_attribution,
+)
+from h2s.dispersion.grid_config import (
+    GRID_BOUNDS,
+    GRID_LAT_CENTERS,
+    GRID_LON_CENTERS,
+    GRID_NROWS,
+    GRID_NCOLS,
+    GRID_RESOLUTION_METERS,
 )
 from h2s.utils import store_assets
 
@@ -194,6 +208,25 @@ def lagrangian_source_attribution(
                                       formats=['csv', 'parquet','json'], metadata=metadata)
     log.info(f"Uploaded footprint parquet → {LAGRANGIAN_FOOTPRINT_PATH}")
 
+    # --- GeoDemic-compatible grid output ---
+    log.info("Resampling footprint to unified grid (GeoDemic GridData format)")
+    footprint_grid = footprint_to_grid_data(
+        ensemble_footprint,
+        metadata={
+            "n_events": n_events,
+            "date_range": f"{config.date_start} to {config.date_end}",
+            "h2s_threshold_ppb": config.h2s_threshold_ppb,
+            "top_sources": {k: round(v, 4) for k, v in top_sources},
+        },
+    )
+    footprint_grid_json = json.dumps(footprint_grid)
+    s3.putFile(
+        footprint_grid_json.encode(),
+        path=DISPERSION_SOURCE_FOOTPRINT_GRID_LATEST_PATH,
+        content_type="application/json",
+    )
+    log.info(f"Uploaded footprint grid → {DISPERSION_SOURCE_FOOTPRINT_GRID_LATEST_PATH}")
+
     return dg.MaterializeResult(metadata={
         "n_events_processed": dg.MetadataValue.int(n_events),
         "top_source_1": dg.MetadataValue.text(top_sources[0][0] if len(top_sources) > 0 else "n/a"),
@@ -201,6 +234,7 @@ def lagrangian_source_attribution(
         "top_source_3": dg.MetadataValue.text(top_sources[2][0] if len(top_sources) > 2 else "n/a"),
         "s3_ensemble": dg.MetadataValue.text(LAGRANGIAN_ENSEMBLE_PATH),
         "s3_footprint": dg.MetadataValue.text(LAGRANGIAN_FOOTPRINT_PATH),
+        "s3_footprint_grid": dg.MetadataValue.text(DISPERSION_SOURCE_FOOTPRINT_GRID_LATEST_PATH),
     })
 
 
@@ -449,7 +483,40 @@ def gaussian_forward_forecast(
     versioned_path = DISPERSION_FORECAST_PATH.format(run_tag=run_tag)
     s3.putFile(forecast_json.encode(), path=versioned_path, content_type="application/json")
     s3.putFile(forecast_json.encode(), path=DISPERSION_FORECAST_LATEST_PATH, content_type="application/json")
-    log.info(f"Uploaded forecast → {versioned_path}")
+    log.info(f"Uploaded sensor forecast → {versioned_path}")
+
+    # --- GeoDemic-compatible grid output ---
+    log.info("Generating gridded forward forecast (GeoDemic GridData format)")
+    grid_frames = run_forward_model_gridded(
+        fc_df, emission_rates, start_time, config.forecast_hours,
+    )
+
+    # Upload current-hour grid (first frame)
+    if grid_frames:
+        first_frame_json = json.dumps(grid_frames[0])
+        s3.putFile(first_frame_json.encode(), path=DISPERSION_FORWARD_GRID_LATEST_PATH, content_type="application/json")
+        grid_versioned = DISPERSION_FORWARD_GRID_PATH.format(run_tag=run_tag)
+        s3.putFile(first_frame_json.encode(), path=grid_versioned, content_type="application/json")
+        log.info(f"Uploaded grid (current hour) → {DISPERSION_FORWARD_GRID_LATEST_PATH}")
+
+    # Upload multi-frame (all hours) for animation — select every 6th hour to keep size manageable
+    frame_indices = list(range(0, len(grid_frames), 6))
+    if frame_indices[-1] != len(grid_frames) - 1:
+        frame_indices.append(len(grid_frames) - 1)
+    animation_frames = [grid_frames[i] for i in frame_indices]
+    animation_payload = {
+        "forecast_start": str(start_time),
+        "n_frames": len(animation_frames),
+        "frame_interval_hours": 6,
+        "emission_rates_g_s": {k: float(v) for k, v in emission_rates.items()},
+        "frames": animation_frames,
+    }
+    frames_json = json.dumps(animation_payload)
+    s3.putFile(frames_json.encode(), path=DISPERSION_FORWARD_GRID_FRAMES_LATEST_PATH, content_type="application/json")
+    log.info(f"Uploaded grid frames ({len(animation_frames)} frames) → {DISPERSION_FORWARD_GRID_FRAMES_LATEST_PATH}")
+
+    # Grid peak (over all frames)
+    grid_peak_ppb = max(np.array(f["data"]).max() for f in grid_frames) if grid_frames else 0.0
 
     return dg.MaterializeResult(metadata={
         "forecast_start":    dg.MetadataValue.text(str(start_time)),
@@ -457,8 +524,12 @@ def gaussian_forward_forecast(
         "peak_ppb_NB":       dg.MetadataValue.float(float(peaks.get("NESTOR - BES", 0.0))),
         "peak_ppb_IB":       dg.MetadataValue.float(float(peaks.get("IB CIVIC CTR", 0.0))),
         "peak_ppb_SY":       dg.MetadataValue.float(float(peaks.get("SAN YSIDRO", 0.0))),
+        "grid_peak_ppb":     dg.MetadataValue.float(float(grid_peak_ppb)),
+        "grid_shape":        dg.MetadataValue.text(f"{GRID_NROWS}x{GRID_NCOLS}"),
+        "grid_n_frames":     dg.MetadataValue.int(len(animation_frames)),
         "emission_rates_g_s": dg.MetadataValue.json({k: float(v) for k, v in emission_rates.items()}),
         "s3_path":           dg.MetadataValue.text(versioned_path),
+        "s3_grid_latest":    dg.MetadataValue.text(DISPERSION_FORWARD_GRID_LATEST_PATH),
     })
 
 

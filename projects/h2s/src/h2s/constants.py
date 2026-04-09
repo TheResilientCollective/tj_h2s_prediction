@@ -230,3 +230,10 @@ DISPERSION_DEFAULT_EMISSION_RATES_GS: dict[str, float] = {
     "west":  10.0,   # Oneonta Slough / pump station
     "south": 137.0,  # Goat Canyon / cross-border (dominant nocturnal source)
 }
+
+# GeoDemic-compatible grid outputs (Phase 1 integration)
+# Versioned paths use .format(run_tag=run_tag)
+DISPERSION_FORWARD_GRID_PATH = 'tijuana/dispersion/grids/forward_grid_{run_tag}.json'
+DISPERSION_FORWARD_GRID_LATEST_PATH = f'{LATEST_BASEPATH}/dispersion/forward_grid_latest.json'
+DISPERSION_FORWARD_GRID_FRAMES_LATEST_PATH = f'{LATEST_BASEPATH}/dispersion/forward_grid_frames_latest.json'
+DISPERSION_SOURCE_FOOTPRINT_GRID_LATEST_PATH = f'{LATEST_BASEPATH}/dispersion/source_footprint_grid_latest.json'

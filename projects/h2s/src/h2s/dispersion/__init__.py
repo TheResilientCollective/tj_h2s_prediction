@@ -13,6 +13,8 @@ from h2s.dispersion.lagrangian import (
 )
 from h2s.dispersion.gaussian import (
     run_forward_model,
+    run_forward_model_gridded,
+    footprint_to_grid_data,
     ForwardModelResult,
     SENSORS as DISPERSION_SENSORS,
     SOURCES as DISPERSION_SOURCE_ZONES,
@@ -26,6 +28,8 @@ __all__ = [
     "CANDIDATE_SOURCES",
     "LAGRANGIAN_SENSORS",
     "run_forward_model",
+    "run_forward_model_gridded",
+    "footprint_to_grid_data",
     "ForwardModelResult",
     "DISPERSION_SENSORS",
     "DISPERSION_SOURCE_ZONES",

@@ -245,6 +245,298 @@ def run_forward_model(
     )
 
 
+def _build_grid_data(
+    concentration_grid: np.ndarray,
+    confidence_grid: np.ndarray,
+    lat_centers: np.ndarray,
+    lon_centers: np.ndarray,
+    bounds: dict,
+    resolution_meters: int,
+    metadata: dict,
+) -> dict:
+    """Build a GeoDemic-compatible GridData dict.
+
+    Matches the frontend ``GridData`` interface::
+
+        { bounds, data[][], confidence[][], lat_centers[], lon_centers[],
+          resolution_meters, metadata }
+    """
+    return {
+        "bounds": bounds,
+        "data": concentration_grid.tolist(),
+        "confidence": confidence_grid.tolist(),
+        "lat_centers": np.round(lat_centers, 6).tolist(),
+        "lon_centers": np.round(lon_centers, 6).tolist(),
+        "resolution_meters": resolution_meters,
+        "metadata": metadata,
+    }
+
+
+def _confidence_from_distance(
+    lat_grid: np.ndarray,
+    lon_grid: np.ndarray,
+    sensor_coords: list[tuple[float, float]],
+    forecast_lead_h: int = 0,
+) -> np.ndarray:
+    """Heuristic confidence score (0-1) based on distance to nearest sensor and forecast lead time.
+
+    Close to sensors → high confidence; far away → lower confidence.
+    Longer forecast lead → lower confidence.
+    """
+    min_dist_m = np.full(lat_grid.shape, np.inf)
+    for s_lat, s_lon in sensor_coords:
+        d_lat = (lat_grid - s_lat) * M_PER_DEG_LAT
+        d_lon = (lon_grid - s_lon) * M_PER_DEG_LON
+        dist = np.sqrt(d_lat ** 2 + d_lon ** 2)
+        min_dist_m = np.minimum(min_dist_m, dist)
+
+    # Distance decay: 1.0 at sensor, 0.3 at 10 km
+    dist_conf = np.clip(1.0 - 0.07 * (min_dist_m / 1000.0), 0.3, 1.0)
+
+    # Lead-time decay: -0.02 per hour of forecast lead
+    lead_decay = max(1.0 - 0.02 * forecast_lead_h, 0.3)
+
+    return dist_conf * lead_decay
+
+
+def run_forward_model_gridded(
+    df: pd.DataFrame,
+    emission_rates_g_s: dict[str, float],
+    start_time: pd.Timestamp,
+    hours: int = 72,
+    ref_sensor: str = "NESTOR - BES",
+) -> list[dict]:
+    """Run Gaussian plume forward model and return per-hour GeoDemic GridData dicts.
+
+    Evaluates ``gaussian_plume_concentration()`` at every cell of the unified
+    grid (from ``grid_config``) for each forecast hour.  Returns a list of
+    GridData dicts (one per hour) suitable for direct upload to S3 and
+    consumption by GeoDemic's ``HeatMapLayer``.
+
+    Args:
+        df: Met DataFrame (same format as ``run_forward_model``).
+        emission_rates_g_s: {"east": Q, "west": Q, "south": Q} in g/s.
+        start_time: Forecast start (tz-aware).
+        hours: Forecast duration in hours.
+        ref_sensor: Fallback sensor for met when per-sensor data is missing.
+
+    Returns:
+        List of GridData dicts, one per forecast hour.
+    """
+    from h2s.dispersion.grid_config import (
+        GRID_BOUNDS,
+        GRID_LAT_CENTERS,
+        GRID_LON_CENTERS,
+        GRID_NROWS,
+        GRID_NCOLS,
+        GRID_RESOLUTION_METERS,
+    )
+
+    times = pd.date_range(start_time, periods=hours, freq="1h")
+
+    # Pre-build 2-D coordinate meshes (rows=lat, cols=lon)
+    lon_mesh, lat_mesh = np.meshgrid(GRID_LON_CENTERS, GRID_LAT_CENTERS)
+
+    sensor_coords = [(s["lat"], s["lon"]) for s in SENSORS.values()]
+
+    frames: list[dict] = []
+
+    for hour_idx, t in enumerate(times):
+        # Get met for this timestep (use ref_sensor as representative)
+        row = df[(df["time"] == t) & (df["site_name"] == ref_sensor)]
+        if row.empty:
+            # Try any sensor for this timestep
+            row = df[df["time"] == t]
+        if row.empty:
+            # No met available — produce an empty grid for this hour
+            frames.append(_build_grid_data(
+                concentration_grid=np.zeros((GRID_NROWS, GRID_NCOLS)),
+                confidence_grid=np.full((GRID_NROWS, GRID_NCOLS), 0.1),
+                lat_centers=GRID_LAT_CENTERS,
+                lon_centers=GRID_LON_CENTERS,
+                bounds=GRID_BOUNDS,
+                resolution_meters=GRID_RESOLUTION_METERS,
+                metadata={"time": str(t), "hour_index": hour_idx, "status": "no_met"},
+            ))
+            continue
+
+        row = row.iloc[0]
+        ws = float(row["wind_speed_10m"])
+        wd_deg = float(row["wind_direction_10m"])
+        temp_c = float(row.get("temperature_2m", 20.0))
+        is_night_val = bool(row.get("is_night", 0))
+
+        wd_rad = np.radians(wd_deg)
+        wind_u = -ws * np.sin(wd_rad)
+        wind_v = -ws * np.cos(wd_rad)
+        stab = stability_class(ws, is_night_val)
+
+        # Accumulate concentration from all source zones
+        total_ppb = np.zeros((GRID_NROWS, GRID_NCOLS))
+
+        for zone, src in SOURCES.items():
+            q = emission_rates_g_s.get(zone, 0.0)
+            if q <= 0:
+                continue
+
+            # Vectorized plume evaluation over the grid
+            conc_ug = _gaussian_plume_grid(
+                source_lat=src["lat"],
+                source_lon=src["lon"],
+                emission_rate_g_s=q,
+                lat_grid=lat_mesh,
+                lon_grid=lon_mesh,
+                wind_u=wind_u,
+                wind_v=wind_v,
+                stab=stab,
+            )
+            total_ppb += _ug_grid_to_ppb(conc_ug, temp_c)
+
+        confidence = _confidence_from_distance(lat_mesh, lon_mesh, sensor_coords, forecast_lead_h=hour_idx)
+
+        frames.append(_build_grid_data(
+            concentration_grid=np.round(total_ppb, 3),
+            confidence_grid=np.round(confidence, 3),
+            lat_centers=GRID_LAT_CENTERS,
+            lon_centers=GRID_LON_CENTERS,
+            bounds=GRID_BOUNDS,
+            resolution_meters=GRID_RESOLUTION_METERS,
+            metadata={
+                "time": str(t),
+                "hour_index": hour_idx,
+                "wind_speed_ms": round(ws, 2),
+                "wind_direction_deg": round(wd_deg, 1),
+                "stability_class": stab,
+                "emission_rates_g_s": {k: float(v) for k, v in emission_rates_g_s.items()},
+            },
+        ))
+
+    return frames
+
+
+def footprint_to_grid_data(
+    footprint: pd.DataFrame,
+    metadata: Optional[dict] = None,
+) -> dict:
+    """Resample a Lagrangian footprint DataFrame to the unified grid and wrap as GridData.
+
+    The footprint has lat-index and lon-columns (120x160, different bounds).
+    We resample it to the shared grid via nearest-neighbor interpolation.
+
+    Args:
+        footprint: DataFrame from ``build_footprint()`` — lat index, lon columns,
+            values are probability densities.
+        metadata: Extra metadata to include in the GridData dict.
+
+    Returns:
+        GeoDemic-compatible GridData dict.
+    """
+    from h2s.dispersion.grid_config import (
+        GRID_BOUNDS,
+        GRID_LAT_CENTERS,
+        GRID_LON_CENTERS,
+        GRID_NROWS,
+        GRID_NCOLS,
+        GRID_RESOLUTION_METERS,
+    )
+    from scipy.interpolate import RegularGridInterpolator
+
+    src_lats = footprint.index.to_numpy(dtype=float)
+    src_lons = footprint.columns.to_numpy(dtype=float)
+    src_data = footprint.values.astype(float)
+
+    # RegularGridInterpolator requires strictly increasing coordinates
+    if src_lats[0] > src_lats[-1]:
+        src_lats = src_lats[::-1]
+        src_data = src_data[::-1, :]
+
+    interp = RegularGridInterpolator(
+        (src_lats, src_lons), src_data,
+        method="nearest", bounds_error=False, fill_value=0.0,
+    )
+
+    lon_mesh, lat_mesh = np.meshgrid(GRID_LON_CENTERS, GRID_LAT_CENTERS)
+    pts = np.column_stack([lat_mesh.ravel(), lon_mesh.ravel()])
+    resampled = interp(pts).reshape(GRID_NROWS, GRID_NCOLS)
+
+    # Re-normalize so values sum to 1
+    total = resampled.sum()
+    if total > 0:
+        resampled = resampled / total
+
+    # Confidence: high where footprint has data, low where it's zero
+    confidence = np.where(resampled > 0, 0.8, 0.2)
+
+    return _build_grid_data(
+        concentration_grid=np.round(resampled, 8),
+        confidence_grid=confidence,
+        lat_centers=GRID_LAT_CENTERS,
+        lon_centers=GRID_LON_CENTERS,
+        bounds=GRID_BOUNDS,
+        resolution_meters=GRID_RESOLUTION_METERS,
+        metadata=metadata or {},
+    )
+
+
+def _gaussian_plume_grid(
+    source_lat: float,
+    source_lon: float,
+    emission_rate_g_s: float,
+    lat_grid: np.ndarray,
+    lon_grid: np.ndarray,
+    wind_u: float,
+    wind_v: float,
+    stab: str,
+    stack_height: float = 2.0,
+    receptor_height: float = 1.5,
+    sigma_theta_deg: float = 20.0,
+) -> np.ndarray:
+    """Vectorized Gaussian plume over a 2-D lat/lon mesh. Returns μg/m³ array."""
+    wind_speed = np.sqrt(wind_u ** 2 + wind_v ** 2)
+    wind_speed_eff = max(wind_speed, 0.3)
+
+    dx = (lon_grid - source_lon) * M_PER_DEG_LON
+    dy = (lat_grid - source_lat) * M_PER_DEG_LAT
+
+    if wind_speed < 0.1:
+        # Calm-wind fallback: isotropic dispersion
+        dist_m = np.maximum(np.sqrt(dx ** 2 + dy ** 2), 50.0)
+        mixing_height = 50.0
+        conc = emission_rate_g_s * 1e6 / (dist_m * dist_m * mixing_height)
+        return np.maximum(conc, 0.0)
+
+    u_hat = np.array([wind_u, wind_v]) / wind_speed
+    x_down = dx * u_hat[0] + dy * u_hat[1]
+    y_cross = u_hat[0] * dy - u_hat[1] * dx
+
+    # Mask upwind cells
+    valid = x_down > 0
+    conc = np.zeros_like(x_down)
+
+    x_km = x_down[valid] / 1000.0
+    a_y, b_y, a_z, b_z = PG_PARAMS[stab]
+    x_km_safe = np.maximum(x_km, 0.01)
+    sigma_y = a_y * (x_km_safe ** b_y) * 1000.0
+    sigma_z = a_z * (x_km_safe ** b_z) * 1000.0
+
+    sigma_theta_rad = np.radians(sigma_theta_deg)
+    sigma_y_eff = np.sqrt(sigma_y ** 2 + (sigma_theta_rad * x_down[valid]) ** 2)
+
+    Q = emission_rate_g_s * 1e6
+    exp_y = np.exp(-0.5 * (y_cross[valid] / sigma_y_eff) ** 2)
+    exp_z_direct = np.exp(-0.5 * ((receptor_height - stack_height) / sigma_z) ** 2)
+    exp_z_reflect = np.exp(-0.5 * ((receptor_height + stack_height) / sigma_z) ** 2)
+
+    conc[valid] = (Q / (np.pi * wind_speed_eff * sigma_y_eff * sigma_z)) * exp_y * (exp_z_direct + exp_z_reflect)
+    return np.maximum(conc, 0.0)
+
+
+def _ug_grid_to_ppb(conc_ug_m3: np.ndarray, temp_c: float = 20.0) -> np.ndarray:
+    """Convert μg/m³ array to ppb."""
+    molar_vol = MOLAR_VOL_STP * (273.15 + temp_c) / 293.15
+    return conc_ug_m3 * molar_vol / MW_H2S
+
+
 if __name__ == "__main__":
     import os
     from pathlib import Path
