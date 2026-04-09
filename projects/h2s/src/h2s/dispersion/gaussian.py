@@ -467,6 +467,14 @@ def footprint_to_grid_data(
     # Confidence: high where footprint has data, low where it's zero
     confidence = np.where(resampled > 0, 0.8, 0.2)
 
+    from h2s.dispersion.lagrangian import CANDIDATE_SOURCES
+
+    merged_metadata = metadata or {}
+    merged_metadata["candidate_sources"] = {
+        name: {"lat": src["lat"], "lon": src["lon"]}
+        for name, src in CANDIDATE_SOURCES.items()
+    }
+
     return _build_grid_data(
         concentration_grid=np.round(resampled, 8),
         confidence_grid=confidence,
@@ -474,7 +482,7 @@ def footprint_to_grid_data(
         lon_centers=GRID_LON_CENTERS,
         bounds=GRID_BOUNDS,
         resolution_meters=GRID_RESOLUTION_METERS,
-        metadata=metadata or {},
+        metadata=merged_metadata,
     )
 
 
