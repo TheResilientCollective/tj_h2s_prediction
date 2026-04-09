@@ -7,3 +7,4 @@ dagster_home/
 data/startmodels/
 /output/
 /models/
+__pycache__/
