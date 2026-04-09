@@ -189,7 +189,7 @@ def lagrangian_source_attribution(
     # ensemble_footprint.to_parquet(buf)
     # s3.putFile(buf.getvalue(), path=LAGRANGIAN_FOOTPRINT_PATH, content_type="application/octet-stream")
 
-    store_assets.store_dataframe_to_s3(ensemble_footprint, LAGRANGIAN_FOOTPRINT_PATH, LAGRANGIAN_FOOTPRINT_NAME, s3,
+    store_assets.store_dataframe_to_s3(ensemble_footprint.reset_index(), LAGRANGIAN_FOOTPRINT_PATH, LAGRANGIAN_FOOTPRINT_NAME, s3,
                                       latestdatasetpath=LAGRANGIAN_FOOTPRINT_PATH, enable_latest_path=True,
                                       formats=['csv', 'parquet','json'], metadata=metadata)
     log.info(f"Uploaded footprint parquet → {LAGRANGIAN_FOOTPRINT_PATH}")
