@@ -208,6 +208,12 @@ def lagrangian_source_attribution(
                                       formats=['csv', 'parquet','json'], metadata=metadata)
     log.info(f"Uploaded footprint parquet → {LAGRANGIAN_FOOTPRINT_PATH}")
 
+    # Build zone lookup: source_name → zone (east/west/south)
+    source_zone = {}
+    for zone, sources in _ZONE_MAP.items():
+        for s in sources:
+            source_zone[s] = zone
+
     # --- GeoDemic-compatible grid output ---
     log.info("Resampling footprint to unified grid (GeoDemic GridData format)")
     footprint_grid = footprint_to_grid_data(
@@ -216,7 +222,8 @@ def lagrangian_source_attribution(
             "n_events": n_events,
             "date_range": f"{config.date_start} to {config.date_end}",
             "h2s_threshold_ppb": config.h2s_threshold_ppb,
-            "top_sources": {k: round(v, 4) for k, v in top_sources},
+            "source_fractions": {k: round(v, 4) for k, v in ensemble_attribution.items()},
+            "source_zones": source_zone,
         },
     )
     footprint_grid_json = json.dumps(footprint_grid)
