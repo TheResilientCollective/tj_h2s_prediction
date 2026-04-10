@@ -24,7 +24,7 @@ WORKDIR /usr/src/app/
 COPY projects/h2s/pyproject.toml projects/h2s/uv.lock* ./
 COPY projects/h2s/src ./src
 RUN uv venv .venv && \
-    uv sync --no-dev
+    uv sync --no-dev --extra hysplit
 
 # Stage 2: Create the runtime image
 FROM python:3.12-slim

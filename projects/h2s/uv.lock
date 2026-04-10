@@ -2353,9 +2353,7 @@ name = "resilient-h2s"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "celery", extra = ["redis"] },
     { name = "dagster" },
-    { name = "dagster-celery" },
     { name = "dagster-postgres" },
     { name = "dagster-slack" },
     { name = "imbalanced-learn" },
@@ -2399,11 +2397,9 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "celery", extras = ["redis"], specifier = ">=5.3.0" },
     { name = "celery", extras = ["redis"], marker = "extra == 'hysplit'", specifier = ">=5.3.0" },
     { name = "dagster", specifier = ">=1.12.12" },
     { name = "dagster", marker = "extra == 'hysplit'", specifier = ">=1.12.12" },
-    { name = "dagster-celery", specifier = ">=0.28.2" },
     { name = "dagster-celery", marker = "extra == 'hysplit'", specifier = ">=0.28.2" },
     { name = "dagster-postgres", specifier = ">=0.28.2" },
     { name = "dagster-postgres", marker = "extra == 'hysplit'", specifier = ">=0.28.2" },
