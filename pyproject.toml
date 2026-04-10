@@ -1,10 +1,21 @@
 [project]
 name = "tj-h2s-prediction"
 version = "0.1.0"
-description = "Add your description here"
-requires-python = ">=3.13"
+description = "H2S prediction and dispersion pipeline for the Tijuana River region"
+requires-python = ">=3.12"
 dependencies = [
-    "dagster==1.12.12",
+    "dagster>=1.12.12",
     "dagster-webserver",
     "dagster-dg-cli",
 ]
+
+# Dependency group for the workflows (Dagster code-server) and HYSPLIT worker
+# containers. Install with: uv sync --group hysplit
+[dependency-groups]
+hysplit = [
+    "dagster-celery>=0.28.2",
+    "celery[redis]>=5.3.0",
+]
+
+[tool.uv.workspace]
+members = ["projects/h2s"]

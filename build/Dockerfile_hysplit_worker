@@ -33,12 +33,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN pip install --no-cache-dir uv
 
-COPY projects/h2s/pyproject.toml projects/h2s/uv.lock* ./
-COPY projects/h2s/src ./src
+# Use workspace root as the install source. The [hysplit] dependency-group
+# in the top-level pyproject.toml adds dagster-celery + celery[redis].
+# The workspace member (resilient-h2s) supplies all other h2s deps.
+COPY pyproject.toml uv.lock ./
+COPY projects/h2s/pyproject.toml projects/h2s/
+COPY projects/h2s/src projects/h2s/src/
 
-# Only the [hysplit] extra — no xgboost, sklearn, imbalanced-learn, seaborn, etc.
+# Sync only the [hysplit] group (no heavy ML extras, no dev tools).
 RUN uv venv .venv && \
-    uv sync --no-dev --extra hysplit
+    uv sync --frozen --no-dev --group hysplit
 
 # ============================================================================
 # Stage 2: HYSPLIT builder — extract the HYSPLIT tarball
@@ -85,7 +89,7 @@ COPY --from=hysplit-builder /opt/hysplit /opt/hysplit
 
 # Copy application code and Dagster config (mirrors Dockerfile_workflows layout)
 COPY configs/dagster/dagster.yaml /usr/src/app/
-COPY projects/h2s/pyproject.toml /usr/src/app/
+COPY pyproject.toml /usr/src/app/
 COPY projects/h2s/src /usr/src/app/src
 
 # HYSPLIT + Dagster environment
