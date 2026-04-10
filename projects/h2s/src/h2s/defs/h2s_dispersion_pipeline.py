@@ -450,6 +450,133 @@ def hysplit_controls_generation(
         "zip_size_bytes":    dg.MetadataValue.int(len(zip_bytes)),
         "s3_versioned_path": dg.MetadataValue.text(versioned_path),
         "s3_latest_path":    dg.MetadataValue.text(latest_path),
+        "run_tag":           dg.MetadataValue.text(run_tag),
+    })
+
+
+# ==============================================================================
+# Asset 3b: hysplit_run_results — executes the bundle on the HYSPLIT worker
+# ==============================================================================
+#
+# This asset runs inside the dedicated `hysplit` worker container via
+# dagster-celery. The op carries the `dagster-celery/queue: hysplit` tag so
+# that only this step (plus any ops sharing the tag) is routed to the worker
+# queue — every other asset in this pipeline keeps running in-process on the
+# Dagster code-server.
+
+# Forecast-run HYSPLIT outputs live under a new `forecasts/` prefix. The
+# existing `tijuana/dispersion/...` paths in constants.py are intentionally
+# left alone; only HYSPLIT run artifacts produced by the worker use this prefix.
+HYSPLIT_RUNS_BASE = "tijuana/forecasts/dispersion/hysplit/runs"
+
+
+@dg.asset(
+    key_prefix="h2s",
+    group_name="h2s_dispersion",
+    required_resource_keys={"s3"},
+    kinds={"python", "s3"},
+    op_tags={"dagster-celery/queue": "hysplit"},
+    description=(
+        "Execute the HYSPLIT CONTROL bundle produced by hysplit_controls_generation. "
+        "Runs inside the dedicated HYSPLIT worker via dagster-celery queue routing. "
+        "Uploads tdump/cdump outputs and a summary.json to "
+        "tijuana/forecasts/dispersion/hysplit/runs/{run_tag}/."
+    ),
+    deps=[dg.AssetKey(["h2s", "hysplit_controls_generation"])],
+)
+def hysplit_run_results(
+    context: dg.AssetExecutionContext,
+    config: HysplitConfig,
+) -> dg.MaterializeResult:
+    """Consume the latest bundle from S3, run HYSPLIT, upload outputs."""
+    from h2s.dispersion.hysplit_runner import HysplitRunner
+
+    log = context.log
+    s3 = context.resources.s3
+
+    if config.mode == "forward_disp":
+        bundle_path = HYSPLIT_FORWARD_BUNDLE_LATEST
+    else:
+        bundle_path = HYSPLIT_BACKWARD_BUNDLE_LATEST
+
+    log.info(f"Downloading HYSPLIT bundle from {bundle_path}")
+    zip_bytes = s3.getFile(bundle_path)
+    log.info(f"Bundle size: {len(zip_bytes):,} bytes")
+
+    runner = HysplitRunner()
+    log.info(
+        f"HYSPLIT runner: exec={runner.hysplit_path}, meteo={runner.meteo_dir}, "
+        f"work={runner.working_dir}, out={runner.output_dir}"
+    )
+
+    outputs = runner.run_bundle_zip(zip_bytes, mode=config.mode)
+    log.info(
+        f"HYSPLIT run complete: {outputs.n_success} success, {outputs.n_failed} failed, "
+        f"{len(outputs.output_paths)} output files"
+    )
+
+    run_tag = pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M")
+    uploaded_paths: list[str] = []
+
+    for out_path in outputs.output_paths:
+        # Preserve per-control subdirectory structure: runs/{run_tag}/{tag}/{filename}
+        # The runner writes to output_dir/run_{id}/{tag}/{filename} — strip the
+        # run_{id} prefix so the S3 layout mirrors the per-control tag layout.
+        try:
+            rel = out_path.relative_to(runner.output_dir)
+            rel_parts = rel.parts[1:] if len(rel.parts) > 1 else rel.parts
+            rel_str = "/".join(rel_parts)
+        except ValueError:
+            rel_str = out_path.name
+        versioned = f"{HYSPLIT_RUNS_BASE}/{run_tag}/{rel_str}"
+        latest    = f"{HYSPLIT_RUNS_BASE}/latest/{rel_str}"
+        data = out_path.read_bytes()
+        s3.putFile(data, path=versioned, content_type="application/octet-stream")
+        s3.putFile(data, path=latest,    content_type="application/octet-stream")
+        uploaded_paths.append(versioned)
+        log.info(f"Uploaded {out_path.name} ({len(data):,} bytes) → {versioned}")
+
+    # Write a summary.json next to the outputs for auditing.
+    summary = {
+        "run_tag": run_tag,
+        "mode": config.mode,
+        "bundle_s3_path": bundle_path,
+        "n_success": outputs.n_success,
+        "n_failed": outputs.n_failed,
+        "n_outputs": len(uploaded_paths),
+        "output_paths": uploaded_paths,
+        "controls": [
+            {
+                "control_name": r.control_name,
+                "returncode": r.returncode,
+                "success": r.success,
+                "n_output_files": len(r.output_files),
+            }
+            for r in outputs.results
+        ],
+    }
+    summary_json = json.dumps(summary, indent=2).encode()
+    summary_versioned = f"{HYSPLIT_RUNS_BASE}/{run_tag}/summary.json"
+    summary_latest    = f"{HYSPLIT_RUNS_BASE}/latest/summary.json"
+    s3.putFile(summary_json, path=summary_versioned, content_type="application/json")
+    s3.putFile(summary_json, path=summary_latest,    content_type="application/json")
+    log.info(f"Uploaded summary → {summary_versioned}")
+
+    if outputs.n_failed > 0:
+        log.warning(
+            f"{outputs.n_failed} HYSPLIT control(s) failed. "
+            f"Check MESSAGE files in run outputs for details."
+        )
+
+    return dg.MaterializeResult(metadata={
+        "run_tag":          dg.MetadataValue.text(run_tag),
+        "mode":             dg.MetadataValue.text(config.mode),
+        "n_success":        dg.MetadataValue.int(outputs.n_success),
+        "n_failed":         dg.MetadataValue.int(outputs.n_failed),
+        "n_output_files":   dg.MetadataValue.int(len(uploaded_paths)),
+        "bundle_s3_path":   dg.MetadataValue.text(bundle_path),
+        "summary_s3_path":  dg.MetadataValue.text(summary_versioned),
+        "latest_s3_prefix": dg.MetadataValue.text(f"{HYSPLIT_RUNS_BASE}/latest/"),
     })
 
 
@@ -885,6 +1012,7 @@ dispersion_assets = [
     lagrangian_source_attribution,
     emission_rate_inversion,
     hysplit_controls_generation,
+    hysplit_run_results,
     gaussian_forward_forecast,
     gaussian_forward_forecast_detailed,
     dispersion_alert_check,

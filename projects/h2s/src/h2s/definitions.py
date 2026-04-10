@@ -114,6 +114,7 @@ def defs():
         lagrangian_source_attribution,
         emission_rate_inversion,
         hysplit_controls_generation,
+        hysplit_run_results,
         gaussian_forward_forecast,
         dispersion_alert_check,
     )
@@ -148,6 +149,7 @@ def defs():
         mh_forecast_schedule,
         dispersion_inversion_job,
         dispersion_forecast_job,
+        dispersion_hysplit_execution_job,
         dispersion_inversion_schedule,
         dispersion_forecast_schedule,
     )
@@ -187,6 +189,7 @@ def defs():
             lagrangian_source_attribution,
             emission_rate_inversion,
             hysplit_controls_generation,
+            hysplit_run_results,
             gaussian_forward_forecast,
             dispersion_alert_check,
             # Seed Models
@@ -228,6 +231,7 @@ def defs():
             # Dispersion jobs
             dispersion_inversion_job,
             dispersion_forecast_job,
+            dispersion_hysplit_execution_job,
             # Two-tier alert job
             h2s_alert_job,
         ],

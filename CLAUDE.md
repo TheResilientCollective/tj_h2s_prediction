@@ -169,6 +169,68 @@ If `daily_analysis_job` fails partway through, use **"Re-execute all"** in the D
 
 **HYSPLIT bundles**: Download from S3 (`tijuana/dispersion/hysplit/{backward|forward}_bundle_latest.zip`), unzip, and run `bash run_hysplit_*.sh` in a HYSPLIT container or submit to NOAA READY.
 
+### HYSPLIT Celery Worker (`dispersion_hysplit_execution_job`)
+
+A dedicated HYSPLIT worker container executes bundles automatically via
+`dagster-celery` queue routing. The worker reads work from a Redis broker
+populated by the Dagster code-server and writes outputs to
+`s3://.../tijuana/forecasts/dispersion/hysplit/runs/{run_tag}/`.
+
+**Architecture:**
+- `dagster-code-h2s` enqueues the `hysplit_run_results` asset (tagged
+  `dagster-celery/queue: hysplit`) on Redis.
+- `hysplit-worker` consumes the queue, runs `hyts_std` / `hycs_std`
+  against GDAS meteorology, uploads tdump/cdump + `summary.json` to S3.
+- Other dispersion jobs (`dispersion_forecast_job`, `dispersion_inversion_job`)
+  are unchanged and still run in-process on the code-server.
+
+**One-time setup — place the HYSPLIT tarball:**
+```bash
+# From a machine that has access to the GeoDemic HYSPLIT archive:
+cp /path/to/GeoDemic/backend/hysplit.v5.4.2_x86_64.tar.gz \
+   tj_h2s_prediction/build/
+# (License-gated; excluded from git via .gitignore → build/hysplit*.tar.gz)
+```
+
+**Build the worker image:**
+```bash
+cd tj_h2s_prediction
+docker build --platform linux/amd64 \
+    -f build/Dockerfile_hysplit_worker \
+    -t docker.io/resilientucsd/dagster-resilient-h2s-hysplit-worker:latest .
+```
+
+**Mount GDAS meteorology (host bind mount):**
+- Put GDAS files under `/data/gdas` on the host (or set
+  `HYSPLIT_MET_HOST_DIR` in `.env` to an alternate path).
+- The compose file mounts this directory read-only at
+  `/data/hysplit/meteo` inside the worker.
+
+**Launch a queue-driven run:**
+```bash
+# Ensure redis and hysplit-worker are up
+docker compose -f deployments/compose.yaml up -d redis hysplit-worker
+
+# Dispatch the HYSPLIT execution job via Dagster
+cd projects/h2s
+uv run dg launch --job dispersion_hysplit_execution_job
+```
+
+**Expected outputs:**
+- `tijuana/forecasts/dispersion/hysplit/runs/{run_tag}/` — tdump/cdump files
+- `tijuana/forecasts/dispersion/hysplit/runs/latest/` — mirror of latest run
+- `tijuana/forecasts/dispersion/hysplit/runs/{run_tag}/summary.json` —
+  per-control exit codes and MESSAGE diagnostics
+
+**Troubleshooting the worker:**
+- `docker compose logs hysplit-worker` — look for `hyts_std` stderr or
+  MESSAGE-file diagnostics echoed by `HysplitRunner`.
+- A missing met file prints a HYSPLIT `metset.f: Bad value` message and
+  the op fails cleanly — check that `HYSPLIT_MET_HOST_DIR` covers the
+  run window's GDAS week file (`gdas1.{mon}{yy}.w{1..5}`).
+- `redis-cli -h redis-${PROJECT} monitor` — watch broker traffic during
+  a run to confirm enqueue → consume flow.
+
 ## Common Commands
 
 ### Dagster Development
