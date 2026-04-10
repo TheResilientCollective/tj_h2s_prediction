@@ -219,9 +219,16 @@ HYSPLIT_FORWARD_BUNDLE_PATH  = 'tijuana/dispersion/hysplit/forward_bundle_{run_t
 HYSPLIT_BACKWARD_BUNDLE_LATEST = 'tijuana/dispersion/hysplit/backward_bundle_latest.zip'
 HYSPLIT_FORWARD_BUNDLE_LATEST  = 'tijuana/dispersion/hysplit/forward_bundle_latest.zip'
 
-# Gaussian forward forecast outputs. Use .format(run_tag=run_tag) to expand.
+# Gaussian forward forecast outputs (3-source coarse model)
 DISPERSION_FORECAST_PATH = 'tijuana/dispersion/forward_forecast_{run_tag}.json'
 DISPERSION_FORECAST_LATEST_PATH = f'{LATEST_BASEPATH}/dispersion/forward_forecast_latest.json'
+
+# Gaussian forward forecast outputs (16-source detailed model)
+DISPERSION_FORECAST_DETAILED_PATH = 'tijuana/dispersion/forward_forecast_detailed_{run_tag}.json'
+DISPERSION_FORECAST_DETAILED_LATEST_PATH = f'{LATEST_BASEPATH}/dispersion/forward_forecast_detailed_latest.json'
+DISPERSION_FORWARD_GRID_DETAILED_PATH = 'tijuana/dispersion/grids/forward_grid_detailed_{run_tag}.json'
+DISPERSION_FORWARD_GRID_DETAILED_LATEST_PATH = f'{LATEST_BASEPATH}/dispersion/forward_grid_detailed_latest.json'
+DISPERSION_FORWARD_GRID_FRAMES_DETAILED_LATEST_PATH = f'{LATEST_BASEPATH}/dispersion/forward_grid_frames_detailed_latest.json'
 
 # Default emission rates (g/s) — calibrated from March 13 2026 event (394 ppb @ NESTOR-BES).
 # east=20, west=10, south=137 g/s. Used as fallback when inversion has not yet run.
@@ -230,3 +237,19 @@ DISPERSION_DEFAULT_EMISSION_RATES_GS: dict[str, float] = {
     "west":  10.0,   # Oneonta Slough / pump station
     "south": 137.0,  # Goat Canyon / cross-border (dominant nocturnal source)
 }
+
+# GeoDemic-compatible grid outputs (Phase 1 integration)
+# Versioned paths use .format(run_tag=run_tag)
+DISPERSION_FORWARD_GRID_PATH = 'tijuana/dispersion/grids/forward_grid_{run_tag}.json'
+DISPERSION_FORWARD_GRID_LATEST_PATH = f'{LATEST_BASEPATH}/dispersion/forward_grid_latest.json'
+DISPERSION_FORWARD_GRID_FRAMES_LATEST_PATH = f'{LATEST_BASEPATH}/dispersion/forward_grid_frames_latest.json'
+DISPERSION_SOURCE_FOOTPRINT_GRID_LATEST_PATH = f'{LATEST_BASEPATH}/dispersion/source_footprint_grid_latest.json'
+
+# Dispersion visualizations (heatmaps + source maps)
+# Versioned paths use .format(date_str=YYYYMMDD_HH)
+DISPERSION_VIZ_HEATMAP_COARSE_PATH = 'tijuana/forecast/dispersion/visualizations/{date_str}/heatmap_coarse.png'
+DISPERSION_VIZ_HEATMAP_DETAILED_PATH = 'tijuana/forecast/dispersion/visualizations/{date_str}/heatmap_detailed.png'
+DISPERSION_VIZ_SOURCE_MAP_COARSE_PATH = 'tijuana/forecast/dispersion/visualizations/{date_str}/source_map_coarse.png'
+DISPERSION_VIZ_SOURCE_MAP_DETAILED_PATH = 'tijuana/forecast/dispersion/visualizations/{date_str}/source_map_detailed.png'
+DISPERSION_VIZ_TIMESERIES_COARSE_PATH = 'tijuana/forecast/dispersion/visualizations/{date_str}/timeseries_coarse.png'
+DISPERSION_VIZ_TIMESERIES_DETAILED_PATH = 'tijuana/forecast/dispersion/visualizations/{date_str}/timeseries_detailed.png'

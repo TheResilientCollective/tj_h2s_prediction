@@ -31,6 +31,21 @@ from h2s.constants import (
     DISPERSION_DEFAULT_EMISSION_RATES_GS,
     DISPERSION_FORECAST_LATEST_PATH,
     DISPERSION_FORECAST_PATH,
+    DISPERSION_FORECAST_DETAILED_PATH,
+    DISPERSION_FORECAST_DETAILED_LATEST_PATH,
+    DISPERSION_FORWARD_GRID_FRAMES_LATEST_PATH,
+    DISPERSION_FORWARD_GRID_FRAMES_DETAILED_LATEST_PATH,
+    DISPERSION_FORWARD_GRID_LATEST_PATH,
+    DISPERSION_FORWARD_GRID_PATH,
+    DISPERSION_FORWARD_GRID_DETAILED_PATH,
+    DISPERSION_FORWARD_GRID_DETAILED_LATEST_PATH,
+    DISPERSION_SOURCE_FOOTPRINT_GRID_LATEST_PATH,
+    DISPERSION_VIZ_HEATMAP_COARSE_PATH,
+    DISPERSION_VIZ_HEATMAP_DETAILED_PATH,
+    DISPERSION_VIZ_SOURCE_MAP_COARSE_PATH,
+    DISPERSION_VIZ_SOURCE_MAP_DETAILED_PATH,
+    DISPERSION_VIZ_TIMESERIES_COARSE_PATH,
+    DISPERSION_VIZ_TIMESERIES_DETAILED_PATH,
     EMISSION_RATES_PATH,
     FORECAST_DATA_PATH,
     HYSPLIT_BACKWARD_BUNDLE_LATEST,
@@ -45,8 +60,27 @@ from h2s.dispersion import (
     LagrangianConfig,
     generate_hysplit_bundle,
     run_forward_model,
+    run_forward_model_gridded,
+    run_forward_model_detailed,
+    run_forward_model_gridded_detailed,
+    footprint_to_grid_data,
     run_inversion_window,
     source_attribution,
+)
+from h2s.dispersion.visualizations import (
+    generate_concentration_heatmap,
+    generate_source_emission_map,
+    generate_peak_concentration_timeseries,
+)
+from h2s.dispersion.gaussian import SENSORS, SOURCES, CANDIDATE_SOURCES
+from h2s.dispersion.grid_config import (
+    GRID_BOUNDS,
+    GRID_LAT_CENTERS,
+    GRID_LON_CENTERS,
+    GRID_NROWS,
+    GRID_NCOLS,
+    GRID_RESOLUTION_METERS,
+    VIZ_BOUNDS,
 )
 from h2s.utils import store_assets
 
@@ -194,6 +228,32 @@ def lagrangian_source_attribution(
                                       formats=['csv', 'parquet','json'], metadata=metadata)
     log.info(f"Uploaded footprint parquet → {LAGRANGIAN_FOOTPRINT_PATH}")
 
+    # Build zone lookup: source_name → zone (east/west/south)
+    source_zone = {}
+    for zone, sources in _ZONE_MAP.items():
+        for s in sources:
+            source_zone[s] = zone
+
+    # --- GeoDemic-compatible grid output ---
+    log.info("Resampling footprint to unified grid (GeoDemic GridData format)")
+    footprint_grid = footprint_to_grid_data(
+        ensemble_footprint,
+        metadata={
+            "n_events": n_events,
+            "date_range": f"{config.date_start} to {config.date_end}",
+            "h2s_threshold_ppb": config.h2s_threshold_ppb,
+            "source_fractions": {k: round(v, 4) for k, v in ensemble_attribution.items()},
+            "source_zones": source_zone,
+        },
+    )
+    footprint_grid_json = json.dumps(footprint_grid)
+    s3.putFile(
+        footprint_grid_json.encode(),
+        path=DISPERSION_SOURCE_FOOTPRINT_GRID_LATEST_PATH,
+        content_type="application/json",
+    )
+    log.info(f"Uploaded footprint grid → {DISPERSION_SOURCE_FOOTPRINT_GRID_LATEST_PATH}")
+
     return dg.MaterializeResult(metadata={
         "n_events_processed": dg.MetadataValue.int(n_events),
         "top_source_1": dg.MetadataValue.text(top_sources[0][0] if len(top_sources) > 0 else "n/a"),
@@ -201,6 +261,7 @@ def lagrangian_source_attribution(
         "top_source_3": dg.MetadataValue.text(top_sources[2][0] if len(top_sources) > 2 else "n/a"),
         "s3_ensemble": dg.MetadataValue.text(LAGRANGIAN_ENSEMBLE_PATH),
         "s3_footprint": dg.MetadataValue.text(LAGRANGIAN_FOOTPRINT_PATH),
+        "s3_footprint_grid": dg.MetadataValue.text(DISPERSION_SOURCE_FOOTPRINT_GRID_LATEST_PATH),
     })
 
 
@@ -214,7 +275,7 @@ def lagrangian_source_attribution(
     required_resource_keys={"s3"},
     kinds={"python", "s3"},
     description=(
-        "Derive per-zone emission rates (g/s) from Lagrangian ensemble footprint. "
+        "Derive per-zone AND per-source emission rates (g/s) from Lagrangian ensemble footprint. "
         "Groups candidate sources into east/west/south zones, scales to calibrated "
         "total Q. Falls back to DISPERSION_DEFAULT_EMISSION_RATES_GS if no ensemble "
         "is available."
@@ -223,7 +284,7 @@ def lagrangian_source_attribution(
     metadata={
         #"source": "San Diego APCD H2S location data",
         "description": (
-                "Derive per-zone emission rates (g/s) from Lagrangian ensemble footprint. "
+                "Derive per-zone AND per-source emission rates (g/s) from Lagrangian ensemble footprint. "
         "Groups candidate sources into east/west/south zones, scales to calibrated "
         "total Q. Falls back to DISPERSION_DEFAULT_EMISSION_RATES_GS if no ensemble "
         "is available."
@@ -251,20 +312,36 @@ def emission_rate_inversion(context: dg.AssetExecutionContext) -> dg.Materialize
         method = "calibration_default"
 
     if fracs:
+        # Per-zone rates (3 zones)
         zone_fracs: dict[str, float] = {}
         for zone, sources in _ZONE_MAP.items():
             zone_fracs[zone] = sum(fracs.get(s, 0.0) for s in sources)
         total = sum(zone_fracs.values()) or 1.0
         zone_fracs = {k: v / total for k, v in zone_fracs.items()}
-        rates = {zone: round(f * _TOTAL_Q_GS, 1) for zone, f in zone_fracs.items()}
-        log.info(f"Zone fractions: {zone_fracs}")
-    else:
-        rates = dict(DISPERSION_DEFAULT_EMISSION_RATES_GS)
+        zone_rates = {zone: round(f * _TOTAL_Q_GS, 1) for zone, f in zone_fracs.items()}
 
-    log.info(f"Emission rates: {rates} g/s  (method={method})")
+        # Per-source rates (16 sources) — scale individual fractions by total Q
+        source_total = sum(fracs.values()) or 1.0
+        source_rates = {src: round((frac / source_total) * _TOTAL_Q_GS, 2) for src, frac in fracs.items()}
+
+        log.info(f"Zone fractions: {zone_fracs}")
+        log.info(f"Top 5 sources: {dict(list(sorted(source_rates.items(), key=lambda x: -x[1]))[:5])}")
+    else:
+        zone_rates = dict(DISPERSION_DEFAULT_EMISSION_RATES_GS)
+        # Distribute zone defaults evenly across sources in each zone
+        source_rates = {}
+        for zone, sources in _ZONE_MAP.items():
+            zone_q = zone_rates[zone]
+            n_sources = len(sources)
+            per_source_q = round(zone_q / n_sources, 2) if n_sources > 0 else 0.0
+            for src in sources:
+                source_rates[src] = per_source_q
+
+    log.info(f"Zone emission rates: {zone_rates} g/s  (method={method})")
 
     payload = {
-        "emission_rates_g_s": rates,
+        "emission_rates_g_s": zone_rates,
+        "emission_rates_per_source_g_s": source_rates,
         "timestamp": pd.Timestamp.utcnow().isoformat(),
         "method": method,
     }
@@ -276,9 +353,10 @@ def emission_rate_inversion(context: dg.AssetExecutionContext) -> dg.Materialize
     log.info(f"Uploaded emission rates → {EMISSION_RATES_PATH}")
 
     return dg.MaterializeResult(metadata={
-        "east_g_s":  dg.MetadataValue.float(float(rates["east"])),
-        "west_g_s":  dg.MetadataValue.float(float(rates["west"])),
-        "south_g_s": dg.MetadataValue.float(float(rates["south"])),
+        "east_g_s":  dg.MetadataValue.float(float(zone_rates["east"])),
+        "west_g_s":  dg.MetadataValue.float(float(zone_rates["west"])),
+        "south_g_s": dg.MetadataValue.float(float(zone_rates["south"])),
+        "n_sources": dg.MetadataValue.int(len(source_rates)),
         "method":    dg.MetadataValue.text(method),
         "s3_path":   dg.MetadataValue.text(EMISSION_RATES_PATH),
     },
@@ -449,7 +527,78 @@ def gaussian_forward_forecast(
     versioned_path = DISPERSION_FORECAST_PATH.format(run_tag=run_tag)
     s3.putFile(forecast_json.encode(), path=versioned_path, content_type="application/json")
     s3.putFile(forecast_json.encode(), path=DISPERSION_FORECAST_LATEST_PATH, content_type="application/json")
-    log.info(f"Uploaded forecast → {versioned_path}")
+    log.info(f"Uploaded sensor forecast → {versioned_path}")
+
+    # --- GeoDemic-compatible grid output ---
+    log.info("Generating gridded forward forecast (GeoDemic GridData format)")
+    grid_frames = run_forward_model_gridded(
+        fc_df, emission_rates, start_time, config.forecast_hours,
+    )
+
+    # Upload current-hour grid (first frame)
+    if grid_frames:
+        first_frame_json = json.dumps(grid_frames[0])
+        s3.putFile(first_frame_json.encode(), path=DISPERSION_FORWARD_GRID_LATEST_PATH, content_type="application/json")
+        grid_versioned = DISPERSION_FORWARD_GRID_PATH.format(run_tag=run_tag)
+        s3.putFile(first_frame_json.encode(), path=grid_versioned, content_type="application/json")
+        log.info(f"Uploaded grid (current hour) → {DISPERSION_FORWARD_GRID_LATEST_PATH}")
+
+    # Upload multi-frame (all hours) for animation — select every 6th hour to keep size manageable
+    frame_indices = list(range(0, len(grid_frames), 6))
+    if frame_indices[-1] != len(grid_frames) - 1:
+        frame_indices.append(len(grid_frames) - 1)
+    animation_frames = [grid_frames[i] for i in frame_indices]
+    animation_payload = {
+        "forecast_start": str(start_time),
+        "n_frames": len(animation_frames),
+        "frame_interval_hours": 6,
+        "emission_rates_g_s": {k: float(v) for k, v in emission_rates.items()},
+        "frames": animation_frames,
+    }
+    frames_json = json.dumps(animation_payload)
+    s3.putFile(frames_json.encode(), path=DISPERSION_FORWARD_GRID_FRAMES_LATEST_PATH, content_type="application/json")
+    log.info(f"Uploaded grid frames ({len(animation_frames)} frames) → {DISPERSION_FORWARD_GRID_FRAMES_LATEST_PATH}")
+
+    # Grid peak (over all frames)
+    grid_peak_ppb = max(np.array(f["data"]).max() for f in grid_frames) if grid_frames else 0.0
+
+    # --- Generate visualizations ---
+    date_str = pd.Timestamp.utcnow().strftime("%Y%m%d_%H")
+    log.info("Generating visualizations (heatmap + source map + timeseries)")
+
+    # 1. Concentration heatmap (current hour)
+    heatmap_path = "n/a"
+    if grid_frames:
+        heatmap_buf = generate_concentration_heatmap(
+            grid_frames[0],
+            title="H2S Concentration Forecast (3-source model)",
+            vmax=100.0,
+            bounds=VIZ_BOUNDS,
+        )
+        heatmap_path = DISPERSION_VIZ_HEATMAP_COARSE_PATH.format(date_str=date_str)
+        s3.putFile(heatmap_buf.getvalue(), path=heatmap_path, content_type="image/png")
+        log.info(f"Uploaded heatmap → {heatmap_path}")
+
+    # 2. Source emission map (3 zones)
+    source_map_buf = generate_source_emission_map(
+        SOURCES,
+        emission_rates,
+        sensors=SENSORS,
+        title="H2S Source Emission Rates (3-zone model)",
+        bounds=VIZ_BOUNDS,
+    )
+    source_map_path = DISPERSION_VIZ_SOURCE_MAP_COARSE_PATH.format(date_str=date_str)
+    s3.putFile(source_map_buf.getvalue(), path=source_map_path, content_type="image/png")
+    log.info(f"Uploaded source map (3-zone) → {source_map_path}")
+
+    # 3. Peak concentration timeseries
+    timeseries_buf = generate_peak_concentration_timeseries(
+        result,
+        title="Peak H2S Forecast (3-source model)",
+    )
+    timeseries_path = DISPERSION_VIZ_TIMESERIES_COARSE_PATH.format(date_str=date_str)
+    s3.putFile(timeseries_buf.getvalue(), path=timeseries_path, content_type="image/png")
+    log.info(f"Uploaded timeseries → {timeseries_path}")
 
     return dg.MaterializeResult(metadata={
         "forecast_start":    dg.MetadataValue.text(str(start_time)),
@@ -457,13 +606,204 @@ def gaussian_forward_forecast(
         "peak_ppb_NB":       dg.MetadataValue.float(float(peaks.get("NESTOR - BES", 0.0))),
         "peak_ppb_IB":       dg.MetadataValue.float(float(peaks.get("IB CIVIC CTR", 0.0))),
         "peak_ppb_SY":       dg.MetadataValue.float(float(peaks.get("SAN YSIDRO", 0.0))),
+        "grid_peak_ppb":     dg.MetadataValue.float(float(grid_peak_ppb)),
+        "grid_shape":        dg.MetadataValue.text(f"{GRID_NROWS}x{GRID_NCOLS}"),
+        "grid_n_frames":     dg.MetadataValue.int(len(animation_frames)),
         "emission_rates_g_s": dg.MetadataValue.json({k: float(v) for k, v in emission_rates.items()}),
         "s3_path":           dg.MetadataValue.text(versioned_path),
+        "s3_grid_latest":    dg.MetadataValue.text(DISPERSION_FORWARD_GRID_LATEST_PATH),
+        "viz_heatmap":       dg.MetadataValue.text(heatmap_path),
+        "viz_source_map":    dg.MetadataValue.text(source_map_path),
+        "viz_timeseries":    dg.MetadataValue.text(timeseries_path),
     })
 
 
 # ==============================================================================
-# Asset 5: dispersion_alert_check
+# Asset 5: gaussian_forward_forecast_detailed
+# ==============================================================================
+
+@dg.asset(
+    key_prefix="h2s",
+    group_name="h2s_dispersion",
+    required_resource_keys={"s3"},
+    kinds={"python", "s3"},
+    description=(
+        "72h Gaussian plume forward forecast using 16 INDIVIDUAL candidate sources "
+        "(vs 3-zone aggregate model). Provides spatially accurate concentration fields "
+        "for regional hazard mapping. ~5× slower than coarse model."
+    ),
+    deps=[dg.AssetKey(["h2s", "emission_rate_inversion"])],
+    metadata={
+        "description": (
+            "72h Gaussian plume forward forecast using 16 INDIVIDUAL candidate sources "
+            "(vs 3-zone aggregate model). Provides spatially accurate concentration fields "
+            "for regional hazard mapping. ~5× slower than coarse model."
+        )
+    },
+)
+def gaussian_forward_forecast_detailed(
+    context: dg.AssetExecutionContext,
+    config: ForwardForecastConfig,
+) -> dg.MaterializeResult:
+    log = context.log
+    s3 = context.resources.s3
+
+    # Load FORECAST meteorology (not obs data)
+    log.info(f"Loading forecast met data from S3: {FORECAST_DATA_PATH}")
+    url = s3.get_presigned_url(FORECAST_DATA_PATH)
+    fc_df = pd.read_parquet(url)
+    fc_df["time"] = pd.to_datetime(fc_df["time"], utc=True).dt.tz_convert("America/Los_Angeles")
+    log.info(f"Loaded {len(fc_df)} forecast rows, time range: {fc_df['time'].min()} → {fc_df['time'].max()}")
+
+    # Ensure is_night is present
+    if "is_night" not in fc_df.columns:
+        if "day_night" in fc_df.columns:
+            fc_df["is_night"] = (fc_df["day_night"] == "night").astype(int)
+        else:
+            utc_h = fc_df["time"].dt.hour
+            fc_df["is_night"] = ((utc_h < 6) | (utc_h >= 20)).astype(int)
+            log.warning("is_night derived from hour (UTC < 6 or >= 20) — no day_night column found")
+
+    # Load per-source emission rates
+    try:
+        rates_bytes = s3.getFile(EMISSION_RATES_PATH)
+        rates_data = json.loads(rates_bytes)
+        emission_rates_per_source = rates_data.get("emission_rates_per_source_g_s", {})
+        rates_method = rates_data.get("method", "unknown")
+
+        if not emission_rates_per_source:
+            log.warning("No per-source rates in emission_rates.json — falling back to zone-based defaults")
+            # Distribute zone rates evenly across sources
+            zone_rates = rates_data.get("emission_rates_g_s", DISPERSION_DEFAULT_EMISSION_RATES_GS)
+            emission_rates_per_source = {}
+            for zone, sources in _ZONE_MAP.items():
+                zone_q = zone_rates.get(zone, 0.0)
+                per_source = zone_q / len(sources) if len(sources) > 0 else 0.0
+                for src in sources:
+                    emission_rates_per_source[src] = round(per_source, 2)
+
+        log.info(f"Using {len(emission_rates_per_source)} source emission rates (method={rates_method})")
+        top_5 = dict(sorted(emission_rates_per_source.items(), key=lambda x: -x[1])[:5])
+        log.info(f"Top 5 sources: {top_5}")
+    except Exception as e:
+        log.warning(f"Could not load emission rates ({e}) — distributing defaults across 16 sources")
+        emission_rates_per_source = {}
+        for zone, sources in _ZONE_MAP.items():
+            zone_q = DISPERSION_DEFAULT_EMISSION_RATES_GS[zone]
+            per_source = zone_q / len(sources) if len(sources) > 0 else 0.0
+            for src in sources:
+                emission_rates_per_source[src] = round(per_source, 2)
+
+    start_time = fc_df["time"].min()
+    log.info(f"Running detailed Gaussian forward (16 sources): start={start_time}, hours={config.forecast_hours}")
+    result = run_forward_model_detailed(fc_df, emission_rates_per_source, start_time, config.forecast_hours)
+
+    # Compute per-sensor peaks (ignoring NaN)
+    peaks = {}
+    for sensor, vals in result.concentrations.items():
+        valid = [v for v in vals if v is not None and not np.isnan(v)]
+        peaks[sensor] = round(max(valid, default=0.0), 1)
+
+    run_tag = pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M")
+    forecast_json = result.to_json()
+
+    versioned_path = DISPERSION_FORECAST_DETAILED_PATH.format(run_tag=run_tag)
+    s3.putFile(forecast_json.encode(), path=versioned_path, content_type="application/json")
+    s3.putFile(forecast_json.encode(), path=DISPERSION_FORECAST_DETAILED_LATEST_PATH, content_type="application/json")
+    log.info(f"Uploaded detailed sensor forecast → {versioned_path}")
+
+    # --- GeoDemic-compatible grid output (16-source version) ---
+    log.info("Generating detailed gridded forward forecast (16 sources, GeoDemic GridData format)")
+    grid_frames = run_forward_model_gridded_detailed(
+        fc_df, emission_rates_per_source, start_time, config.forecast_hours,
+    )
+
+    # Upload current-hour grid (first frame)
+    if grid_frames:
+        first_frame_json = json.dumps(grid_frames[0])
+        s3.putFile(first_frame_json.encode(), path=DISPERSION_FORWARD_GRID_DETAILED_LATEST_PATH, content_type="application/json")
+        grid_versioned = DISPERSION_FORWARD_GRID_DETAILED_PATH.format(run_tag=run_tag)
+        s3.putFile(first_frame_json.encode(), path=grid_versioned, content_type="application/json")
+        log.info(f"Uploaded detailed grid (current hour) → {DISPERSION_FORWARD_GRID_DETAILED_LATEST_PATH}")
+
+    # Upload multi-frame (all hours) for animation — select every 6th hour to keep size manageable
+    frame_indices = list(range(0, len(grid_frames), 6))
+    if frame_indices[-1] != len(grid_frames) - 1:
+        frame_indices.append(len(grid_frames) - 1)
+    animation_frames = [grid_frames[i] for i in frame_indices]
+    animation_payload = {
+        "forecast_start": str(start_time),
+        "n_frames": len(animation_frames),
+        "frame_interval_hours": 6,
+        "n_sources": 16,
+        "emission_rates_per_source_g_s": {k: float(v) for k, v in emission_rates_per_source.items() if v > 0},
+        "frames": animation_frames,
+    }
+    frames_json = json.dumps(animation_payload)
+    s3.putFile(frames_json.encode(), path=DISPERSION_FORWARD_GRID_FRAMES_DETAILED_LATEST_PATH, content_type="application/json")
+    log.info(f"Uploaded detailed grid frames ({len(animation_frames)} frames) → {DISPERSION_FORWARD_GRID_FRAMES_DETAILED_LATEST_PATH}")
+
+    # Grid peak (over all frames)
+    grid_peak_ppb = max(np.array(f["data"]).max() for f in grid_frames) if grid_frames else 0.0
+
+    # --- Generate visualizations ---
+    date_str = pd.Timestamp.utcnow().strftime("%Y%m%d_%H")
+    log.info("Generating detailed visualizations (heatmap + timeseries)")
+
+    # 1. Concentration heatmap (current hour)
+    heatmap_path = "n/a"
+    if grid_frames:
+        heatmap_buf = generate_concentration_heatmap(
+            grid_frames[0],
+            title="H2S Concentration Forecast (16-source detailed model)",
+            vmax=100.0,
+            bounds=VIZ_BOUNDS,
+        )
+        heatmap_path = DISPERSION_VIZ_HEATMAP_DETAILED_PATH.format(date_str=date_str)
+        s3.putFile(heatmap_buf.getvalue(), path=heatmap_path, content_type="image/png")
+        log.info(f"Uploaded detailed heatmap → {heatmap_path}")
+
+    # 2. Source emission map (16 candidate sources)
+    source_map_buf = generate_source_emission_map(
+        CANDIDATE_SOURCES,
+        emission_rates_per_source,
+        sensors=SENSORS,
+        title="H2S Source Emission Rates (16-source detailed model)",
+        bounds=VIZ_BOUNDS,
+    )
+    source_map_path = DISPERSION_VIZ_SOURCE_MAP_DETAILED_PATH.format(date_str=date_str)
+    s3.putFile(source_map_buf.getvalue(), path=source_map_path, content_type="image/png")
+    log.info(f"Uploaded source map (16-source) → {source_map_path}")
+
+    # 3. Peak concentration timeseries
+    timeseries_buf = generate_peak_concentration_timeseries(
+        result,
+        title="Peak H2S Forecast (16-source detailed model)",
+    )
+    timeseries_path = DISPERSION_VIZ_TIMESERIES_DETAILED_PATH.format(date_str=date_str)
+    s3.putFile(timeseries_buf.getvalue(), path=timeseries_path, content_type="image/png")
+    log.info(f"Uploaded detailed timeseries → {timeseries_path}")
+
+    return dg.MaterializeResult(metadata={
+        "forecast_start":    dg.MetadataValue.text(str(start_time)),
+        "forecast_hours":    dg.MetadataValue.int(config.forecast_hours),
+        "n_sources":         dg.MetadataValue.int(16),
+        "peak_ppb_NB":       dg.MetadataValue.float(float(peaks.get("NESTOR - BES", 0.0))),
+        "peak_ppb_IB":       dg.MetadataValue.float(float(peaks.get("IB CIVIC CTR", 0.0))),
+        "peak_ppb_SY":       dg.MetadataValue.float(float(peaks.get("SAN YSIDRO", 0.0))),
+        "grid_peak_ppb":     dg.MetadataValue.float(float(grid_peak_ppb)),
+        "grid_shape":        dg.MetadataValue.text(f"{GRID_NROWS}x{GRID_NCOLS}"),
+        "grid_n_frames":     dg.MetadataValue.int(len(animation_frames)),
+        "s3_path":           dg.MetadataValue.text(versioned_path),
+        "s3_grid_latest":    dg.MetadataValue.text(DISPERSION_FORWARD_GRID_DETAILED_LATEST_PATH),
+        "viz_heatmap":       dg.MetadataValue.text(heatmap_path),
+        "viz_source_map":    dg.MetadataValue.text(source_map_path),
+        "viz_timeseries":    dg.MetadataValue.text(timeseries_path),
+    })
+
+
+# ==============================================================================
+# Asset 6: dispersion_alert_check
 # ==============================================================================
 
 @dg.asset(
@@ -546,5 +886,6 @@ dispersion_assets = [
     emission_rate_inversion,
     hysplit_controls_generation,
     gaussian_forward_forecast,
+    gaussian_forward_forecast_detailed,
     dispersion_alert_check,
 ]
