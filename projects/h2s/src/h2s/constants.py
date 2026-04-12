@@ -91,10 +91,7 @@ FLOW_COL = 'Flow (m^3/s)--Border'
 WIND_COL = 'wind_direction_10m'
 SPEED_COL = 'wind_speed_10m'
 ALIGNMENT_THRESHOLD_DEG = 30
-# Minimum H2S (ppb) for an observation to contribute to the source probability grid.
-# Higher values focus the map on significant events; lower values increase coverage but
-# risk contamination from background readings. Tuned in h2s_daily_pipeline._compute_source_probability_grid.
-H2S_SOURCE_THRESHOLD = 10
+
 
 # ==============================================================================
 # Hazard Classification (SD County H2S Guidance)
@@ -105,6 +102,12 @@ RISK_YELLOW_LOW = 'YELLOW_LOW'
 RISK_YELLOW_HIGH = 'YELLOW_HIGH'
 RISK_ORANGE = 'ORANGE'
 
+# Minimum H2S (ppb) for an observation to contribute to the source probability grid.
+# Higher values focus the map on significant events; lower values increase coverage but
+# risk contamination from background readings. Tuned in h2s_daily_pipeline._compute_source_probability_grid.
+H2S_SOURCE_THRESHOLD = 10
+H2S_THRESHOLD_EXTREME = 100  # ppb — extreme event trigger
+
 H2S_THRESHOLD_LOW = 5    # ppb — green / yellow_low boundary
 H2S_THRESHOLD_MED = 10   # ppb — yellow_low / yellow_high boundary
 H2S_THRESHOLD_HIGH = 30  # ppb — yellow_high / orange boundary
@@ -113,7 +116,7 @@ PROB_5_CAUTION = 0.25
 PROB_5_ALERT = 0.5
 PROB_10_ALERT = 0.5
 
-H2S_THRESHOLD_EXTREME = 100  # ppb — extreme event trigger
+
 
 # S3 path for extreme event summaries
 EXTREME_EVENT_PATH = 'tijuana/forecast/extreme_events'
@@ -195,3 +198,58 @@ MODEL_FEATURES = CORE_FEATURES + SBIWTP_FEATURES
 
 # Alias for multihorizon compatibility
 BASE_FEATURES = MODEL_FEATURES
+
+# ==============================================================================
+# Dispersion Modeling S3 Paths
+# ==============================================================================
+
+DISPERSION_BASE_PATH = 'tijuana/dispersion'
+
+# Lagrangian inversion outputs (written weekly by dispersion_inversion_job)
+LAGRANGIAN_ENSEMBLE_PATH = 'tijuana/dispersion/lagrangian/ensemble.json'
+LAGRANGIAN_FOOTPRINT_PATH = 'tijuana/dispersion/lagrangian/'
+LAGRANGIAN_FOOTPRINT_NAME='footprint_ensemble'
+# filename within the .parquet archive
+# Emission rate inversion result — weekly job writes, 6h forecast job reads
+EMISSION_RATES_PATH = 'tijuana/dispersion/emission_rates.json'
+
+# HYSPLIT control bundles (zip archives). Use .format(run_tag=run_tag) to expand.
+HYSPLIT_BACKWARD_BUNDLE_PATH = 'tijuana/dispersion/hysplit/backward_bundle_{run_tag}.zip'
+HYSPLIT_FORWARD_BUNDLE_PATH  = 'tijuana/dispersion/hysplit/forward_bundle_{run_tag}.zip'
+HYSPLIT_BACKWARD_BUNDLE_LATEST = 'tijuana/dispersion/hysplit/backward_bundle_latest.zip'
+HYSPLIT_FORWARD_BUNDLE_LATEST  = 'tijuana/dispersion/hysplit/forward_bundle_latest.zip'
+
+# Gaussian forward forecast outputs (3-source coarse model)
+DISPERSION_FORECAST_PATH = 'tijuana/dispersion/forward_forecast_{run_tag}.json'
+DISPERSION_FORECAST_LATEST_PATH = f'{LATEST_BASEPATH}/dispersion/forward_forecast_latest.json'
+
+# Gaussian forward forecast outputs (16-source detailed model)
+DISPERSION_FORECAST_DETAILED_PATH = 'tijuana/dispersion/forward_forecast_detailed_{run_tag}.json'
+DISPERSION_FORECAST_DETAILED_LATEST_PATH = f'{LATEST_BASEPATH}/dispersion/forward_forecast_detailed_latest.json'
+DISPERSION_FORWARD_GRID_DETAILED_PATH = 'tijuana/dispersion/grids/forward_grid_detailed_{run_tag}.json'
+DISPERSION_FORWARD_GRID_DETAILED_LATEST_PATH = f'{LATEST_BASEPATH}/dispersion/forward_grid_detailed_latest.json'
+DISPERSION_FORWARD_GRID_FRAMES_DETAILED_LATEST_PATH = f'{LATEST_BASEPATH}/dispersion/forward_grid_frames_detailed_latest.json'
+
+# Default emission rates (g/s) — calibrated from March 13 2026 event (394 ppb @ NESTOR-BES).
+# east=20, west=10, south=137 g/s. Used as fallback when inversion has not yet run.
+DISPERSION_DEFAULT_EMISSION_RATES_GS: dict[str, float] = {
+    "east":  20.0,   # Stewart's Drain corridor
+    "west":  10.0,   # Oneonta Slough / pump station
+    "south": 137.0,  # Goat Canyon / cross-border (dominant nocturnal source)
+}
+
+# GeoDemic-compatible grid outputs (Phase 1 integration)
+# Versioned paths use .format(run_tag=run_tag)
+DISPERSION_FORWARD_GRID_PATH = 'tijuana/dispersion/grids/forward_grid_{run_tag}.json'
+DISPERSION_FORWARD_GRID_LATEST_PATH = f'{LATEST_BASEPATH}/dispersion/forward_grid_latest.json'
+DISPERSION_FORWARD_GRID_FRAMES_LATEST_PATH = f'{LATEST_BASEPATH}/dispersion/forward_grid_frames_latest.json'
+DISPERSION_SOURCE_FOOTPRINT_GRID_LATEST_PATH = f'{LATEST_BASEPATH}/dispersion/source_footprint_grid_latest.json'
+
+# Dispersion visualizations (heatmaps + source maps)
+# Versioned paths use .format(date_str=YYYYMMDD_HH)
+DISPERSION_VIZ_HEATMAP_COARSE_PATH = 'tijuana/forecast/dispersion/visualizations/{date_str}/heatmap_coarse.png'
+DISPERSION_VIZ_HEATMAP_DETAILED_PATH = 'tijuana/forecast/dispersion/visualizations/{date_str}/heatmap_detailed.png'
+DISPERSION_VIZ_SOURCE_MAP_COARSE_PATH = 'tijuana/forecast/dispersion/visualizations/{date_str}/source_map_coarse.png'
+DISPERSION_VIZ_SOURCE_MAP_DETAILED_PATH = 'tijuana/forecast/dispersion/visualizations/{date_str}/source_map_detailed.png'
+DISPERSION_VIZ_TIMESERIES_COARSE_PATH = 'tijuana/forecast/dispersion/visualizations/{date_str}/timeseries_coarse.png'
+DISPERSION_VIZ_TIMESERIES_DETAILED_PATH = 'tijuana/forecast/dispersion/visualizations/{date_str}/timeseries_detailed.png'

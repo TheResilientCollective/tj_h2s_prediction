@@ -11,6 +11,7 @@ Workflow:
 4. Manual trigger of deploy_approved_model_job for the chosen variant
 """
 
+import os
 from datetime import timedelta
 
 import dagster as dg
@@ -75,6 +76,15 @@ from h2s.defs.h2s_multihorizon_pipeline import (
     mh_forecast_job,
 )
 from h2s.constants import SCHEDULE_6HR
+from h2s.defs.h2s_dispersion_pipeline import (
+    lagrangian_source_attribution,
+    emission_rate_inversion,
+    hysplit_controls_generation,
+    hysplit_run_results,
+    gaussian_forward_forecast,
+    gaussian_forward_forecast_detailed,
+    dispersion_alert_check,
+)
 
 # ============================================================================
 # JOB 1: Monthly Data Extraction (monthly partitioned)
@@ -397,4 +407,163 @@ def mh_forecast_schedule(context: dg.ScheduleEvaluationContext):
     """Trigger daily multi-horizon forecast."""
     return dg.RunRequest(
         run_key=f"mh_forecast_{context.scheduled_execution_time.strftime('%Y-%m-%d')}",
+    )
+
+
+# ============================================================================
+# JOB 9: Weekly Dispersion Inversion (Lagrangian + emission rates + HYSPLIT backward bundle)
+# ============================================================================
+
+dispersion_inversion_job = dg.define_asset_job(
+    name="dispersion_inversion_job",
+    description=(
+        "Weekly source attribution: Lagrangian backward model → emission rate inversion "
+        "→ HYSPLIT backward CONTROL bundle upload. No HYSPLIT execution."
+    ),
+    selection=dg.AssetSelection.assets(
+        lagrangian_source_attribution,
+        emission_rate_inversion,
+        hysplit_controls_generation,
+    ),
+    config={
+        "ops": {
+            "h2s__hysplit_controls_generation": {
+                "config": {"mode": "backward_traj"}
+            }
+        }
+    },
+    tags={"environment": "production", "pipeline": "h2s_dispersion"},
+)
+
+
+# ============================================================================
+# JOB 10: 6-hourly Dispersion Forecast (Gaussian forward + alert check + HYSPLIT forward bundle)
+# ============================================================================
+
+dispersion_forecast_job = dg.define_asset_job(
+    name="dispersion_forecast_job",
+    description=(
+        "6-hourly Gaussian plume forward forecast using forecast meteorology, "
+        "dispersion alert check, and HYSPLIT forward CONTROL bundle upload. "
+        "Runs both 3-source coarse and 16-source detailed models in parallel."
+    ),
+    selection=dg.AssetSelection.assets(
+        emission_rate_inversion,
+        gaussian_forward_forecast,
+        gaussian_forward_forecast_detailed,
+        dispersion_alert_check,
+        hysplit_controls_generation,
+    ),
+    config={
+        "ops": {
+            "h2s__hysplit_controls_generation": {
+                "config": {"mode": "forward_disp"}
+            }
+        }
+    },
+    tags={"environment": "production", "pipeline": "h2s_dispersion"},
+)
+
+
+# ============================================================================
+# JOB 10b: HYSPLIT Queue Execution (bundle generation + queue-driven run)
+#
+# This job routes `hysplit_run_results` to a dedicated HYSPLIT worker via
+# dagster-celery. The worker container ships HYSPLIT binaries, mounts the
+# GDAS meteorology directory, and consumes work from a Redis queue tagged
+# with `dagster-celery/queue: hysplit` (set on the asset's op_tags).
+#
+# The existing dispersion_forecast_job / dispersion_inversion_job keep the
+# default in-process executor — minimal blast radius, existing schedules
+# unchanged.
+# ============================================================================
+
+try:
+    from dagster_celery import celery_executor
+
+    _celery_broker_url = os.environ.get(
+        "DAGSTER_CELERY_BROKER", "redis://redis:6379/0"
+    )
+    _celery_backend_url = os.environ.get(
+        "DAGSTER_CELERY_BACKEND", "redis://redis:6379/0"
+    )
+    _dispersion_hysplit_executor = celery_executor.configured(
+        {
+            "broker": _celery_broker_url,
+            "backend": _celery_backend_url,
+        }
+    )
+except ImportError:
+    # dagster-celery not installed (e.g. dev environment without worker) —
+    # fall back to in-process so `dg check defs` still works.
+    _dispersion_hysplit_executor = None
+
+
+_dispersion_hysplit_job_kwargs = dict(
+    name="dispersion_hysplit_execution_job",
+    description=(
+        "Generate HYSPLIT forward bundle and execute it on the dedicated "
+        "HYSPLIT worker via dagster-celery queue routing. Uploads tdump/cdump "
+        "outputs to tijuana/forecasts/dispersion/hysplit/runs/."
+    ),
+    selection=dg.AssetSelection.assets(
+        hysplit_controls_generation,
+        hysplit_run_results,
+    ),
+    config={
+        "ops": {
+            "h2s__hysplit_controls_generation": {
+                "config": {"mode": "forward_disp"}
+            },
+            "h2s__hysplit_run_results": {
+                "config": {"mode": "forward_disp"}
+            },
+        }
+    },
+    tags={"environment": "production", "pipeline": "h2s_dispersion_hysplit_execution"},
+)
+if _dispersion_hysplit_executor is not None:
+    _dispersion_hysplit_job_kwargs["executor_def"] = _dispersion_hysplit_executor
+
+dispersion_hysplit_execution_job = dg.define_asset_job(
+    **_dispersion_hysplit_job_kwargs,
+)
+
+
+# ============================================================================
+# SCHEDULE 9: Weekly Dispersion Inversion (Monday 02:30 UTC)
+# Offset 30min from monthly_data_schedule (02:00) to avoid collision on 1st of month.
+# Starts STOPPED — enable after reviewing first emission rate inversion results.
+# ============================================================================
+
+@dg.schedule(
+    job=dispersion_inversion_job,
+    cron_schedule="30 2 * * 1",
+    description="Weekly Lagrangian inversion + HYSPLIT backward bundle (Monday 02:30 UTC)",
+    default_status=dg.DefaultScheduleStatus.STOPPED,
+    tags={"environment": "production", "schedule_type": "dispersion_inversion"},
+)
+def dispersion_inversion_schedule(context: dg.ScheduleEvaluationContext):
+    """Re-run source attribution inversion weekly to capture new high-H2S events."""
+    return dg.RunRequest(
+        run_key=f"dispersion_inversion_{context.scheduled_execution_time.strftime('%Y-%m-%d')}",
+    )
+
+
+# ============================================================================
+# SCHEDULE 10: 6-hourly Dispersion Forecast (tied to SCHEDULE_6HR)
+# Starts RUNNING — uses calibrated default emission rates until first inversion completes.
+# ============================================================================
+
+@dg.schedule(
+    job=dispersion_forecast_job,
+    cron_schedule=SCHEDULE_6HR,
+    description="6-hourly Gaussian forward forecast + alert check + HYSPLIT forward bundle",
+    default_status=dg.DefaultScheduleStatus.RUNNING,
+    tags={"environment": "production", "schedule_type": "dispersion_forecast"},
+)
+def dispersion_forecast_schedule(context: dg.ScheduleEvaluationContext):
+    """Trigger 6-hourly dispersion forward forecast using current forecast meteorology."""
+    return dg.RunRequest(
+        run_key=f"dispersion_forecast_{context.scheduled_execution_time.strftime('%Y-%m-%d_%H')}",
     )

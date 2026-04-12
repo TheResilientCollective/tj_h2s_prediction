@@ -11,6 +11,18 @@ volumes:
     driver: local
     name: ${RESILIENT_DAGSTER_STORAGE:-dagster_storage}
 
+  redis-data:
+    driver: local
+    name: ${RESILIENT_REDIS_STORAGE:-redis_data}
+
+  hysplit-work:
+    driver: local
+    name: ${RESILIENT_HYSPLIT_WORK:-hysplit_work}
+
+  hysplit-output:
+    driver: local
+    name: ${RESILIENT_HYSPLIT_OUTPUT:-hysplit_output}
+
 # DO NOT START IN PYCHARM (unless you set the env variables in your runconfig
 # USE:
 # ./docker_RESILIENT_prod_start.h
@@ -40,6 +52,11 @@ services:
             - PUBLIC_BUCKET=${PUBLIC_BUCKET}
             - LATEST_BASEPATH=${LATEST_BASEPATH:-latest/}
 
+            # Celery broker/backend for HYSPLIT queue dispatch. The
+            # dagster-code-h2s side enqueues work; hysplit-worker consumes it.
+            - DAGSTER_CELERY_BROKER=${DAGSTER_CELERY_BROKER:-redis://redis-${PROJECT}:6379/0}
+            - DAGSTER_CELERY_BACKEND=${DAGSTER_CELERY_BACKEND:-redis://redis-${PROJECT}:6379/0}
+
         command:
 
             - "dagster"
@@ -61,3 +78,55 @@ services:
         networks:
             - dagster_host
             - traefik_proxy
+
+## Redis broker + result backend for dagster-celery HYSPLIT queue.
+## The code-server enqueues work; hysplit-worker drains it.
+    redis:
+        hostname: redis-${PROJECT}
+        image: redis:7-alpine
+        command: ["redis-server", "--save", "60", "1", "--appendonly", "no"]
+        volumes:
+            - redis-data:/data
+        networks:
+            - dagster_host
+
+## HYSPLIT worker: dedicated container with the HYSPLIT 5.4.2 binary and a
+## dagster-celery worker consuming the `hysplit` queue. Bind-mount the GDAS
+## met directory from the host (HYSPLIT_MET_HOST_DIR) into /data/hysplit/meteo.
+## Env vars mirror the dagster-code-h2s &env block (YAML sequence merge isn't
+## possible; keep these two blocks in sync when adding new credentials).
+    hysplit-worker:
+        hostname: hysplit-worker-${PROJECT}
+        image: docker.io/resilientucsd/dagster-resilient-h2s-hysplit-worker:${CONTAINER_CODE_TAG:-latest}
+        environment:
+            - DEBUG_CONTAINER=${DEBUG_CONTAINER:-false}
+            - PROJECT=${PROJECT}
+            - S3_SECRET_KEY=${S3_SECRET_KEY}
+            - S3_ACCESS_KEY=${S3_ACCESS_KEY}
+            - S3_ADDRESS=${S3_ADDRESS}
+            - S3_BUCKET=${S3_BUCKET:-resilentpublic}
+            - S3_PORT=${S3_PORT}
+            - S3_USE_SSL=${S3_USE_SSL}
+            - PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
+            - SLACK_CHANNEL=${SLACK_CHANNEL:-"#test"}
+            - SLACK_TOKEN=${SLACK_TOKEN}
+            - HOST=${HOST}
+            - PUBLIC_BUCKET=${PUBLIC_BUCKET}
+            - LATEST_BASEPATH=${LATEST_BASEPATH:-latest/}
+            - DAGSTER_CELERY_BROKER=${DAGSTER_CELERY_BROKER:-redis://redis-${PROJECT}:6379/0}
+            - DAGSTER_CELERY_BACKEND=${DAGSTER_CELERY_BACKEND:-redis://redis-${PROJECT}:6379/0}
+            - DAGSTER_HOME=/usr/src/app/
+            - HYSPLIT_PATH=/opt/hysplit/exec
+            - HYSPLIT_METEO_DIR=/data/hysplit/meteo
+            - HYSPLIT_WORKING_DIR=/data/hysplit/work
+            - HYSPLIT_OUTPUT_DIR=/data/hysplit/output
+        volumes:
+            - dagster-storage:/usr/src/app/storage
+            - ${HYSPLIT_MET_HOST_DIR:-/data/gdas}:/data/hysplit/meteo:ro
+            - hysplit-work:/data/hysplit/work
+            - hysplit-output:/data/hysplit/output
+        depends_on:
+            - redis
+            - dagster-postgres
+        networks:
+            - dagster_host

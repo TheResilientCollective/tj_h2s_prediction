@@ -109,6 +109,16 @@ def defs():
         mh_deployment_job,
     )
 
+    # Import dispersion modeling pipeline assets
+    from h2s.defs.h2s_dispersion_pipeline import (
+        lagrangian_source_attribution,
+        emission_rate_inversion,
+        hysplit_controls_generation,
+        hysplit_run_results,
+        gaussian_forward_forecast,
+        dispersion_alert_check,
+    )
+
     # Import multi-horizon forecast pipeline assets
     from h2s.defs.h2s_multihorizon_pipeline import (
         mh_model_artifacts,
@@ -137,6 +147,11 @@ def defs():
         daily_analysis_schedule,
         mh_training_schedule,
         mh_forecast_schedule,
+        dispersion_inversion_job,
+        dispersion_forecast_job,
+        dispersion_hysplit_execution_job,
+        dispersion_inversion_schedule,
+        dispersion_forecast_schedule,
     )
 
     # Create definitions with assets, jobs, schedules, and resources
@@ -170,6 +185,13 @@ def defs():
             daily_station_forecasts,
             daily_dashboard_viz,
             daily_summary_json,
+            # Dispersion Pipeline Assets
+            lagrangian_source_attribution,
+            emission_rate_inversion,
+            hysplit_controls_generation,
+            hysplit_run_results,
+            gaussian_forward_forecast,
+            dispersion_alert_check,
             # Seed Models
             seed_models,
             # Multi-Horizon Training Pipeline Assets
@@ -206,6 +228,10 @@ def defs():
             mh_training_job,
             mh_deployment_job,
             mh_forecast_job,
+            # Dispersion jobs
+            dispersion_inversion_job,
+            dispersion_forecast_job,
+            dispersion_hysplit_execution_job,
             # Two-tier alert job
             h2s_alert_job,
         ],
@@ -218,6 +244,9 @@ def defs():
             daily_analysis_schedule,
             mh_training_schedule,
             mh_forecast_schedule,
+            # Dispersion schedules
+            dispersion_inversion_schedule,
+            dispersion_forecast_schedule,
         ],
         sensors=[slack_on_run_failure, h2s_alert_sensor],
         resources=resources[deployment_name]
