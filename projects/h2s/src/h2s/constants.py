@@ -148,6 +148,37 @@ ALERT_STATE_S3_PATH       = "tijuana/forecast/alerts/h2s_alert_state.json"
 ALERT_SUMMARY_ARCHIVE_PATH = EXTREME_EVENT_PATH
 ALERT_SUMMARY_LATEST_PATH  = f"{LATEST_BASEPATH}/forecast_data/extreme_event_summary.json"
 
+# ==============================================================================
+# APCD Public-Bucket Sensor Watch
+# ==============================================================================
+# The apcd_sensor_watch_sensor polls hs2_lastday.csv produced by the
+# hs2_latest asset in resilient_workflows_public and fires Slack alerts +
+# event reports when any station exceeds watch/critical thresholds.
+
+APCD_PUBLIC_BUCKET       = "resilentpublic"  # honors existing bucket name
+APCD_HS2_LASTDAY_PATH    = "tijuana/sd_apcd_air/output/hs2_lastday.csv"
+APCD_H2S_PARAMETER       = "07 H2S PPB"
+
+# Independent state for the multi-station APCD sensor watch (separate from
+# ALERT_STATE_S3_PATH which is the NESTOR-only parquet sensor)
+APCD_SENSOR_STATE_PATH   = "tijuana/forecast/alerts/apcd_sensor_watch_state.json"
+
+# Event reports (dashboard-ready archive)
+SENSOR_EVENTS_BASE_PATH    = "tijuana/forecast/sensor_events"
+SENSOR_EVENT_ARCHIVE_PATH  = f"{SENSOR_EVENTS_BASE_PATH}/archive"
+SENSOR_EVENT_INDEX_PATH    = f"{SENSOR_EVENTS_BASE_PATH}/index.json"
+SENSOR_EVENT_LATEST_PATH   = f"{LATEST_BASEPATH}/forecast_data/sensor_event_latest.json"
+SENSOR_EVENT_INDEX_MAX     = 500  # rolling cap on index.json for dashboard pagination
+
+# Map APCD 'Site Name' → STATIONS key (for joining with prediction output)
+# EL CAJON LES has no prediction model — exceedances there will still generate
+# an event report + Slack alert, just without prediction fields populated.
+APCD_SITE_TO_STATION = {
+    "NESTOR - BES":  "NESTOR - BES",
+    "SAN YSIDRO":    "SAN YSIDRO",
+    "IB CIVIC CTR":  "IB CIVIC CTR",
+}
+
 
 def classify_risk(prob_5: float, prob_10: float, h2s_pred: float) -> str:
     """Assign risk tier from predictions (SD County guidance).
