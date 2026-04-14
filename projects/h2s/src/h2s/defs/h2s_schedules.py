@@ -85,6 +85,7 @@ from h2s.defs.h2s_dispersion_pipeline import (
     gaussian_forward_forecast_detailed,
     dispersion_alert_check,
 )
+from h2s.defs.h2s_river_emissions_pipeline import river_emission_grid
 
 # ============================================================================
 # JOB 1: Monthly Data Extraction (monthly partitioned)
@@ -453,6 +454,7 @@ dispersion_forecast_job = dg.define_asset_job(
         gaussian_forward_forecast_detailed,
         dispersion_alert_check,
         hysplit_controls_generation,
+        river_emission_grid,
     ),
     config={
         "ops": {
@@ -463,7 +465,69 @@ dispersion_forecast_job = dg.define_asset_job(
     },
     tags={"environment": "production", "pipeline": "h2s_dispersion"},
 )
+# ============================================================================
+# JOB 10b: HYSPLIT Queue Execution (bundle generation + queue-driven run)
+#
+# This job routes `hysplit_run_results` to a dedicated HYSPLIT worker via
+# dagster-celery. The worker container ships HYSPLIT binaries, mounts the
+# GDAS meteorology directory, and consumes work from a Redis queue tagged
+# with `dagster-celery/queue: hysplit` (set on the asset's op_tags).
+#
+# The existing dispersion_forecast_job / dispersion_inversion_job keep the
+# default in-process executor — minimal blast radius, existing schedules
+# unchanged.
+# ============================================================================
 
+try:
+    from dagster_celery import celery_executor
+
+    _celery_broker_url = os.environ.get(
+        "DAGSTER_CELERY_BROKER", "redis://redis:6379/0"
+    )
+    _celery_backend_url = os.environ.get(
+        "DAGSTER_CELERY_BACKEND", "redis://redis:6379/0"
+    )
+    _dispersion_hysplit_executor = celery_executor.configured(
+        {
+            "broker": _celery_broker_url,
+            "backend": _celery_backend_url,
+        }
+    )
+except ImportError:
+    # dagster-celery not installed (e.g. dev environment without worker) —
+    # fall back to in-process so `dg check defs` still works.
+    _dispersion_hysplit_executor = None
+
+
+_dispersion_hysplit_job_kwargs = dict(
+    name="dispersion_hysplit_execution_job",
+    description=(
+        "Generate HYSPLIT forward bundle and execute it on the dedicated "
+        "HYSPLIT worker via dagster-celery queue routing. Uploads tdump/cdump "
+        "outputs to tijuana/forecasts/dispersion/hysplit/runs/."
+    ),
+    selection=dg.AssetSelection.assets(
+        hysplit_controls_generation,
+        hysplit_run_results,
+    ),
+    config={
+        "ops": {
+            "h2s__hysplit_controls_generation": {
+                "config": {"mode": "forward_disp"}
+            },
+            "h2s__hysplit_run_results": {
+                "config": {"mode": "forward_disp"}
+            },
+        }
+    },
+    tags={"environment": "production", "pipeline": "h2s_dispersion_hysplit_execution"},
+)
+if _dispersion_hysplit_executor is not None:
+    _dispersion_hysplit_job_kwargs["executor_def"] = _dispersion_hysplit_executor
+
+dispersion_hysplit_execution_job = dg.define_asset_job(
+    **_dispersion_hysplit_job_kwargs,
+)
 
 # ============================================================================
 # JOB 10b: HYSPLIT Queue Execution (bundle generation + queue-driven run)
