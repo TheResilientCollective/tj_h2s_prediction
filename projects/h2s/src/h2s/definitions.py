@@ -123,7 +123,13 @@ def defs():
         hysplit_controls_generation,
         hysplit_run_results,
         gaussian_forward_forecast,
+        gaussian_forward_forecast_detailed,
         dispersion_alert_check,
+    )
+
+    # Import physics-based river emission grid asset
+    from h2s.defs.h2s_river_emissions_pipeline import (
+        river_emission_grid,
     )
 
     # Import multi-horizon forecast pipeline assets
@@ -199,7 +205,10 @@ def defs():
             hysplit_controls_generation,
             hysplit_run_results,
             gaussian_forward_forecast,
+            gaussian_forward_forecast_detailed,
             dispersion_alert_check,
+            # Physics-based river emission grid
+            river_emission_grid,
             # Seed Models
             seed_models,
             # Multi-Horizon Training Pipeline Assets
