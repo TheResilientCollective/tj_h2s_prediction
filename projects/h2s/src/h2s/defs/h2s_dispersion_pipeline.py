@@ -54,8 +54,10 @@ from h2s.constants import (
     HYSPLIT_FORWARD_BUNDLE_PATH,
     LAGRANGIAN_ENSEMBLE_PATH,
     LAGRANGIAN_FOOTPRINT_PATH,
-    OBS_DATA_PATH,
-    LAGRANGIAN_FOOTPRINT_NAME,
+    OBS_DATA_PATH, LAGRANGIAN_FOOTPRINT_NAME,
+    FLOW_COL,
+    RIVER_EMISSION_GRID_LATEST_PATH,
+
 )
 from h2s.dispersion import (
     LagrangianConfig,
@@ -84,6 +86,8 @@ from h2s.dispersion.grid_config import (
     VIZ_BOUNDS,
 )
 from h2s.utils import store_assets
+from h2s.emissions.h2s_generation import H2SGenerationModel
+from h2s.emissions.tj_river_sources import TijuanaRiverSources
 
 # Zone groupings: candidate source names → east / west / south
 _ZONE_MAP = {
@@ -970,6 +974,7 @@ def dispersion_alert_check(context: dg.AssetExecutionContext) -> dg.MaterializeR
     watch_ppb    = ALERT_TIERS["watch"]["threshold"]
     critical_ppb = ALERT_TIERS["critical"]["threshold"]
     lookahead_h  = 6
+    alerts_triggered = []
 
     # Merge both forecasts: for each (sensor, time) keep the max ppb across models
     # key: (sensor_name, time_str) → {"predicted_ppb": float, "model": str}
@@ -1032,8 +1037,10 @@ def dispersion_alert_check(context: dg.AssetExecutionContext) -> dg.MaterializeR
                     parts.append(f"<{sm_url}|source map>")
                 viz_lines.append(f"_{label}: {' · '.join(parts)}_")
 
+        lines = [f"• {a['sensor']}: {a['predicted_ppb']:.1f} ppb @ {a['time']}" for a in alerts_triggered[:5]]
         msg = (
             f":warning: *Dispersion model alert — {tier_label}*\n"
+            f"Gaussian plume forward model predicts elevated H₂S in next {lookahead_h}h:\n"
             f"Gaussian plume forward model predicts elevated H₂S in next {lookahead_h}h "
             f"_(models: {models_used})_:\n"
             + "\n".join(lines)
@@ -1059,6 +1066,99 @@ def dispersion_alert_check(context: dg.AssetExecutionContext) -> dg.MaterializeR
         "models_checked":   dg.MetadataValue.text(", ".join(forecasts.keys())),
     })
 
+# ==============================================================================
+# Asset 7b: river_emission_grid
+# ==============================================================================
+
+@dg.asset(
+    key_prefix="h2s",
+    group_name="h2s_dispersion",
+    required_resource_keys={"s3"},
+    kinds={"python", "s3"},
+    description=(
+        "Physics-based H2S river emission grid (Arrhenius kinetics + Gaussian spreading). "
+        "Reads current met/flow/tidal conditions from FORECAST_DATA_PATH, runs "
+        "TijuanaRiverSources + H2SGenerationModel, and uploads a GeoDemic-compatible "
+        "GridData JSON to S3 for consumption by Geodemic's "
+        "/api/v1/tj-data/dispersion/river-emission-grid endpoint."
+    ),
+)
+def river_emission_grid(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
+    log = context.log
+    s3 = context.resources.s3
+
+    log.info(f"Loading forecast data from {FORECAST_DATA_PATH}")
+    url = s3.get_presigned_url(FORECAST_DATA_PATH)
+    fc_df = pd.read_parquet(url)
+    fc_df["time"] = pd.to_datetime(fc_df["time"], utc=True).dt.tz_convert("America/Los_Angeles")
+
+    latest = fc_df.iloc[-1]
+    wind_speed     = float(latest.get("wind_speed_10m",    3.0))
+    wind_direction = float(latest.get("wind_direction_10m", 270.0))
+    temperature    = float(latest.get("temperature_2m",    20.0))
+    tide_height    = float(latest.get("tide_height",        0.5))
+    # FLOW_COL = 'Flow (m^3/s)--Border'; convert m³/s → cfs
+    raw_flow = latest.get(FLOW_COL, None)
+    flow_rate_cfs = float(raw_flow) * 35.3147 if raw_flow is not None else 50.0
+
+    conditions = {
+        "temperature":      temperature,
+        "pH":               7.5,
+        "dissolved_oxygen": 2.0,
+        "tide_level":       tide_height,
+        "flow_rate":        flow_rate_cfs,
+        "wind_speed":       wind_speed,
+        "wind_direction":   wind_direction,
+    }
+
+    log.info("Running TijuanaRiverSources.generate_river_emission_grid()")
+    sources = TijuanaRiverSources()
+    emission_grid = sources.generate_river_emission_grid(
+        wind_speed=wind_speed,
+        wind_direction=wind_direction,
+        flow_rate=flow_rate_cfs,
+        tide_level=tide_height,
+        temperature=temperature,
+    )
+
+    model = H2SGenerationModel()
+    point_sources = model.get_source_emissions(conditions)
+
+    grid_max  = float(np.max(emission_grid))
+    grid_mean = float(np.mean(emission_grid[emission_grid > 0])) if np.any(emission_grid > 0) else 0.0
+
+    grid_data = {
+        "data":   emission_grid.tolist(),
+        "bounds": GRID_BOUNDS,
+        "nrows":  GRID_NROWS,
+        "ncols":  GRID_NCOLS,
+        "metadata": {
+            "timestamp":      pd.Timestamp.utcnow().isoformat(),
+            "wind_speed_ms":  wind_speed,
+            "wind_direction": wind_direction,
+            "temperature_c":  temperature,
+            "flow_rate_cfs":  flow_rate_cfs,
+            "tide_height_m":  tide_height,
+            "model":          "physics_based_arrhenius",
+            "point_sources": [
+                {"lat": lat, "lon": lon, "ppb": round(ppb, 2)}
+                for lat, lon, ppb in point_sources
+            ],
+        },
+    }
+
+    grid_json = json.dumps(grid_data)
+    s3.putFile(grid_json.encode(), path=RIVER_EMISSION_GRID_LATEST_PATH, content_type="application/json")
+    log.info(f"Uploaded river emission grid → {RIVER_EMISSION_GRID_LATEST_PATH}")
+
+    return dg.MaterializeResult(metadata={
+        "grid_max_ppb":    dg.MetadataValue.float(grid_max),
+        "grid_mean_ppb":   dg.MetadataValue.float(grid_mean),
+        "grid_shape":      dg.MetadataValue.text(f"{GRID_NROWS}x{GRID_NCOLS}"),
+        "n_point_sources": dg.MetadataValue.int(len(point_sources)),
+        "wind_speed_ms":   dg.MetadataValue.float(wind_speed),
+        "s3_path":         dg.MetadataValue.text(RIVER_EMISSION_GRID_LATEST_PATH),
+    })
 
 # ==============================================================================
 # Exported asset list (for Definitions)
@@ -1072,4 +1172,6 @@ dispersion_assets = [
     gaussian_forward_forecast,
     gaussian_forward_forecast_detailed,
     dispersion_alert_check,
+    river_emission_grid,       # ← add this
 ]
+

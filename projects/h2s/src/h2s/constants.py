@@ -275,6 +275,8 @@ DISPERSION_FORWARD_GRID_PATH = 'tijuana/dispersion/grids/forward_grid_{run_tag}.
 DISPERSION_FORWARD_GRID_LATEST_PATH = f'{LATEST_BASEPATH}/dispersion/forward_grid_latest.json'
 DISPERSION_FORWARD_GRID_FRAMES_LATEST_PATH = f'{LATEST_BASEPATH}/dispersion/forward_grid_frames_latest.json'
 DISPERSION_SOURCE_FOOTPRINT_GRID_LATEST_PATH = f'{LATEST_BASEPATH}/dispersion/source_footprint_grid_latest.json'
+# Physics-based river emission grid (Arrhenius model, updated with dispersion forecast)
+RIVER_EMISSION_GRID_LATEST_PATH = f'{LATEST_BASEPATH}/dispersion/river_emission_grid_latest.json'
 
 # Dispersion visualizations (heatmaps + source maps)
 # Versioned paths use .format(date_str=YYYYMMDD_HH)

@@ -5,6 +5,8 @@ dagster_home/
 .env
 .coverage
 data/startmodels/
+data/models_mh/
+data/models_v2/
 /output/
 /models/
 __pycache__/
