@@ -162,7 +162,7 @@ def defs():
         mh_forecast_schedule,
         dispersion_inversion_job,
         dispersion_forecast_job,
- #       dispersion_hysplit_execution_job,
+        dispersion_hysplit_execution_job,
         dispersion_inversion_schedule,
         dispersion_forecast_schedule,
     )
@@ -248,7 +248,7 @@ def defs():
             # Dispersion jobs
             dispersion_inversion_job,
             dispersion_forecast_job,
- #           dispersion_hysplit_execution_job,
+            dispersion_hysplit_execution_job,
             # Two-tier alert job
             h2s_alert_job,
             # APCD multi-station sensor watch job
