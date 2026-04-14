@@ -55,6 +55,9 @@ from h2s.constants import (
     LAGRANGIAN_ENSEMBLE_PATH,
     LAGRANGIAN_FOOTPRINT_PATH,
     OBS_DATA_PATH, LAGRANGIAN_FOOTPRINT_NAME,
+    FLOW_COL,
+    RIVER_EMISSION_GRID_LATEST_PATH,
+
 )
 from h2s.dispersion import (
     LagrangianConfig,
@@ -83,6 +86,8 @@ from h2s.dispersion.grid_config import (
     VIZ_BOUNDS,
 )
 from h2s.utils import store_assets
+from h2s.emissions.h2s_generation import H2SGenerationModel
+from h2s.emissions.tj_river_sources import TijuanaRiverSources
 
 # Zone groupings: candidate source names → east / west / south
 _ZONE_MAP = {
@@ -450,6 +455,133 @@ def hysplit_controls_generation(
         "zip_size_bytes":    dg.MetadataValue.int(len(zip_bytes)),
         "s3_versioned_path": dg.MetadataValue.text(versioned_path),
         "s3_latest_path":    dg.MetadataValue.text(latest_path),
+        "run_tag":           dg.MetadataValue.text(run_tag),
+    })
+
+
+# ==============================================================================
+# Asset 3b: hysplit_run_results — executes the bundle on the HYSPLIT worker
+# ==============================================================================
+#
+# This asset runs inside the dedicated `hysplit` worker container via
+# dagster-celery. The op carries the `dagster-celery/queue: hysplit` tag so
+# that only this step (plus any ops sharing the tag) is routed to the worker
+# queue — every other asset in this pipeline keeps running in-process on the
+# Dagster code-server.
+
+# Forecast-run HYSPLIT outputs live under a new `forecasts/` prefix. The
+# existing `tijuana/dispersion/...` paths in constants.py are intentionally
+# left alone; only HYSPLIT run artifacts produced by the worker use this prefix.
+HYSPLIT_RUNS_BASE = "tijuana/forecasts/dispersion/hysplit/runs"
+
+
+@dg.asset(
+    key_prefix="h2s",
+    group_name="h2s_dispersion",
+    required_resource_keys={"s3"},
+    kinds={"python", "s3"},
+    op_tags={"dagster-celery/queue": "hysplit"},
+    description=(
+        "Execute the HYSPLIT CONTROL bundle produced by hysplit_controls_generation. "
+        "Runs inside the dedicated HYSPLIT worker via dagster-celery queue routing. "
+        "Uploads tdump/cdump outputs and a summary.json to "
+        "tijuana/forecasts/dispersion/hysplit/runs/{run_tag}/."
+    ),
+    deps=[dg.AssetKey(["h2s", "hysplit_controls_generation"])],
+)
+def hysplit_run_results(
+    context: dg.AssetExecutionContext,
+    config: HysplitConfig,
+) -> dg.MaterializeResult:
+    """Consume the latest bundle from S3, run HYSPLIT, upload outputs."""
+    from h2s.dispersion.hysplit_runner import HysplitRunner
+
+    log = context.log
+    s3 = context.resources.s3
+
+    if config.mode == "forward_disp":
+        bundle_path = HYSPLIT_FORWARD_BUNDLE_LATEST
+    else:
+        bundle_path = HYSPLIT_BACKWARD_BUNDLE_LATEST
+
+    log.info(f"Downloading HYSPLIT bundle from {bundle_path}")
+    zip_bytes = s3.getFile(bundle_path)
+    log.info(f"Bundle size: {len(zip_bytes):,} bytes")
+
+    runner = HysplitRunner()
+    log.info(
+        f"HYSPLIT runner: exec={runner.hysplit_path}, meteo={runner.meteo_dir}, "
+        f"work={runner.working_dir}, out={runner.output_dir}"
+    )
+
+    outputs = runner.run_bundle_zip(zip_bytes, mode=config.mode)
+    log.info(
+        f"HYSPLIT run complete: {outputs.n_success} success, {outputs.n_failed} failed, "
+        f"{len(outputs.output_paths)} output files"
+    )
+
+    run_tag = pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M")
+    uploaded_paths: list[str] = []
+
+    for out_path in outputs.output_paths:
+        # Preserve per-control subdirectory structure: runs/{run_tag}/{tag}/{filename}
+        # The runner writes to output_dir/run_{id}/{tag}/{filename} — strip the
+        # run_{id} prefix so the S3 layout mirrors the per-control tag layout.
+        try:
+            rel = out_path.relative_to(runner.output_dir)
+            rel_parts = rel.parts[1:] if len(rel.parts) > 1 else rel.parts
+            rel_str = "/".join(rel_parts)
+        except ValueError:
+            rel_str = out_path.name
+        versioned = f"{HYSPLIT_RUNS_BASE}/{run_tag}/{rel_str}"
+        latest    = f"{HYSPLIT_RUNS_BASE}/latest/{rel_str}"
+        data = out_path.read_bytes()
+        s3.putFile(data, path=versioned, content_type="application/octet-stream")
+        s3.putFile(data, path=latest,    content_type="application/octet-stream")
+        uploaded_paths.append(versioned)
+        log.info(f"Uploaded {out_path.name} ({len(data):,} bytes) → {versioned}")
+
+    # Write a summary.json next to the outputs for auditing.
+    summary = {
+        "run_tag": run_tag,
+        "mode": config.mode,
+        "bundle_s3_path": bundle_path,
+        "n_success": outputs.n_success,
+        "n_failed": outputs.n_failed,
+        "n_outputs": len(uploaded_paths),
+        "output_paths": uploaded_paths,
+        "controls": [
+            {
+                "control_name": r.control_name,
+                "returncode": r.returncode,
+                "success": r.success,
+                "n_output_files": len(r.output_files),
+            }
+            for r in outputs.results
+        ],
+    }
+    summary_json = json.dumps(summary, indent=2).encode()
+    summary_versioned = f"{HYSPLIT_RUNS_BASE}/{run_tag}/summary.json"
+    summary_latest    = f"{HYSPLIT_RUNS_BASE}/latest/summary.json"
+    s3.putFile(summary_json, path=summary_versioned, content_type="application/json")
+    s3.putFile(summary_json, path=summary_latest,    content_type="application/json")
+    log.info(f"Uploaded summary → {summary_versioned}")
+
+    if outputs.n_failed > 0:
+        log.warning(
+            f"{outputs.n_failed} HYSPLIT control(s) failed. "
+            f"Check MESSAGE files in run outputs for details."
+        )
+
+    return dg.MaterializeResult(metadata={
+        "run_tag":          dg.MetadataValue.text(run_tag),
+        "mode":             dg.MetadataValue.text(config.mode),
+        "n_success":        dg.MetadataValue.int(outputs.n_success),
+        "n_failed":         dg.MetadataValue.int(outputs.n_failed),
+        "n_output_files":   dg.MetadataValue.int(len(uploaded_paths)),
+        "bundle_s3_path":   dg.MetadataValue.text(bundle_path),
+        "summary_s3_path":  dg.MetadataValue.text(summary_versioned),
+        "latest_s3_prefix": dg.MetadataValue.text(f"{HYSPLIT_RUNS_BASE}/latest/"),
     })
 
 
@@ -842,6 +974,7 @@ def dispersion_alert_check(context: dg.AssetExecutionContext) -> dg.MaterializeR
     watch_ppb    = ALERT_TIERS["watch"]["threshold"]
     critical_ppb = ALERT_TIERS["critical"]["threshold"]
     lookahead_h  = 6
+    alerts_triggered = []
 
     # Merge both forecasts: for each (sensor, time) keep the max ppb across models
     # key: (sensor_name, time_str) → {"predicted_ppb": float, "model": str}
@@ -904,8 +1037,10 @@ def dispersion_alert_check(context: dg.AssetExecutionContext) -> dg.MaterializeR
                     parts.append(f"<{sm_url}|source map>")
                 viz_lines.append(f"_{label}: {' · '.join(parts)}_")
 
+        lines = [f"• {a['sensor']}: {a['predicted_ppb']:.1f} ppb @ {a['time']}" for a in alerts_triggered[:5]]
         msg = (
             f":warning: *Dispersion model alert — {tier_label}*\n"
+            f"Gaussian plume forward model predicts elevated H₂S in next {lookahead_h}h:\n"
             f"Gaussian plume forward model predicts elevated H₂S in next {lookahead_h}h "
             f"_(models: {models_used})_:\n"
             + "\n".join(lines)
@@ -931,6 +1066,99 @@ def dispersion_alert_check(context: dg.AssetExecutionContext) -> dg.MaterializeR
         "models_checked":   dg.MetadataValue.text(", ".join(forecasts.keys())),
     })
 
+# ==============================================================================
+# Asset 7b: river_emission_grid
+# ==============================================================================
+
+@dg.asset(
+    key_prefix="h2s",
+    group_name="h2s_dispersion",
+    required_resource_keys={"s3"},
+    kinds={"python", "s3"},
+    description=(
+        "Physics-based H2S river emission grid (Arrhenius kinetics + Gaussian spreading). "
+        "Reads current met/flow/tidal conditions from FORECAST_DATA_PATH, runs "
+        "TijuanaRiverSources + H2SGenerationModel, and uploads a GeoDemic-compatible "
+        "GridData JSON to S3 for consumption by Geodemic's "
+        "/api/v1/tj-data/dispersion/river-emission-grid endpoint."
+    ),
+)
+def river_emission_grid(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
+    log = context.log
+    s3 = context.resources.s3
+
+    log.info(f"Loading forecast data from {FORECAST_DATA_PATH}")
+    url = s3.get_presigned_url(FORECAST_DATA_PATH)
+    fc_df = pd.read_parquet(url)
+    fc_df["time"] = pd.to_datetime(fc_df["time"], utc=True).dt.tz_convert("America/Los_Angeles")
+
+    latest = fc_df.iloc[-1]
+    wind_speed     = float(latest.get("wind_speed_10m",    3.0))
+    wind_direction = float(latest.get("wind_direction_10m", 270.0))
+    temperature    = float(latest.get("temperature_2m",    20.0))
+    tide_height    = float(latest.get("tide_height",        0.5))
+    # FLOW_COL = 'Flow (m^3/s)--Border'; convert m³/s → cfs
+    raw_flow = latest.get(FLOW_COL, None)
+    flow_rate_cfs = float(raw_flow) * 35.3147 if raw_flow is not None else 50.0
+
+    conditions = {
+        "temperature":      temperature,
+        "pH":               7.5,
+        "dissolved_oxygen": 2.0,
+        "tide_level":       tide_height,
+        "flow_rate":        flow_rate_cfs,
+        "wind_speed":       wind_speed,
+        "wind_direction":   wind_direction,
+    }
+
+    log.info("Running TijuanaRiverSources.generate_river_emission_grid()")
+    sources = TijuanaRiverSources()
+    emission_grid = sources.generate_river_emission_grid(
+        wind_speed=wind_speed,
+        wind_direction=wind_direction,
+        flow_rate=flow_rate_cfs,
+        tide_level=tide_height,
+        temperature=temperature,
+    )
+
+    model = H2SGenerationModel()
+    point_sources = model.get_source_emissions(conditions)
+
+    grid_max  = float(np.max(emission_grid))
+    grid_mean = float(np.mean(emission_grid[emission_grid > 0])) if np.any(emission_grid > 0) else 0.0
+
+    grid_data = {
+        "data":   emission_grid.tolist(),
+        "bounds": GRID_BOUNDS,
+        "nrows":  GRID_NROWS,
+        "ncols":  GRID_NCOLS,
+        "metadata": {
+            "timestamp":      pd.Timestamp.utcnow().isoformat(),
+            "wind_speed_ms":  wind_speed,
+            "wind_direction": wind_direction,
+            "temperature_c":  temperature,
+            "flow_rate_cfs":  flow_rate_cfs,
+            "tide_height_m":  tide_height,
+            "model":          "physics_based_arrhenius",
+            "point_sources": [
+                {"lat": lat, "lon": lon, "ppb": round(ppb, 2)}
+                for lat, lon, ppb in point_sources
+            ],
+        },
+    }
+
+    grid_json = json.dumps(grid_data)
+    s3.putFile(grid_json.encode(), path=RIVER_EMISSION_GRID_LATEST_PATH, content_type="application/json")
+    log.info(f"Uploaded river emission grid → {RIVER_EMISSION_GRID_LATEST_PATH}")
+
+    return dg.MaterializeResult(metadata={
+        "grid_max_ppb":    dg.MetadataValue.float(grid_max),
+        "grid_mean_ppb":   dg.MetadataValue.float(grid_mean),
+        "grid_shape":      dg.MetadataValue.text(f"{GRID_NROWS}x{GRID_NCOLS}"),
+        "n_point_sources": dg.MetadataValue.int(len(point_sources)),
+        "wind_speed_ms":   dg.MetadataValue.float(wind_speed),
+        "s3_path":         dg.MetadataValue.text(RIVER_EMISSION_GRID_LATEST_PATH),
+    })
 
 # ==============================================================================
 # Exported asset list (for Definitions)
@@ -940,7 +1168,10 @@ dispersion_assets = [
     lagrangian_source_attribution,
     emission_rate_inversion,
     hysplit_controls_generation,
+    hysplit_run_results,
     gaussian_forward_forecast,
     gaussian_forward_forecast_detailed,
     dispersion_alert_check,
+    river_emission_grid,       # ← add this
 ]
+

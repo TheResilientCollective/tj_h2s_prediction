@@ -49,3 +49,12 @@ GRID_LON_CENTERS = np.linspace(
     GRID_BOUNDS["east"] - 0.5 * (GRID_BOUNDS["east"] - GRID_BOUNDS["west"]) / GRID_NCOLS,
     GRID_NCOLS,
 )
+
+# Public metre-per-degree constants (used by vectorized dispersion code)
+M_PER_DEG_LAT = _M_PER_DEG_LAT
+M_PER_DEG_LON = _M_PER_DEG_LON
+
+# Pre-built meshgrids for vectorized operations (indexing='ij' → NROWS×NCOLS)
+GRID_LAT_MESH, GRID_LON_MESH = np.meshgrid(
+    GRID_LAT_CENTERS, GRID_LON_CENTERS, indexing="ij"
+)

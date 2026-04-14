@@ -11,6 +11,7 @@ Workflow:
 4. Manual trigger of deploy_approved_model_job for the chosen variant
 """
 
+import os
 from datetime import timedelta
 
 import dagster as dg
@@ -79,6 +80,7 @@ from h2s.defs.h2s_dispersion_pipeline import (
     lagrangian_source_attribution,
     emission_rate_inversion,
     hysplit_controls_generation,
+    hysplit_run_results,
     gaussian_forward_forecast,
     gaussian_forward_forecast_detailed,
     dispersion_alert_check,

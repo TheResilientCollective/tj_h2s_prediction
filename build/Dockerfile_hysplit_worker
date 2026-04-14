@@ -1,0 +1,114 @@
+# HYSPLIT Celery worker image for tj_h2s_prediction.
+#
+# Stripped-down companion to build/Dockerfile_workflows: keeps the Python 3.12
+# + uv base, but adds HYSPLIT 5.4.2 binaries and launches a dagster-celery
+# worker consuming from the `hysplit` queue.
+#
+# Intentionally excludes: FastAPI/uvicorn, torch, xgboost, sklearn, seaborn,
+# imbalanced-learn, shapely, geopandas, rasterio, kafka, twilio, sendgrid.
+# The [hysplit] extra in projects/h2s/pyproject.toml pins the minimal surface.
+#
+# HYSPLIT binary: the tarball hysplit.v5.4.2_x86_64.tar.gz must be present at
+# build/ before `docker build`. See CLAUDE.md "Dispersion Pipeline Operations"
+# for placement instructions. The tarball is license-gated and is NOT
+# checked into git (see .gitignore entry for build/*.tar.gz).
+
+ARG HYSPLIT_ARCHIVE=hysplit.v5.4.2_x86_64.tar.gz
+ARG TARGETPLATFORM=linux/amd64
+
+# ============================================================================
+# Stage 1: Python builder — install minimal Python deps via uv
+# ============================================================================
+FROM --platform=$TARGETPLATFORM python:3.12-slim AS py-builder
+
+WORKDIR /usr/src/app/
+
+# Build deps for wheels that compile (pyarrow extras, etc.)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc \
+        g++ \
+        python3-dev \
+        git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir uv
+
+COPY projects/h2s/pyproject.toml projects/h2s/uv.lock* ./
+COPY projects/h2s/src ./src
+
+# Only the [hysplit] extra — no xgboost, sklearn, imbalanced-learn, seaborn, etc.
+RUN uv venv .venv && \
+    uv sync --no-dev --extra hysplit
+
+# ============================================================================
+# Stage 2: HYSPLIT builder — extract the HYSPLIT tarball
+# ============================================================================
+FROM --platform=linux/amd64 debian:trixie-slim AS hysplit-builder
+
+ARG HYSPLIT_ARCHIVE=hysplit.v5.4.2_x86_64.tar.gz
+
+COPY build/${HYSPLIT_ARCHIVE} /tmp/hysplit.tar.gz
+RUN set -eux; \
+    mkdir -p /opt/hysplit; \
+    tar -xzf /tmp/hysplit.tar.gz --strip-components=1 -C /opt/hysplit; \
+    cd /opt/hysplit; \
+    if [ -f Makefile.inc.gfortran ]; then cp Makefile.inc.gfortran Makefile.inc; fi; \
+    find /opt/hysplit -type f -name "*.o" -delete; \
+    find /opt/hysplit -type f -name "*.a" -delete; \
+    rm -f /tmp/hysplit.tar.gz
+
+# ============================================================================
+# Stage 3: Runtime — minimal image running the dagster-celery worker
+# ============================================================================
+FROM --platform=linux/amd64 python:3.12-slim AS runtime
+
+# Runtime system libs: HYSPLIT needs netCDF and proj; tini for PID 1.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libnetcdff7 \
+        netcdf-bin \
+        libproj25 \
+        proj-data \
+        proj-bin \
+        ca-certificates \
+        tini \
+        tzdata \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+WORKDIR /usr/src/app/
+
+# Copy the Python virtualenv from the py-builder stage
+COPY --from=py-builder /usr/src/app/.venv /usr/src/app/.venv
+
+# Copy HYSPLIT binaries
+COPY --from=hysplit-builder /opt/hysplit /opt/hysplit
+
+# Copy application code and Dagster config (mirrors Dockerfile_workflows layout)
+COPY configs/dagster/dagster.yaml /usr/src/app/
+COPY projects/h2s/pyproject.toml /usr/src/app/
+COPY projects/h2s/src /usr/src/app/src
+
+# HYSPLIT + Dagster environment
+ENV PATH="/usr/src/app/.venv/bin:$PATH" \
+    PYTHONPATH="/usr/src/app/src:$PYTHONPATH" \
+    DAGSTER_HOME=/usr/src/app/ \
+    HYSPLIT_PATH=/opt/hysplit/exec \
+    HYSPLIT_METEO_DIR=/data/hysplit/meteo \
+    HYSPLIT_WORKING_DIR=/data/hysplit/work \
+    HYSPLIT_OUTPUT_DIR=/data/hysplit/output \
+    PYTHONUNBUFFERED=1
+
+# Data directories for HYSPLIT I/O — the `meteo` dir is intended to be
+# bind-mounted from the host (see deployments/compose.yaml).
+RUN mkdir -p /data/hysplit/meteo /data/hysplit/work /data/hysplit/output
+
+HEALTHCHECK --interval=1m --timeout=5s \
+    CMD test -x "$HYSPLIT_PATH/hyts_std" || exit 1
+
+EXPOSE 4000
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+# Launch a dagster-celery worker consuming the `hysplit` queue and loading
+# the h2s definitions module so ops, resources and IO are available inside
+# the worker process.
+CMD ["dagster-celery", "worker", "start", "-q", "hysplit", "-A", "h2s.definitions"]

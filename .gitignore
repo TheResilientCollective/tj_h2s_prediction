@@ -5,6 +5,13 @@ dagster_home/
 .env
 .coverage
 data/startmodels/
+data/models_mh/
+data/models_v2/
 /output/
 /models/
 __pycache__/
+
+# HYSPLIT binary tarball — license-gated, placed manually before docker build.
+# See CLAUDE.md "Dispersion Pipeline Operations" for placement instructions.
+build/hysplit*.tar.gz
+build/hysplit*.zip
