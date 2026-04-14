@@ -69,6 +69,10 @@ class S3Resource(ResourceWithS3Configuration):
 
     def publicUrl(self, path="test", bucket=None):
         """Get public URL for an object."""
+        if path is None:
+            raise Exception("s3 path is required")
+        if bucket is None:
+            bucket = self.S3_BUCKET
         return f"{self.baseUrl()}/{bucket}/{path}"
 
     def getFile(self, path="test", bucket=None):
