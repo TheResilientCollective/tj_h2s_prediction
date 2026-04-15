@@ -73,6 +73,13 @@ def defs():
         h2s_alert_job,
     )
 
+    # Import APCD multi-station sensor watch
+    from h2s.defs.apcd_sensor_watch import (
+        apcd_sensor_alert_dispatcher,
+        apcd_sensor_watch_sensor,
+        apcd_sensor_watch_job,
+    )
+
     # Import multi-station training pipeline assets
     from h2s.defs.h2s_multi_station_training import (
         multi_station_training_data,
@@ -116,7 +123,13 @@ def defs():
         hysplit_controls_generation,
         hysplit_run_results,
         gaussian_forward_forecast,
+        gaussian_forward_forecast_detailed,
         dispersion_alert_check,
+    )
+
+    # Import physics-based river emission grid asset
+    from h2s.defs.h2s_river_emissions_pipeline import (
+        river_emission_grid,
     )
 
     # Import multi-horizon forecast pipeline assets
@@ -164,6 +177,7 @@ def defs():
             h2s_alerts,
             slack_alerts,
             h2s_alert_dispatcher,
+            apcd_sensor_alert_dispatcher,
             h2s_variant_predictions,
             h2s_ensemble_predictions,
             feature_importance_viz,
@@ -191,7 +205,10 @@ def defs():
             hysplit_controls_generation,
             hysplit_run_results,
             gaussian_forward_forecast,
+            gaussian_forward_forecast_detailed,
             dispersion_alert_check,
+            # Physics-based river emission grid
+            river_emission_grid,
             # Seed Models
             seed_models,
             # Multi-Horizon Training Pipeline Assets
@@ -234,6 +251,8 @@ def defs():
             dispersion_hysplit_execution_job,
             # Two-tier alert job
             h2s_alert_job,
+            # APCD multi-station sensor watch job
+            apcd_sensor_watch_job,
         ],
         schedules=[
             forecast_prediction_schedule,
@@ -248,7 +267,7 @@ def defs():
             dispersion_inversion_schedule,
             dispersion_forecast_schedule,
         ],
-        sensors=[slack_on_run_failure, h2s_alert_sensor],
+        sensors=[slack_on_run_failure, h2s_alert_sensor, apcd_sensor_watch_sensor],
         resources=resources[deployment_name]
     )
 

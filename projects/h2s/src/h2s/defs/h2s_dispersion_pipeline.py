@@ -74,7 +74,6 @@ from h2s.dispersion.visualizations import (
 )
 from h2s.dispersion.gaussian import SENSORS, SOURCES, CANDIDATE_SOURCES
 from h2s.dispersion.grid_config import (
-    GRID_BOUNDS,
     GRID_LAT_CENTERS,
     GRID_LON_CENTERS,
     GRID_NROWS,
@@ -939,21 +938,31 @@ def gaussian_forward_forecast_detailed(
     required_resource_keys={"s3", "slack"},
     kinds={"python", "s3", "slack"},
     description=(
-        "Check next 6h of Gaussian forward forecast against WATCH (30 ppb) and "
-        "CRITICAL (100 ppb) thresholds. Sends Slack alert via SlackAlertResource "
-        "if any threshold is crossed."
+        "Check next 6h of Gaussian forward forecasts (coarse zone-based and detailed "
+        "per-source) against WATCH (30 ppb) and CRITICAL (100 ppb) thresholds. "
+        "Takes the max ppb across both models per sensor/time. Sends Slack alert "
+        "via SlackAlertResource if any threshold is crossed."
     ),
-    deps=[dg.AssetKey(["h2s", "gaussian_forward_forecast"])],
+    deps=[
+        dg.AssetKey(["h2s", "gaussian_forward_forecast"]),
+        dg.AssetKey(["h2s", "gaussian_forward_forecast_detailed"]),
+    ],
 )
 def dispersion_alert_check(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     log = context.log
     s3 = context.resources.s3
 
-    try:
-        forecast_bytes = s3.getFile(DISPERSION_FORECAST_LATEST_PATH)
-        forecast = json.loads(forecast_bytes)
-    except Exception as e:
-        log.warning(f"Could not load forecast for alert check: {e}")
+    # Load both forecasts; detailed may add higher-resolution per-source peaks
+    forecasts: dict[str, dict] = {}
+    for label, path in [("coarse", DISPERSION_FORECAST_LATEST_PATH),
+                        ("detailed", DISPERSION_FORECAST_DETAILED_LATEST_PATH)]:
+        try:
+            forecasts[label] = json.loads(s3.getFile(path))
+            log.info(f"Loaded {label} forecast from {path}")
+        except Exception as e:
+            log.warning(f"Could not load {label} forecast: {e}")
+
+    if not forecasts:
         return dg.MaterializeResult(metadata={"alert": dg.MetadataValue.text("no_forecast")})
 
     watch_ppb    = ALERT_TIERS["watch"]["threshold"]
@@ -961,29 +970,76 @@ def dispersion_alert_check(context: dg.AssetExecutionContext) -> dg.MaterializeR
     lookahead_h  = 6
     alerts_triggered = []
 
-    for sensor_name, series in forecast.get("timeseries", {}).items():
-        for entry in series[:lookahead_h]:
-            ppb = entry.get("predicted_ppb") or 0
-            if ppb >= critical_ppb:
-                alerts_triggered.append({"tier": "CRITICAL", "sensor": sensor_name,
-                                          "time": entry["time"], "predicted_ppb": ppb})
-            elif ppb >= watch_ppb:
-                alerts_triggered.append({"tier": "WATCH", "sensor": sensor_name,
-                                          "time": entry["time"], "predicted_ppb": ppb})
+    # Merge both forecasts: for each (sensor, time) keep the max ppb across models
+    # key: (sensor_name, time_str) → {"predicted_ppb": float, "model": str}
+    merged: dict[tuple[str, str], dict] = {}
+    for label, forecast in forecasts.items():
+        for sensor_name, series in forecast.get("timeseries", {}).items():
+            for entry in series[:lookahead_h]:
+                ppb = entry.get("predicted_ppb") or 0
+                key = (sensor_name, entry["time"])
+                if key not in merged or ppb > merged[key]["predicted_ppb"]:
+                    merged[key] = {"predicted_ppb": ppb, "model": label}
 
-    log.info(f"Dispersion alert check: {len(alerts_triggered)} threshold crossings in next {lookahead_h}h")
+    alerts_triggered = []
+    for (sensor_name, time_str), data in merged.items():
+        ppb   = data["predicted_ppb"]
+        model = data["model"]
+        if ppb >= critical_ppb:
+            alerts_triggered.append({"tier": "CRITICAL", "sensor": sensor_name,
+                                      "time": time_str, "predicted_ppb": ppb, "model": model})
+        elif ppb >= watch_ppb:
+            alerts_triggered.append({"tier": "WATCH", "sensor": sensor_name,
+                                      "time": time_str, "predicted_ppb": ppb, "model": model})
+
+    alerts_triggered.sort(key=lambda a: -a["predicted_ppb"])
+    log.info(f"Dispersion alert check: {len(alerts_triggered)} threshold crossings in next {lookahead_h}h "
+             f"(models checked: {list(forecasts.keys())})")
+
+    # Build public URLs for viz assets (same date_str used by forecast assets)
+    date_str = pd.Timestamp.utcnow().strftime("%Y%m%d_%H")
+    viz_urls: dict[str, str] = {}
+    for label, ts_path, sm_path in [
+        ("coarse",   DISPERSION_VIZ_TIMESERIES_COARSE_PATH,   DISPERSION_VIZ_SOURCE_MAP_COARSE_PATH),
+        ("detailed", DISPERSION_VIZ_TIMESERIES_DETAILED_PATH, DISPERSION_VIZ_SOURCE_MAP_DETAILED_PATH),
+    ]:
+        if label not in forecasts:
+            continue
+        for key, path_tpl in [(f"timeseries_{label}", ts_path), (f"source_map_{label}", sm_path)]:
+            viz_urls[key] = s3.publicUrl(path_tpl.format(date_str=date_str))
 
     if alerts_triggered:
         max_tier = "CRITICAL" if any(a["tier"] == "CRITICAL" for a in alerts_triggered) else "WATCH"
         tier_label = ALERT_TIERS["critical"]["label"] if max_tier == "CRITICAL" else ALERT_TIERS["watch"]["label"]
-        emission_rates = forecast.get("emission_rates_g_s", {})
+        emission_rates = next(iter(forecasts.values())).get("emission_rates_g_s", {})
+
+        lines = [
+            f"• {a['sensor']}: {a['predicted_ppb']:.1f} ppb @ {a['time']} _({a['model']})_"
+            for a in alerts_triggered[:5]
+        ]
+        models_used = ", ".join(forecasts.keys())
+
+        viz_lines = []
+        for label in ("coarse", "detailed"):
+            ts_url = viz_urls.get(f"timeseries_{label}")
+            sm_url = viz_urls.get(f"source_map_{label}")
+            if ts_url or sm_url:
+                parts = []
+                if ts_url:
+                    parts.append(f"<{ts_url}|timeseries>")
+                if sm_url:
+                    parts.append(f"<{sm_url}|source map>")
+                viz_lines.append(f"_{label}: {' · '.join(parts)}_")
 
         lines = [f"• {a['sensor']}: {a['predicted_ppb']:.1f} ppb @ {a['time']}" for a in alerts_triggered[:5]]
         msg = (
             f":warning: *Dispersion model alert — {tier_label}*\n"
             f"Gaussian plume forward model predicts elevated H₂S in next {lookahead_h}h:\n"
+            f"Gaussian plume forward model predicts elevated H₂S in next {lookahead_h}h "
+            f"_(models: {models_used})_:\n"
             + "\n".join(lines)
             + f"\n_Emission rates: {emission_rates} g/s_"
+            + (("\n" + "\n".join(viz_lines)) if viz_lines else "")
         )
 
         try:
@@ -1001,8 +1057,8 @@ def dispersion_alert_check(context: dg.AssetExecutionContext) -> dg.MaterializeR
             ", ".join({a["sensor"] for a in alerts_triggered}) if alerts_triggered else "none"
         ),
         "lookahead_hours":  dg.MetadataValue.int(lookahead_h),
+        "models_checked":   dg.MetadataValue.text(", ".join(forecasts.keys())),
     })
-
 
 # ==============================================================================
 # Exported asset list (for Definitions)
@@ -1017,3 +1073,4 @@ dispersion_assets = [
     gaussian_forward_forecast_detailed,
     dispersion_alert_check,
 ]
+
