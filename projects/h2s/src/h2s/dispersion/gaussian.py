@@ -99,7 +99,12 @@ def stability_class(wind_speed_ms: float, is_night: bool) -> str:
 
 def pg_sigmas(stab: str, x_km: float) -> tuple[float, float]:
     a_y, b_y, a_z, b_z = PG_PARAMS[stab]
-    x_km = max(x_km, 0.01)
+    # Near-field floor of 100 m (was 10 m). At < 100 m the Gaussian plume
+    # ground-level equation is not physical: σ_y, σ_z shrink below a cell-width
+    # and concentration blows up. This bounds the grid cell co-located with a
+    # source to a realistic value. Sensor receptors are always > 300 m from
+    # the nearest source so timeseries forecasts are unaffected.
+    x_km = max(x_km, 0.1)
     sigma_y = a_y * (x_km ** b_y) * 1000.0
     sigma_z = a_z * (x_km ** b_z) * 1000.0
     return sigma_y, sigma_z
@@ -510,12 +515,35 @@ def run_forward_model_gridded(
     return frames
 
 
+GRID_BASELINE_SCALE: float = 0.1
+"""Default scale applied to per-source emission rates for the *gridded* forecast.
+
+The inversion (``emission_rate_inversion``) calibrates emission rates against
+acute events (e.g. March 13 2026, 394 ppb @ NESTOR-BES) so sensor-level
+timeseries match observed peaks. Those same rates produce visually saturated
+grid maps under typical (non-event) conditions. The grid product multiplies
+rates by this factor to show a baseline-like spatial footprint while leaving
+the sensor-level timeseries forecast untouched. Set to 1.0 to render at the
+full event-calibrated level.
+"""
+
+GRID_PPB_CLIP: float = 500.0
+"""Upper clip applied to every grid cell in the gridded forecast (ppb).
+
+Guards against unphysical near-source singularities and keeps the tile color
+ramp legible. 500 ppb is ~5× the worst recorded event-level value at a
+community sensor; anything above is numerical artefact, not signal.
+"""
+
+
 def run_forward_model_gridded_detailed(
     df: pd.DataFrame,
     emission_rates_per_source_g_s: dict[str, float],
     start_time: pd.Timestamp,
     hours: int = 72,
     ref_sensor: str = "NESTOR - BES",
+    baseline_scale: float = GRID_BASELINE_SCALE,
+    ppb_clip: float = GRID_PPB_CLIP,
 ) -> list[dict]:
     """Run Gaussian plume forward model with 16 sources and return per-hour GeoDemic GridData dicts.
 
@@ -534,6 +562,12 @@ def run_forward_model_gridded_detailed(
         start_time: Forecast start (tz-aware).
         hours: Forecast duration in hours.
         ref_sensor: Fallback sensor for met when per-sensor data is missing.
+        baseline_scale: Multiplier applied to each per-source rate before plume
+            evaluation. Default 0.1 produces a non-event baseline (see
+            ``GRID_BASELINE_SCALE``). Pass 1.0 to render at event-calibrated
+            levels.
+        ppb_clip: Per-cell ppb clip to suppress near-source singularities.
+            Default 500 ppb (see ``GRID_PPB_CLIP``).
 
     Returns:
         List of GridData dicts, one per forecast hour.
@@ -590,7 +624,7 @@ def run_forward_model_gridded_detailed(
         total_ppb = np.zeros((GRID_NROWS, GRID_NCOLS))
 
         for src_name, src in CANDIDATE_SOURCES.items():
-            q = emission_rates_per_source_g_s.get(src_name, 0.0)
+            q = emission_rates_per_source_g_s.get(src_name, 0.0) * baseline_scale
             if q <= 0:
                 continue
 
@@ -606,6 +640,9 @@ def run_forward_model_gridded_detailed(
                 stab=stab,
             )
             total_ppb += _ug_grid_to_ppb(conc_ug, temp_c)
+
+        # Clip near-source singularities to a physically defensible ceiling.
+        np.minimum(total_ppb, ppb_clip, out=total_ppb)
 
         confidence = _confidence_from_distance(lat_mesh, lon_mesh, sensor_coords, forecast_lead_h=hour_idx)
 
@@ -633,6 +670,8 @@ def run_forward_model_gridded_detailed(
                 "n_sources": len(CANDIDATE_SOURCES),
                 "top_3_sources_g_s": top_3_sources,
                 "emission_rates_per_source_g_s": {k: float(v) for k, v in emission_rates_per_source_g_s.items() if v > 0},
+                "baseline_scale": baseline_scale,
+                "ppb_clip": ppb_clip,
             },
         ))
 
