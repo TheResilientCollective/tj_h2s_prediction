@@ -202,6 +202,11 @@ def mh_forecasts(
     forecast_df['time'] = pd.to_datetime(forecast_df['time'], utc=True)
     fc_start = forecast_df['time'].min()
 
+    # Clip to 24-hour window — source may contain 48h or 72h of data
+    fc_end = fc_start + pd.Timedelta(hours=24)
+    forecast_df = forecast_df[forecast_df['time'] < fc_end].copy()
+    context.log.info(f"Forecast window: {fc_start} → {fc_end} ({len(forecast_df)} rows after 24h clip)")
+
     models = mh_model_artifacts['models']
     horizon_features = mh_model_artifacts.get('horizon_features', {})
 
