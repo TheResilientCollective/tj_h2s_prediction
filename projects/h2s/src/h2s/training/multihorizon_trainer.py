@@ -76,7 +76,7 @@ from h2s.constants import (  # noqa: F401 — re-exported for downstream imports
     classify_risk,
 )
 
-TASKS = ['regression', 'clf_5ppb', 'clf_10ppb']
+TASKS = ['regression', 'clf_5ppb', 'clf_10ppb', 'clf_30ppb']
 
 
 # ============================================================

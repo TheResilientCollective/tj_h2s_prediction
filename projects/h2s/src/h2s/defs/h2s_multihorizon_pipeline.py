@@ -15,7 +15,13 @@ import dagster as dg
 import numpy as np
 import pandas as pd
 
-from h2s.constants import FORECAST_DATA_PATH, MH_MODELS_S3_BASE, MH_OUTPUT_PATH, LATEST_BASEPATH, OBS_DATA_PATH
+from h2s.constants import (
+    FORECAST_DATA_15MIN_PATH,
+    MH_MODELS_S3_BASE,
+    MH_OUTPUT_PATH,
+    LATEST_BASEPATH,
+    OBS_DATA_PATH,
+)
 from h2s.training.multihorizon_trainer import (
     BASE_FEATURES,
     FLOW_COL,
@@ -29,6 +35,14 @@ from h2s.training.multihorizon_trainer import (
     find_aligned_source,
     get_obs_state,
 )
+
+# Tasks required for the forecast pipeline to proceed.
+# clf_30ppb is loaded opportunistically but not required (backward-compat with old S3 models).
+REQUIRED_TASKS = ['regression', 'clf_5ppb', 'clf_10ppb']
+
+# Active forecast horizons: 0-24h only.
+# 24-48h and 48-72h models are still trained but not used for live forecasts.
+FORECAST_HORIZON_BOUNDS = [b for b in HORIZON_BOUNDS if b[0] in ('0_6h', '6_24h')]
 
 _KEY = lambda name: dg.AssetKey(["h2s", name])
 ENV_LABEL = os.environ.get("ENV_LABEL", "add_ENV_LABEL").upper()
@@ -176,14 +190,14 @@ def mh_forecasts(
     s3 = context.resources.s3
     bucket = context.op_config["s3_bucket"]
 
-    # Load forecast parquet from S3
-    context.log.info(f"Loading forecast data from S3: {FORECAST_DATA_PATH}")
+    # Load 15-minute forecast parquet from S3
+    context.log.info(f"Loading 15-min forecast data from S3: {FORECAST_DATA_15MIN_PATH}")
     try:
-        fc_url = s3.get_presigned_url(path=FORECAST_DATA_PATH, bucket=bucket)
+        fc_url = s3.publicUrl(path=FORECAST_DATA_15MIN_PATH, bucket=bucket)
         forecast_df = pd.read_parquet(fc_url)
-        context.log.info(f"✓ Loaded {len(forecast_df)} rows from S3")
+        context.log.info(f"✓ Loaded {len(forecast_df)} rows from S3 (15-min resolution)")
     except Exception as e:
-        raise RuntimeError(f"Failed to load forecast data from S3 path '{FORECAST_DATA_PATH}': {e}")
+        raise RuntimeError(f"Failed to load 15-min forecast data from S3 path '{FORECAST_DATA_15MIN_PATH}': {e}")
 
     forecast_df['time'] = pd.to_datetime(forecast_df['time'], utc=True)
     fc_start = forecast_df['time'].min()
@@ -207,7 +221,7 @@ def mh_forecasts(
 
         sfc['hours_ahead'] = (sfc['time'] - fc_start).dt.total_seconds() / 3600
 
-        for hz_name, h_start, h_end in HORIZON_BOUNDS:
+        for hz_name, h_start, h_end in FORECAST_HORIZON_BOUNDS:
             hz_cfg = HORIZONS[hz_name]
             mask = (sfc['hours_ahead'] >= h_start) & (sfc['hours_ahead'] < h_end)
             hz_slice = sfc[mask].copy()
@@ -222,12 +236,12 @@ def mh_forecasts(
             if stored_cols:
                 feature_cols = stored_cols
 
-            # Check models exist
+            # Check required models exist (clf_30ppb is optional — loaded if available)
             if skey not in models.get(hz_name, {}):
                 context.log.warning(f"No models for {hz_name}/{skey}")
                 continue
             hz_models = models[hz_name][skey]
-            if not all(t in hz_models for t in TASKS):
+            if not all(t in hz_models for t in REQUIRED_TASKS):
                 context.log.warning(f"Incomplete models for {hz_name}/{skey}: {list(hz_models.keys())}")
                 continue
 
@@ -240,6 +254,12 @@ def mh_forecasts(
             h2s_pred = np.clip(hz_models['regression'].predict(X), 0, None)
             prob_5 = hz_models['clf_5ppb'].predict_proba(X)[:, 1]
             prob_10 = hz_models['clf_10ppb'].predict_proba(X)[:, 1]
+            # clf_30ppb: use if deployed, otherwise zeros (classify_risk falls back to prob_10)
+            prob_30 = (
+                hz_models['clf_30ppb'].predict_proba(X)[:, 1]
+                if 'clf_30ppb' in hz_models
+                else np.zeros(len(X))
+            )
 
             for i in range(len(hz_slice)):
                 wd = float(hz_slice['wind_direction_10m'].iloc[i])
@@ -253,7 +273,8 @@ def mh_forecasts(
                     'h2s_pred': round(float(h2s_pred[i]), 1),
                     'prob_5': round(float(prob_5[i]) * 100, 1),
                     'prob_10': round(float(prob_10[i]) * 100, 1),
-                    'risk': classify_risk(prob_5[i], prob_10[i], h2s_pred[i]),
+                    'prob_30': round(float(prob_30[i]) * 100, 1),
+                    'risk': classify_risk(prob_5[i], prob_10[i], h2s_pred[i], prob_30[i]),
                     'wind_speed': round(float(hz_slice['wind_speed_10m'].iloc[i]), 1),
                     'wind_dir': round(wd),
                     'temp': round(float(hz_slice['temperature_2m'].iloc[i]), 1),
@@ -343,7 +364,7 @@ def mh_dashboard_viz(
         ax = fig.add_subplot(gs[0, idx])
         ax.set_facecolor('#1a1a2e')
 
-        for hz_name, _, _ in HORIZON_BOUNDS:
+        for hz_name, _, _ in FORECAST_HORIZON_BOUNDS:
             hz = sf[sf['horizon'] == hz_name]
             if len(hz) > 0:
                 ax.plot(hz['time'], hz['h2s_pred'], color=hz_colors[hz_name], linewidth=2, label=hz_name)
@@ -352,14 +373,15 @@ def mh_dashboard_viz(
         ax.axhline(5, color='#f39c12', linewidth=0.5, linestyle='--', alpha=0.4)
         ax.axhline(30, color='#e74c3c', linewidth=0.5, linestyle='--', alpha=0.4)
 
-        rc = sf[sf['hours_ahead'] <= 48]['risk'].value_counts().to_dict()
+        rc = sf['risk'].value_counts().to_dict()
         ax.set_title(
-            f'{site}\n48h: G:{rc.get("GREEN",0)} YL:{rc.get("YELLOW_LOW",0)} YH:{rc.get("YELLOW_HIGH",0)} O:{rc.get("ORANGE",0)}',
+            f'{site}\n24h: G:{rc.get("GREEN",0)} YL:{rc.get("YELLOW_LOW",0)} YH:{rc.get("YELLOW_HIGH",0)} O:{rc.get("ORANGE",0)}',
             fontsize=10, fontweight='bold', color='white'
         )
         ax.set_ylabel('H\u2082S (ppb)', color='white')
         ax.legend(fontsize=6, loc='upper right')
         ax.tick_params(colors='white', labelsize=7)
+        ax.xaxis.set_major_locator(mdates.HourLocator(interval=3))
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d\n%H:00'))
         ax.grid(True, alpha=0.15, color='white')
         for s in ax.spines.values():
@@ -370,14 +392,18 @@ def mh_dashboard_viz(
         ax.set_facecolor('#1a1a2e')
         ax.fill_between(sf['time'], 0, sf['prob_5'], alpha=0.3, color='#f39c12', label='P(>5)')
         ax.plot(sf['time'], sf['prob_5'], color='#f39c12', linewidth=1.5)
-        ax.fill_between(sf['time'], 0, sf['prob_10'], alpha=0.4, color='#e74c3c', label='P(>10)')
-        ax.plot(sf['time'], sf['prob_10'], color='#e74c3c', linewidth=1.5)
+        ax.fill_between(sf['time'], 0, sf['prob_10'], alpha=0.3, color='#e67e22', label='P(>10)')
+        ax.plot(sf['time'], sf['prob_10'], color='#e67e22', linewidth=1.5)
+        if 'prob_30' in sf.columns:
+            ax.fill_between(sf['time'], 0, sf['prob_30'], alpha=0.4, color='#e74c3c', label='P(>30)')
+            ax.plot(sf['time'], sf['prob_30'], color='#e74c3c', linewidth=1.5)
         ax.axhline(50, color='white', linewidth=0.5, linestyle=':', alpha=0.3)
         ax.set_ylim(0, 100)
         ax.set_ylabel('Probability (%)', color='white')
         ax.set_title('Exceedance Probability', fontsize=10, fontweight='bold', color='white')
         ax.legend(fontsize=7)
         ax.tick_params(colors='white', labelsize=7)
+        ax.xaxis.set_major_locator(mdates.HourLocator(interval=3))
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d\n%H:00'))
         ax.grid(True, alpha=0.15, color='white')
         for s in ax.spines.values():
@@ -387,9 +413,9 @@ def mh_dashboard_viz(
         ax = fig.add_subplot(gs[2, idx])
         ax.set_facecolor('#1a1a2e')
         for _, row in sf.iterrows():
-            ax.bar(row['time'], 1, width=pd.Timedelta(hours=1),
+            ax.bar(row['time'], 1, width=pd.Timedelta(minutes=15),
                    color=risk_colors.get(row['risk'], '#333'), alpha=0.8)
-        for hz, hs, he in HORIZON_BOUNDS:
+        for hz, hs, he in FORECAST_HORIZON_BOUNDS:
             t = sf['time'].min() + pd.Timedelta(hours=hs)
             if t <= sf['time'].max():
                 ax.axvline(t, color='white', linewidth=0.8, linestyle=':', alpha=0.5)
@@ -484,22 +510,29 @@ def mh_summary_export(
         'forecast_end': str(results['time'].max()),
         'stations': {},
     }
+    _worst_risk = lambda x: next(  # noqa: E731
+        (r for r in ['ORANGE', 'YELLOW_HIGH', 'YELLOW_LOW', 'GREEN'] if r in x.values), 'GREEN'
+    )
     for site in results['station'].unique():
         sf = results[results['station'] == site]
         by_hz = {}
-        for hz_name, _, _ in HORIZON_BOUNDS:
+        for hz_name, _, _ in FORECAST_HORIZON_BOUNDS:
             hz = sf[sf['horizon'] == hz_name]
             if len(hz) == 0:
                 continue
-            rc = hz['risk'].value_counts().to_dict()
+            # Aggregate to hourly periods for counts (15-min data has 4 rows/hour)
+            hz_h = hz.copy()
+            hz_h['time_hour'] = hz_h['time'].dt.floor('h')
+            rc_hourly = hz_h.groupby('time_hour')['risk'].agg(_worst_risk).value_counts().to_dict()
             by_hz[hz_name] = {
                 'max_h2s': round(float(hz['h2s_pred'].max()), 1),
                 'max_prob_5': round(float(hz['prob_5'].max()), 1),
                 'max_prob_10': round(float(hz['prob_10'].max()), 1),
-                'hours_orange': int(rc.get('ORANGE', 0)),
-                'hours_yellow_high': int(rc.get('YELLOW_HIGH', 0)),
-                'hours_yellow_low': int(rc.get('YELLOW_LOW', 0)),
-                'hours_green': int(rc.get('GREEN', 0)),
+                'max_prob_30': round(float(hz['prob_30'].max()), 1) if 'prob_30' in hz.columns else 0.0,
+                'hours_orange': int(rc_hourly.get('ORANGE', 0)),
+                'hours_yellow_high': int(rc_hourly.get('YELLOW_HIGH', 0)),
+                'hours_yellow_low': int(rc_hourly.get('YELLOW_LOW', 0)),
+                'hours_green': int(rc_hourly.get('GREEN', 0)),
             }
         summary['stations'][site] = by_hz
 
@@ -526,7 +559,8 @@ def mh_summary_export(
 
 _RISK_EMOJI = {'ORANGE': '🟠', 'YELLOW_HIGH': '🟡', 'YELLOW_LOW': '🔆', 'GREEN': '🟢'}
 _RISK_ORDER = ['ORANGE', 'YELLOW_HIGH', 'YELLOW_LOW', 'GREEN']
-_HZ_LABELS = {'0_6h': '0-6h', '6_24h': '6-24h', '24_48h': '24-48h', '48_72h': '48-72h'}
+# Only the two active 24h forecast horizons appear in alerts
+_HZ_LABELS = {'0_6h': '0-6h', '6_24h': '6-24h'}
 
 
 @dg.asset(
@@ -556,16 +590,18 @@ def mh_slack_alerts(
         context.add_output_metadata({"status": "skipped", "reason": "all green/yellow_low"})
         return
 
-    # Count unique hours per horizon where ANY station shows elevated risk
+    # Count unique *hours* per horizon where ANY station shows elevated risk.
+    # Floor to hour first so 15-min rows don't multiply the count 4×.
     hz_summary_parts = []
     total_orange = 0
     total_yh = 0
     for hz_key, hz_label in _HZ_LABELS.items():
-        hz_df = mh_forecasts[mh_forecasts['horizon'] == hz_key]
+        hz_df = mh_forecasts[mh_forecasts['horizon'] == hz_key].copy()
         if hz_df.empty:
             hz_summary_parts.append(f"{hz_label}: 🟢 0h")
             continue
-        hz_hourly = hz_df.groupby('time')['risk'].agg(
+        hz_df['time_hour'] = hz_df['time'].dt.floor('h')
+        hz_hourly = hz_df.groupby('time_hour')['risk'].agg(
             lambda x: 'ORANGE' if 'ORANGE' in x.values
             else ('YELLOW_HIGH' if 'YELLOW_HIGH' in x.values else x.iloc[0])
         )
@@ -607,12 +643,18 @@ def mh_slack_alerts(
 
         hz_parts = []
         for hz_key, hz_label in _HZ_LABELS.items():
-            hz = sf[sf['horizon'] == hz_key]
+            hz = sf[sf['horizon'] == hz_key].copy()
             if hz.empty:
                 hz_parts.append(f"{hz_label}: {_RISK_EMOJI['GREEN']} 0h")
                 continue
             worst_hz = next((r for r in _RISK_ORDER if (hz['risk'] == r).any()), 'GREEN')
-            elevated_h = int((hz['risk'].isin(['ORANGE', 'YELLOW_HIGH'])).sum())
+            # Count elevated hours (not 15-min rows)
+            hz['time_hour'] = hz['time'].dt.floor('h')
+            elevated_h = int(
+                hz.groupby('time_hour')['risk']
+                .agg(lambda x: x.isin(['ORANGE', 'YELLOW_HIGH']).any())
+                .sum()
+            )
             hz_parts.append(f"{hz_label}: {_RISK_EMOJI[worst_hz]} {elevated_h}h")
 
         blocks.append({
@@ -662,7 +704,7 @@ def mh_slack_alerts(
 
 mh_forecast_job = dg.define_asset_job(
     name="mh_forecast_job",
-    description="Run multi-horizon H2S forecast: load models, predict 72h, generate dashboard + exports",
+    description="Run 24h multi-horizon H2S forecast (15-min resolution): load models, predict 0-24h across 0-6h and 6-24h horizons, generate dashboard + exports",
     selection=dg.AssetSelection.assets(
         mh_model_artifacts,
         mh_observation_state,

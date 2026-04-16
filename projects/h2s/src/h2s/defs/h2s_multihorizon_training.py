@@ -83,11 +83,16 @@ def mh_training_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
     # Add targets
     df['exceed_5'] = (df['H2S'] > 5).astype(int)
     df['exceed_10'] = (df['H2S'] > 10).astype(int)
+    df['exceed_30'] = (df['H2S'] > 30).astype(int)
 
     context.log.info(f"Cleaned: {len(df)} rows")
     for site in df['site_name'].unique():
         ss = df[df['site_name'] == site]
-        context.log.info(f"  {site}: {len(ss)} rows, >5ppb={ss['exceed_5'].mean()*100:.1f}%")
+        context.log.info(
+            f"  {site}: {len(ss)} rows, "
+            f">5ppb={ss['exceed_5'].mean()*100:.1f}%, "
+            f">30ppb={ss['exceed_30'].mean()*100:.1f}%"
+        )
 
     context.add_output_metadata({
         "row_count": len(df),
@@ -95,6 +100,7 @@ def mh_training_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
         "base_features": len(BASE_FEATURES),
         "date_min": str(df['time'].min()),
         "date_max": str(df['time'].max()),
+        "exceed_30_pct": round(float(df['exceed_30'].mean()) * 100, 2),
     })
     return df
 
@@ -108,7 +114,7 @@ def mh_training_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
     group_name="h2s_mh_training",
     partitions_def=STATION_PARTITIONS,
     kinds={"python", "ml"},
-    description="Train 12 models per station: 4 horizons × 3 tasks (regression + >5ppb + >10ppb)",
+    description="Train 16 models per station: 4 horizons × 4 tasks (regression + >5ppb + >10ppb + >30ppb)",
     ins={"mh_training_data": dg.AssetIn(key=_KEY("mh_training_data"))},
     config_schema={
         "ensemble_margin": dg.Field(
@@ -161,6 +167,7 @@ def mh_trained_models(
         y_cont = hz_df['H2S'].values
         y_5 = hz_df['exceed_5'].values
         y_10 = hz_df['exceed_10'].values
+        y_30 = hz_df['exceed_30'].values
 
         split = int(len(hz_df) * TRAIN_FRACTION)
         Xtr, Xte = X[:split], X[split:]
@@ -173,6 +180,7 @@ def mh_trained_models(
             ('regression', y_cont[:split], y_cont[split:]),
             ('clf_5ppb',   y_5[:split],    y_5[split:]),
             ('clf_10ppb',  y_10[:split],   y_10[split:]),
+            ('clf_30ppb',  y_30[:split],   y_30[split:]),
         ]
 
         for task, ytr, yte in task_defs:
@@ -255,9 +263,10 @@ def mh_training_report(
         yte_c = hz_df['H2S'].values[split:]
         yte_5 = hz_df['exceed_5'].values[split:]
         yte_10 = hz_df['exceed_10'].values[split:]
+        yte_30 = hz_df['exceed_30'].values[split:]
 
         tasks_metrics = {}
-        for task, yte in [('regression', yte_c), ('clf_5ppb', yte_5), ('clf_10ppb', yte_10)]:
+        for task, yte in [('regression', yte_c), ('clf_5ppb', yte_5), ('clf_10ppb', yte_10), ('clf_30ppb', yte_30)]:
             if task not in models[hz_name]:
                 continue
             model = models[hz_name][task]
