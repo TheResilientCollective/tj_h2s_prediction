@@ -137,6 +137,7 @@ def defs():
         rolling_footprint_matrix,
         channel_emission_inversion,
         calibration_diagnostics,
+        calibration_viz,
     )
 
     # Import multi-horizon forecast pipeline assets
@@ -222,6 +223,7 @@ def defs():
             rolling_footprint_matrix,
             channel_emission_inversion,
             calibration_diagnostics,
+            calibration_viz,
             # Seed Models
             seed_models,
             # Multi-Horizon Training Pipeline Assets

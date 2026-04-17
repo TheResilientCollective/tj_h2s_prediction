@@ -33,6 +33,12 @@ from h2s.constants import (
     Q_FIELD_LATEST_JSON_PATH,
     Q_FIELD_LATEST_PATH,
     Q_FIELD_PATH,
+    Q_FIELD_VIZ_BUDGET_LATEST_PATH,
+    Q_FIELD_VIZ_BUDGET_PATH,
+    Q_FIELD_VIZ_CV_LATEST_PATH,
+    Q_FIELD_VIZ_CV_PATH,
+    Q_FIELD_VIZ_MAP_LATEST_PATH,
+    Q_FIELD_VIZ_MAP_PATH,
 )
 from h2s.dispersion.emission_inversion import (
     InversionConfig,
@@ -479,6 +485,8 @@ def calibration_diagnostics(
             "c_obs_std":   round(c_std, 2),
             "n_test":      len(c_test),
             "rmse_over_std": round(rmse / c_std, 3) if c_std > 0 else None,
+            "c_obs_ppb":   [round(float(v), 3) for v in c_test],
+            "c_pred_ppb":  [round(float(v), 3) for v in c_pred],
         }
 
     gate1_pass = all(
@@ -539,6 +547,185 @@ def calibration_diagnostics(
 
 
 # ==============================================================================
+# Asset 4: calibration_viz
+# ==============================================================================
+
+@dg.asset(
+    key_prefix="h2s",
+    group_name="h2s_calibration",
+    required_resource_keys={"s3"},
+    kinds={"python", "s3", "matplotlib"},
+    description=(
+        "Verification visualizations for the nightly calibration. Renders: "
+        "(1) channel segment map colored by Q_g_s with SENSORS overlay, "
+        "(2) leave-one-sensor-out CV predicted-vs-observed scatter, "
+        "(3) Σ Q budget bar vs the 30/167/500 g/s reference lines. "
+        "Uploads PNGs under tijuana/dispersion/calibration/viz/."
+    ),
+    deps=[
+        dg.AssetKey(["h2s", "channel_emission_inversion"]),
+        dg.AssetKey(["h2s", "calibration_diagnostics"]),
+    ],
+)
+def calibration_viz(
+    context: dg.AssetExecutionContext,
+) -> dg.MaterializeResult:
+    import io as _io
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    from h2s.dispersion.lagrangian import SENSORS
+
+    log = context.log
+    s3 = context.resources.s3
+
+    # --- Load latest artifacts from S3 ---
+    q_df = pd.read_parquet(_io.BytesIO(s3.getFile(Q_FIELD_LATEST_PATH)))
+    diagnostics = json.loads(s3.getFile(Q_FIELD_DIAGNOSTICS_LATEST_PATH))
+
+    loo = diagnostics.get("leave_one_sensor_out", {}) or {}
+    budget = diagnostics.get("budget_sanity", {}) or {}
+    q_total = float(budget.get("Q_total_g_s", q_df["Q_g_s"].sum()))
+
+    run_tag = pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M")
+    uploaded: dict[str, str] = {}
+
+    # --- Plot 1: channel segment map ---
+    fig, ax = plt.subplots(figsize=(9, 7))
+    active = q_df[q_df["Q_g_s"] > 0]
+    inactive = q_df[q_df["Q_g_s"] == 0]
+    ax.scatter(
+        inactive["lon"], inactive["lat"],
+        c="lightgray", s=18, marker="o", alpha=0.6, label="inactive segment",
+    )
+    if not active.empty:
+        sc = ax.scatter(
+            active["lon"], active["lat"],
+            c=active["Q_g_s"], s=60 + 8 * active["Q_g_s"],
+            cmap="YlOrRd", edgecolor="black", linewidth=0.3, alpha=0.9,
+            label="active Q (g/s)",
+        )
+        plt.colorbar(sc, ax=ax, label="Q (g/s)")
+
+    for sname, sc_info in SENSORS.items():
+        ax.plot(sc_info["lon"], sc_info["lat"], marker="^",
+                markersize=14, color="blue", markeredgecolor="white")
+        ax.annotate(sname, (sc_info["lon"], sc_info["lat"]),
+                    xytext=(6, 6), textcoords="offset points", fontsize=9, color="blue")
+
+    ax.set_xlabel("Longitude")
+    ax.set_ylabel("Latitude")
+    ax.set_title(
+        f"Channel-snapped Q field — {len(active)}/{len(q_df)} active segments, "
+        f"Σ Q = {q_total:.1f} g/s  ({run_tag})"
+    )
+    ax.set_aspect("equal", adjustable="datalim")
+    ax.grid(True, alpha=0.3)
+    legend_elts = [
+        Line2D([], [], marker="o", color="w", markerfacecolor="lightgray",
+               markersize=8, label="inactive"),
+        Line2D([], [], marker="o", color="w", markerfacecolor="orange",
+               markeredgecolor="black", markersize=10, label="active Q>0"),
+        Line2D([], [], marker="^", color="w", markerfacecolor="blue",
+               markersize=12, label="sensor"),
+    ]
+    ax.legend(handles=legend_elts, loc="upper left", fontsize=9)
+
+    buf = _io.BytesIO()
+    fig.savefig(buf, format="png", dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    png_bytes = buf.getvalue()
+    versioned = Q_FIELD_VIZ_MAP_PATH.format(run_tag=run_tag)
+    s3.putFile(png_bytes, path=versioned, content_type="image/png")
+    s3.putFile(png_bytes, path=Q_FIELD_VIZ_MAP_LATEST_PATH, content_type="image/png")
+    uploaded["map"] = versioned
+    log.info(f"Uploaded Q field map → {versioned}")
+
+    # --- Plot 2: leave-one-sensor-out CV scatter ---
+    fig, ax = plt.subplots(figsize=(7, 7))
+    colors = {"NESTOR - BES": "tab:blue", "IB CIVIC CTR": "tab:orange",
+              "SAN YSIDRO": "tab:green"}
+    max_val = 1.0
+    for sname, data in loo.items():
+        obs = data.get("c_obs_ppb") or []
+        pred = data.get("c_pred_ppb") or []
+        if not obs or not pred:
+            continue
+        rmse = data.get("rmse_ppb")
+        bias = data.get("bias_ppb")
+        ax.scatter(obs, pred, s=40, alpha=0.75,
+                   c=colors.get(sname, "tab:gray"),
+                   edgecolor="black", linewidth=0.3,
+                   label=f"{sname} (RMSE={rmse}, bias={bias})")
+        max_val = max(max_val, max(obs + pred))
+    lim = max_val * 1.1
+    ax.plot([0, lim], [0, lim], color="black", linestyle="--", linewidth=1, label="1:1")
+    ax.set_xlim(0, lim)
+    ax.set_ylim(0, lim)
+    ax.set_xlabel("Observed C (ppb, held-out sensor)")
+    ax.set_ylabel("Predicted C (ppb, from other sensors)")
+    ax.set_title(
+        f"Leave-one-sensor-out CV — gate pass: "
+        f"{diagnostics.get('gates', {}).get('leave_one_sensor_out_pass', False)}"
+    )
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper left", fontsize=9)
+    ax.set_aspect("equal")
+
+    buf = _io.BytesIO()
+    fig.savefig(buf, format="png", dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    png_bytes = buf.getvalue()
+    versioned = Q_FIELD_VIZ_CV_PATH.format(run_tag=run_tag)
+    s3.putFile(png_bytes, path=versioned, content_type="image/png")
+    s3.putFile(png_bytes, path=Q_FIELD_VIZ_CV_LATEST_PATH, content_type="image/png")
+    uploaded["cv_scatter"] = versioned
+    log.info(f"Uploaded CV scatter → {versioned}")
+
+    # --- Plot 3: Σ Q budget bar ---
+    fig, ax = plt.subplots(figsize=(8, 3.5))
+    budget_low = float(budget.get("allowed_low", 30.0))
+    budget_high = float(budget.get("allowed_high", 500.0))
+    anchor = float(budget.get("anchor_g_s", 167.0))
+    gate_pass = bool(diagnostics.get("gates", {}).get("budget_sanity_pass", False))
+
+    ax.axvspan(budget_low, budget_high, color="lightgreen", alpha=0.35, label="allowed")
+    ax.axvline(anchor, color="gray", linestyle="--", linewidth=1.5,
+               label=f"anchor ({anchor:.0f} g/s)")
+    ax.axvline(q_total, color="green" if gate_pass else "red",
+               linewidth=3.5, label=f"Σ Q = {q_total:.1f} g/s")
+    ax.set_xlim(0, max(budget_high * 1.1, q_total * 1.1))
+    ax.set_xlabel("Σ Q (g/s)")
+    ax.set_yticks([])
+    ax.set_title(f"Budget sanity — gate pass: {gate_pass}")
+    ax.grid(True, axis="x", alpha=0.3)
+    ax.legend(loc="upper right", fontsize=9)
+
+    buf = _io.BytesIO()
+    fig.savefig(buf, format="png", dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    png_bytes = buf.getvalue()
+    versioned = Q_FIELD_VIZ_BUDGET_PATH.format(run_tag=run_tag)
+    s3.putFile(png_bytes, path=versioned, content_type="image/png")
+    s3.putFile(png_bytes, path=Q_FIELD_VIZ_BUDGET_LATEST_PATH, content_type="image/png")
+    uploaded["budget"] = versioned
+    log.info(f"Uploaded budget bar → {versioned}")
+
+    return dg.MaterializeResult(metadata={
+        "run_tag":        dg.MetadataValue.text(run_tag),
+        "map_png":        dg.MetadataValue.text(Q_FIELD_VIZ_MAP_LATEST_PATH),
+        "cv_scatter_png": dg.MetadataValue.text(Q_FIELD_VIZ_CV_LATEST_PATH),
+        "budget_png":     dg.MetadataValue.text(Q_FIELD_VIZ_BUDGET_LATEST_PATH),
+        "n_active":       dg.MetadataValue.int(int((q_df["Q_g_s"] > 0).sum())),
+        "Q_total_g_s":    dg.MetadataValue.float(round(q_total, 2)),
+        "uploaded":       dg.MetadataValue.json(uploaded),
+    })
+
+
+# ==============================================================================
 # Exported asset list (for Definitions)
 # ==============================================================================
 
@@ -546,4 +733,5 @@ calibration_assets = [
     rolling_footprint_matrix,
     channel_emission_inversion,
     calibration_diagnostics,
+    calibration_viz,
 ]

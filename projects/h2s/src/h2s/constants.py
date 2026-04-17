@@ -297,6 +297,14 @@ Q_FIELD_DIAGNOSTICS_LATEST_PATH = f'{CALIBRATION_BASE_PATH}/inversion_diagnostic
 # Key pattern: {S_ROW_CACHE_PREFIX}/{sensor}/{YYYYMMDDHH}.npy
 S_ROW_CACHE_PREFIX = f'{CALIBRATION_BASE_PATH}/S_row_cache'
 
+# Calibration visualizations — per-run PNGs plus a `_latest` pointer for dashboards.
+Q_FIELD_VIZ_MAP_PATH = f'{CALIBRATION_BASE_PATH}/viz/{{run_tag}}/Q_field_map.png'
+Q_FIELD_VIZ_MAP_LATEST_PATH = f'{CALIBRATION_BASE_PATH}/viz/Q_field_map_latest.png'
+Q_FIELD_VIZ_CV_PATH = f'{CALIBRATION_BASE_PATH}/viz/{{run_tag}}/loo_cv_scatter.png'
+Q_FIELD_VIZ_CV_LATEST_PATH = f'{CALIBRATION_BASE_PATH}/viz/loo_cv_scatter_latest.png'
+Q_FIELD_VIZ_BUDGET_PATH = f'{CALIBRATION_BASE_PATH}/viz/{{run_tag}}/budget_bar.png'
+Q_FIELD_VIZ_BUDGET_LATEST_PATH = f'{CALIBRATION_BASE_PATH}/viz/budget_bar_latest.png'
+
 # Dispersion visualizations (heatmaps + source maps)
 # Versioned paths use .format(date_str=YYYYMMDD_HH)
 DISPERSION_VIZ_HEATMAP_COARSE_PATH = 'tijuana/forecast/dispersion/visualizations/{date_str}/heatmap_coarse.png'

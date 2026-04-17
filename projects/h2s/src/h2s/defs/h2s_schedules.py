@@ -91,6 +91,7 @@ from h2s.defs.h2s_calibration_pipeline import (
     rolling_footprint_matrix,
     channel_emission_inversion,
     calibration_diagnostics,
+    calibration_viz,
 )
 
 # ============================================================================
@@ -666,6 +667,7 @@ emissions_calibration_job = dg.define_asset_job(
         rolling_footprint_matrix,
         channel_emission_inversion,
         calibration_diagnostics,
+        calibration_viz,
     ),
     tags={"environment": "production", "pipeline": "h2s_calibration"},
 )
