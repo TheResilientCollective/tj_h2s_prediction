@@ -99,7 +99,12 @@ def stability_class(wind_speed_ms: float, is_night: bool) -> str:
 
 def pg_sigmas(stab: str, x_km: float) -> tuple[float, float]:
     a_y, b_y, a_z, b_z = PG_PARAMS[stab]
-    x_km = max(x_km, 0.01)
+    # Near-field floor of 100 m (was 10 m). At < 100 m the Gaussian plume
+    # ground-level equation is not physical: σ_y, σ_z shrink below a cell-width
+    # and concentration blows up. This bounds the grid cell co-located with a
+    # source to a realistic value. Sensor receptors are always > 300 m from
+    # the nearest source so timeseries forecasts are unaffected.
+    x_km = max(x_km, 0.1)
     sigma_y = a_y * (x_km ** b_y) * 1000.0
     sigma_z = a_z * (x_km ** b_z) * 1000.0
     return sigma_y, sigma_z
@@ -203,6 +208,7 @@ def run_forward_model(
     start_time: pd.Timestamp,
     hours: int = 72,
     ref_sensor: str = "NESTOR - BES",
+    cadence_minutes: int = 60,
 ) -> ForwardModelResult:
     """
     Run Gaussian plume forward model over a time window.
@@ -214,8 +220,10 @@ def run_forward_model(
         start_time: Forecast start (tz-aware).
         hours: Forecast duration in hours.
         ref_sensor: Sensor to use for met when per-sensor data is unavailable.
+        cadence_minutes: Timestep between forecast frames. Default 60 (hourly).
     """
-    times = pd.date_range(start_time, periods=hours, freq="1h")
+    n_steps = int(hours * 60 / cadence_minutes)
+    times = pd.date_range(start_time, periods=n_steps, freq=f"{cadence_minutes}min")
     concentrations = {sname: [] for sname in SENSORS}
 
     for t in times:
@@ -262,6 +270,7 @@ def run_forward_model(
             "model": "Gaussian plume (Pasquill-Gifford, Slade 1968)",
             "start_time": str(start_time),
             "hours": hours,
+            "cadence_minutes": cadence_minutes,
             "sources": SOURCES,
         },
     )
@@ -273,6 +282,7 @@ def run_forward_model_detailed(
     start_time: pd.Timestamp,
     hours: int = 72,
     ref_sensor: str = "NESTOR - BES",
+    cadence_minutes: int = 60,
 ) -> ForwardModelResult:
     """
     Run Gaussian plume forward model with 16 individual candidate sources.
@@ -287,8 +297,10 @@ def run_forward_model_detailed(
         start_time: Forecast start (tz-aware).
         hours: Forecast duration in hours.
         ref_sensor: Sensor to use for met when per-sensor data is unavailable.
+        cadence_minutes: Timestep between forecast frames. Default 60 (hourly).
     """
-    times = pd.date_range(start_time, periods=hours, freq="1h")
+    n_steps = int(hours * 60 / cadence_minutes)
+    times = pd.date_range(start_time, periods=n_steps, freq=f"{cadence_minutes}min")
     concentrations = {sname: [] for sname in SENSORS}
 
     for t in times:
@@ -335,6 +347,7 @@ def run_forward_model_detailed(
             "model": "Gaussian plume (Pasquill-Gifford, Slade 1968, 16-source detailed)",
             "start_time": str(start_time),
             "hours": hours,
+            "cadence_minutes": cadence_minutes,
             "n_sources": len(CANDIDATE_SOURCES),
             "sources": CANDIDATE_SOURCES,
         },
@@ -372,7 +385,7 @@ def _confidence_from_distance(
     lat_grid: np.ndarray,
     lon_grid: np.ndarray,
     sensor_coords: list[tuple[float, float]],
-    forecast_lead_h: int = 0,
+    forecast_lead_h: float = 0.0,
 ) -> np.ndarray:
     """Heuristic confidence score (0-1) based on distance to nearest sensor and forecast lead time.
 
@@ -401,12 +414,13 @@ def run_forward_model_gridded(
     start_time: pd.Timestamp,
     hours: int = 72,
     ref_sensor: str = "NESTOR - BES",
+    cadence_minutes: int = 60,
 ) -> list[dict]:
-    """Run Gaussian plume forward model and return per-hour GeoDemic GridData dicts.
+    """Run Gaussian plume forward model and return per-frame GeoDemic GridData dicts.
 
     Evaluates ``gaussian_plume_concentration()`` at every cell of the unified
-    grid (from ``grid_config``) for each forecast hour.  Returns a list of
-    GridData dicts (one per hour) suitable for direct upload to S3 and
+    grid (from ``grid_config``) for each forecast timestep.  Returns a list of
+    GridData dicts (one per frame) suitable for direct upload to S3 and
     consumption by GeoDemic's ``HeatMapLayer``.
 
     Args:
@@ -415,9 +429,10 @@ def run_forward_model_gridded(
         start_time: Forecast start (tz-aware).
         hours: Forecast duration in hours.
         ref_sensor: Fallback sensor for met when per-sensor data is missing.
+        cadence_minutes: Timestep between frames. Default 60 (hourly).
 
     Returns:
-        List of GridData dicts, one per forecast hour.
+        List of GridData dicts, one per forecast frame.
     """
     from h2s.dispersion.grid_config import (
         GRID_BOUNDS,
@@ -428,7 +443,8 @@ def run_forward_model_gridded(
         GRID_RESOLUTION_METERS,
     )
 
-    times = pd.date_range(start_time, periods=hours, freq="1h")
+    n_steps = int(hours * 60 / cadence_minutes)
+    times = pd.date_range(start_time, periods=n_steps, freq=f"{cadence_minutes}min")
 
     # Pre-build 2-D coordinate meshes (rows=lat, cols=lon)
     lon_mesh, lat_mesh = np.meshgrid(GRID_LON_CENTERS, GRID_LAT_CENTERS)
@@ -438,13 +454,14 @@ def run_forward_model_gridded(
     frames: list[dict] = []
 
     for hour_idx, t in enumerate(times):
+        forecast_lead_h = hour_idx * cadence_minutes / 60.0
         # Get met for this timestep (use ref_sensor as representative)
         row = df[(df["time"] == t) & (df["site_name"] == ref_sensor)]
         if row.empty:
             # Try any sensor for this timestep
             row = df[df["time"] == t]
         if row.empty:
-            # No met available — produce an empty grid for this hour
+            # No met available — produce an empty grid for this step
             frames.append(_build_grid_data(
                 concentration_grid=np.zeros((GRID_NROWS, GRID_NCOLS)),
                 confidence_grid=np.full((GRID_NROWS, GRID_NCOLS), 0.1),
@@ -452,7 +469,7 @@ def run_forward_model_gridded(
                 lon_centers=GRID_LON_CENTERS,
                 bounds=GRID_BOUNDS,
                 resolution_meters=GRID_RESOLUTION_METERS,
-                metadata={"time": str(t), "hour_index": hour_idx, "status": "no_met"},
+                metadata={"time": str(t), "frame_index": hour_idx, "status": "no_met"},
             ))
             continue
 
@@ -488,7 +505,7 @@ def run_forward_model_gridded(
             )
             total_ppb += _ug_grid_to_ppb(conc_ug, temp_c)
 
-        confidence = _confidence_from_distance(lat_mesh, lon_mesh, sensor_coords, forecast_lead_h=hour_idx)
+        confidence = _confidence_from_distance(lat_mesh, lon_mesh, sensor_coords, forecast_lead_h=forecast_lead_h)
 
         frames.append(_build_grid_data(
             concentration_grid=np.round(total_ppb, 3),
@@ -499,7 +516,8 @@ def run_forward_model_gridded(
             resolution_meters=GRID_RESOLUTION_METERS,
             metadata={
                 "time": str(t),
-                "hour_index": hour_idx,
+                "frame_index": hour_idx,
+                "forecast_lead_h": round(forecast_lead_h, 3),
                 "wind_speed_ms": round(ws, 2),
                 "wind_direction_deg": round(wd_deg, 1),
                 "stability_class": stab,
@@ -510,14 +528,38 @@ def run_forward_model_gridded(
     return frames
 
 
+GRID_BASELINE_SCALE: float = 0.1
+"""Default scale applied to per-source emission rates for the *gridded* forecast.
+
+The inversion (``emission_rate_inversion``) calibrates emission rates against
+acute events (e.g. March 13 2026, 394 ppb @ NESTOR-BES) so sensor-level
+timeseries match observed peaks. Those same rates produce visually saturated
+grid maps under typical (non-event) conditions. The grid product multiplies
+rates by this factor to show a baseline-like spatial footprint while leaving
+the sensor-level timeseries forecast untouched. Set to 1.0 to render at the
+full event-calibrated level.
+"""
+
+GRID_PPB_CLIP: float = 500.0
+"""Upper clip applied to every grid cell in the gridded forecast (ppb).
+
+Guards against unphysical near-source singularities and keeps the tile color
+ramp legible. 500 ppb is ~5× the worst recorded event-level value at a
+community sensor; anything above is numerical artefact, not signal.
+"""
+
+
 def run_forward_model_gridded_detailed(
     df: pd.DataFrame,
     emission_rates_per_source_g_s: dict[str, float],
     start_time: pd.Timestamp,
     hours: int = 72,
     ref_sensor: str = "NESTOR - BES",
+    baseline_scale: float = GRID_BASELINE_SCALE,
+    ppb_clip: float = GRID_PPB_CLIP,
+    cadence_minutes: int = 60,
 ) -> list[dict]:
-    """Run Gaussian plume forward model with 16 sources and return per-hour GeoDemic GridData dicts.
+    """Run Gaussian plume forward model with 16 sources and return per-frame GeoDemic GridData dicts.
 
     This is the detailed version of ``run_forward_model_gridded()`` that uses
     individual candidate sources instead of 3 aggregate zones. Provides more
@@ -534,9 +576,16 @@ def run_forward_model_gridded_detailed(
         start_time: Forecast start (tz-aware).
         hours: Forecast duration in hours.
         ref_sensor: Fallback sensor for met when per-sensor data is missing.
+        baseline_scale: Multiplier applied to each per-source rate before plume
+            evaluation. Default 0.1 produces a non-event baseline (see
+            ``GRID_BASELINE_SCALE``). Pass 1.0 to render at event-calibrated
+            levels.
+        ppb_clip: Per-cell ppb clip to suppress near-source singularities.
+            Default 500 ppb (see ``GRID_PPB_CLIP``).
+        cadence_minutes: Timestep between frames. Default 60 (hourly).
 
     Returns:
-        List of GridData dicts, one per forecast hour.
+        List of GridData dicts, one per forecast frame.
     """
     from h2s.dispersion.grid_config import (
         GRID_BOUNDS,
@@ -547,7 +596,8 @@ def run_forward_model_gridded_detailed(
         GRID_RESOLUTION_METERS,
     )
 
-    times = pd.date_range(start_time, periods=hours, freq="1h")
+    n_steps = int(hours * 60 / cadence_minutes)
+    times = pd.date_range(start_time, periods=n_steps, freq=f"{cadence_minutes}min")
 
     # Pre-build 2-D coordinate meshes (rows=lat, cols=lon)
     lon_mesh, lat_mesh = np.meshgrid(GRID_LON_CENTERS, GRID_LAT_CENTERS)
@@ -557,13 +607,14 @@ def run_forward_model_gridded_detailed(
     frames: list[dict] = []
 
     for hour_idx, t in enumerate(times):
+        forecast_lead_h = hour_idx * cadence_minutes / 60.0
         # Get met for this timestep (use ref_sensor as representative)
         row = df[(df["time"] == t) & (df["site_name"] == ref_sensor)]
         if row.empty:
             # Try any sensor for this timestep
             row = df[df["time"] == t]
         if row.empty:
-            # No met available — produce an empty grid for this hour
+            # No met available — produce an empty grid for this step
             frames.append(_build_grid_data(
                 concentration_grid=np.zeros((GRID_NROWS, GRID_NCOLS)),
                 confidence_grid=np.full((GRID_NROWS, GRID_NCOLS), 0.1),
@@ -571,7 +622,7 @@ def run_forward_model_gridded_detailed(
                 lon_centers=GRID_LON_CENTERS,
                 bounds=GRID_BOUNDS,
                 resolution_meters=GRID_RESOLUTION_METERS,
-                metadata={"time": str(t), "hour_index": hour_idx, "status": "no_met"},
+                metadata={"time": str(t), "frame_index": hour_idx, "status": "no_met"},
             ))
             continue
 
@@ -590,7 +641,7 @@ def run_forward_model_gridded_detailed(
         total_ppb = np.zeros((GRID_NROWS, GRID_NCOLS))
 
         for src_name, src in CANDIDATE_SOURCES.items():
-            q = emission_rates_per_source_g_s.get(src_name, 0.0)
+            q = emission_rates_per_source_g_s.get(src_name, 0.0) * baseline_scale
             if q <= 0:
                 continue
 
@@ -607,9 +658,12 @@ def run_forward_model_gridded_detailed(
             )
             total_ppb += _ug_grid_to_ppb(conc_ug, temp_c)
 
-        confidence = _confidence_from_distance(lat_mesh, lon_mesh, sensor_coords, forecast_lead_h=hour_idx)
+        # Clip near-source singularities to a physically defensible ceiling.
+        np.minimum(total_ppb, ppb_clip, out=total_ppb)
 
-        # Compute top contributing sources for this hour (for metadata)
+        confidence = _confidence_from_distance(lat_mesh, lon_mesh, sensor_coords, forecast_lead_h=forecast_lead_h)
+
+        # Compute top contributing sources for this frame (for metadata)
         source_contributions = {}
         for src_name, src in CANDIDATE_SOURCES.items():
             q = emission_rates_per_source_g_s.get(src_name, 0.0)
@@ -626,17 +680,79 @@ def run_forward_model_gridded_detailed(
             resolution_meters=GRID_RESOLUTION_METERS,
             metadata={
                 "time": str(t),
-                "hour_index": hour_idx,
+                "frame_index": hour_idx,
+                "forecast_lead_h": round(forecast_lead_h, 3),
                 "wind_speed_ms": round(ws, 2),
                 "wind_direction_deg": round(wd_deg, 1),
                 "stability_class": stab,
                 "n_sources": len(CANDIDATE_SOURCES),
                 "top_3_sources_g_s": top_3_sources,
                 "emission_rates_per_source_g_s": {k: float(v) for k, v in emission_rates_per_source_g_s.items() if v > 0},
+                "baseline_scale": baseline_scale,
+                "ppb_clip": ppb_clip,
             },
         ))
 
     return frames
+
+
+def aggregate_grid_frames_max(
+    frames: list[dict],
+    source_cadence_minutes: int,
+    target_cadence_minutes: int = 60,
+) -> list[dict]:
+    """Down-sample high-cadence grid frames into lower-cadence frames via per-cell max.
+
+    Each output frame's ``data`` array is the element-wise max of the source
+    frames that fall within its time window. This turns a fine-grained run (e.g.
+    15-min) into an hourly animation where each cell shows the worst-case ppb
+    seen in that hour — operationally the right view for a hazard map.
+
+    Confidence is also max-aggregated. Metadata is taken from the first frame
+    of the window and annotated with the aggregation settings.
+
+    Args:
+        frames: List of GridData dicts from ``run_forward_model_gridded*``.
+        source_cadence_minutes: Cadence of the input frames.
+        target_cadence_minutes: Desired cadence of the output frames (must be a
+            positive integer multiple of ``source_cadence_minutes``).
+
+    Returns:
+        List of aggregated GridData dicts.
+    """
+    if not frames or target_cadence_minutes <= source_cadence_minutes:
+        return frames
+    if target_cadence_minutes % source_cadence_minutes != 0:
+        raise ValueError(
+            f"target_cadence_minutes ({target_cadence_minutes}) must be a multiple of "
+            f"source_cadence_minutes ({source_cadence_minutes})"
+        )
+
+    group_size = target_cadence_minutes // source_cadence_minutes
+    aggregated: list[dict] = []
+    for group_idx, start in enumerate(range(0, len(frames), group_size)):
+        chunk = frames[start : start + group_size]
+        if not chunk:
+            continue
+        data_arr = np.maximum.reduce([np.array(f["data"]) for f in chunk])
+        conf_arr = np.maximum.reduce([np.array(f["confidence"]) for f in chunk])
+        first = chunk[0]
+        meta = dict(first.get("metadata", {}))
+        meta["frame_index"] = group_idx
+        meta["aggregation"] = "max"
+        meta["aggregation_minutes"] = target_cadence_minutes
+        meta["n_samples"] = len(chunk)
+        meta["source_cadence_minutes"] = source_cadence_minutes
+        aggregated.append({
+            "bounds": first["bounds"],
+            "data": np.round(data_arr, 3).tolist(),
+            "confidence": np.round(conf_arr, 3).tolist(),
+            "lat_centers": first["lat_centers"],
+            "lon_centers": first["lon_centers"],
+            "resolution_meters": first["resolution_meters"],
+            "metadata": meta,
+        })
+    return aggregated
 
 
 def footprint_to_grid_data(

@@ -219,9 +219,25 @@ def _train_and_seed_phase2(s3, bucket, context, raw_df, uploaded, dry_run):
         uploaded.append(meta_path)
 
 
-def _train_and_seed_phase3(s3, bucket, context, raw_df, uploaded, dry_run):
-    """Train 36 multi-horizon models and upload to S3."""
-    context.log.info("Phase 3: Training multi-horizon models from S3 data (no local models_mh)")
+def _train_and_seed_phase3(s3, bucket, context, raw_df, uploaded, dry_run, tasks_filter=None, local_features_path=None):
+    """Train multi-horizon models and upload to S3.
+
+    Args:
+        tasks_filter: if provided, only train/upload these tasks (e.g. ['clf_30ppb']).
+                      Defaults to all 4 tasks.
+        local_features_path: path to a local horizon_features.json whose feature columns should
+                             be reused for training (ensures clf_30ppb uses the same feature set
+                             as the existing local models). If None, feature cols are derived via
+                             build_horizon_features().
+    """
+    tasks_to_train = tasks_filter or ['regression', 'clf_5ppb', 'clf_10ppb', 'clf_30ppb']
+    context.log.info(f"Phase 3: Training MH models from S3 data — tasks: {tasks_to_train}")
+
+    # Load existing feature columns if available (avoids feature-count mismatch)
+    local_features: dict = {}
+    if local_features_path is not None and Path(local_features_path).exists():
+        local_features = json.loads(Path(local_features_path).read_text())
+        context.log.info(f"MH: Using feature columns from {local_features_path}")
 
     # MH uses pre-featurized parquet — only filter/clean + add targets
     df = raw_df.copy()
@@ -231,6 +247,14 @@ def _train_and_seed_phase3(s3, bucket, context, raw_df, uploaded, dry_run):
     df['H2S'] = df['H2S'].clip(lower=0)
     df['exceed_5'] = (df['H2S'] > 5).astype(int)
     df['exceed_10'] = (df['H2S'] > 10).astype(int)
+    df['exceed_30'] = (df['H2S'] > 30).astype(int)
+
+    _task_y_col = {
+        'regression': 'H2S',
+        'clf_5ppb': 'exceed_5',
+        'clf_10ppb': 'exceed_10',
+        'clf_30ppb': 'exceed_30',
+    }
 
     all_horizon_features = {}
 
@@ -244,7 +268,16 @@ def _train_and_seed_phase3(s3, bucket, context, raw_df, uploaded, dry_run):
 
         for hz_name in MH_HORIZON_NAMES:
             hz_cfg = HORIZONS[hz_name]
-            hz_df, feature_cols = build_horizon_features(sdf, hz_name, hz_cfg)
+            hz_df, derived_cols = build_horizon_features(sdf, hz_name, hz_cfg)
+
+            # Prefer stored feature columns so clf_30ppb uses the same feature set as
+            # the existing local models (avoids feature-count mismatch at inference time)
+            if local_features and hz_name in local_features and site_name in local_features[hz_name]:
+                feature_cols = local_features[hz_name][site_name]
+                context.log.info(f"  {hz_name}: using {len(feature_cols)} stored features (vs {len(derived_cols)} derived)")
+            else:
+                feature_cols = derived_cols
+
             hz_df = hz_df.dropna(subset=feature_cols).reset_index(drop=True)
 
             if len(hz_df) < 100:
@@ -254,7 +287,8 @@ def _train_and_seed_phase3(s3, bucket, context, raw_df, uploaded, dry_run):
             X = hz_df[feature_cols].values
             split = int(len(hz_df) * TRAIN_FRACTION)
 
-            for task, y_col in [('regression', 'H2S'), ('clf_5ppb', 'exceed_5'), ('clf_10ppb', 'exceed_10')]:
+            for task in tasks_to_train:
+                y_col = _task_y_col[task]
                 y = hz_df[y_col].values
                 model, choice, _ = train_and_select(X[:split], X[split:], y[:split], y[split:], task)
                 s3_path = f"{MH_MODELS_S3_BASE}/{hz_name}/{station_key}/{task}.pkl"
@@ -497,12 +531,23 @@ def seed_models(context: dg.AssetExecutionContext) -> dict:
         # Upload from local files
         context.log.info(f"MH models source: {mh_dir}")
 
+        missing_tasks: set[str] = set()
         for hz_name in MH_HORIZON_NAMES:
             for station_key in STATION_KEYS.values():
                 for task in MH_TASKS:
                     local_file = mh_dir / f"best_{hz_name}_{task}_{station_key}.pkl"
                     s3_path = f"{MH_MODELS_S3_BASE}/{hz_name}/{station_key}/{task}.pkl"
-                    _upload(local_file, s3_path)
+                    if not _upload(local_file, s3_path):
+                        missing_tasks.add(task)
+
+        # Train any tasks that had no local files (e.g. clf_30ppb added after models were trained)
+        if missing_tasks:
+            context.log.info(f"MH: No local files for {sorted(missing_tasks)} — training inline")
+            _train_and_seed_phase3(
+                s3, bucket, context, _ensure_training_data(), uploaded, dry_run,
+                tasks_filter=sorted(missing_tasks),
+                local_features_path=mh_dir / "horizon_features.json",
+            )
 
         # Upload global horizon_features.json
         _upload(
