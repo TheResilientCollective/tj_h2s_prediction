@@ -16,9 +16,15 @@ Four assets run per weekly partition (partition key = week-start Monday):
                                        recent). Skips the inversion when the
                                        week has fewer than
                                        ``min_events_per_week`` events.
-  3. ``calibration_diagnostics``     — leave-one-sensor-out CV + Σ Q sanity.
-                                       Writes per-partition diagnostics JSON.
-  4. ``calibration_viz``             — three verification PNGs.
+  3. ``calibration_diagnostics``     — two CV sub-gates + Σ Q sanity. Gate 1
+                                       has two parts that must both pass:
+                                       leave-one-sensor-out (tests sensor
+                                       disagreement) and leave-one-time-fold-out
+                                       (random k-fold, adaptive k; tests
+                                       temporal stability of Q). Writes
+                                       per-partition diagnostics JSON.
+  4. ``calibration_viz``             — four verification PNGs (Q-field map,
+                                       LOSO scatter, LOTO scatter, budget bar).
 
 Supports historical backfills (2025-onward) by re-running the job against
 any prior weekly partition. The `_latest` pointer only moves when the
@@ -46,6 +52,7 @@ from h2s.constants import (
     Q_FIELD_VIZ_BUDGET_PATH,
     Q_FIELD_VIZ_CV_LATEST_PATH,
     Q_FIELD_VIZ_CV_PATH,
+    Q_FIELD_VIZ_LOTO_LATEST_PATH,
     Q_FIELD_VIZ_MAP_LATEST_PATH,
     Q_FIELD_VIZ_MAP_PATH,
     Q_FIELD_WEEKLY_DIAGNOSTICS_PATH,
@@ -53,6 +60,7 @@ from h2s.constants import (
     Q_FIELD_WEEKLY_PATH,
     Q_FIELD_WEEKLY_VIZ_BUDGET_PATH,
     Q_FIELD_WEEKLY_VIZ_CV_PATH,
+    Q_FIELD_WEEKLY_VIZ_LOTO_PATH,
     Q_FIELD_WEEKLY_VIZ_MAP_PATH,
 )
 
@@ -198,6 +206,113 @@ def _get_event_times(
         .tolist()
     )
     return times
+
+
+def _time_fold_cv(
+    per_event_rows: list,
+    cfg,
+    *,
+    seed: int = 0,
+) -> dict:
+    """Random k-fold leave-one-time-fold-out CV over per-event rows.
+
+    Each entry of ``per_event_rows`` is a dict with keys ``time``, ``sensors``
+    (list of sensor names), ``A`` (row block for this event, shape
+    (n_sensors, n_segments)), and ``c_bg`` (background-subtracted obs vector
+    of length n_sensors).
+
+    Returns a dict shaped like the one described in the plan file:
+    ``{n_folds, k_rule, fold_type, seed, n_events_total, overall, per_fold,
+    per_sensor}``.  ``per_sensor`` entries carry the same ``c_obs_ppb`` /
+    ``c_pred_ppb`` arrays that the LOSO block produces, so the scatter
+    plotter can consume either without a shape change.
+    """
+    n_events = len(per_event_rows)
+    if n_events < 2:
+        return {"status": "skipped_insufficient_events", "n_events_total": n_events}
+
+    k = max(2, min(5, n_events // 3))
+    rng = np.random.default_rng(seed)
+    order = np.arange(n_events)
+    rng.shuffle(order)
+    folds = [list(f) for f in np.array_split(order, k)]
+
+    per_sensor: dict[str, dict] = {}
+    per_fold: list[dict] = []
+    all_obs: list[float] = []
+    all_pred: list[float] = []
+
+    for i, test_idx in enumerate(folds):
+        train_idx = [j for j in range(n_events) if j not in set(test_idx)]
+        if not train_idx or not test_idx:
+            continue
+
+        A_train = np.vstack([per_event_rows[j]["A"] for j in train_idx])
+        c_train = np.concatenate([per_event_rows[j]["c_bg"] for j in train_idx])
+        if A_train.size == 0 or A_train.max() < 1e-6:
+            continue
+        Q_train = solve_nnls(A_train, c_train, cfg)
+
+        fold_obs: list[float] = []
+        fold_pred: list[float] = []
+        for j in test_idx:
+            ev = per_event_rows[j]
+            c_pred = ev["A"] @ Q_train
+            for sname, c_obs, cp in zip(ev["sensors"], ev["c_bg"], c_pred):
+                sd = per_sensor.setdefault(
+                    sname, {"c_obs_ppb": [], "c_pred_ppb": []}
+                )
+                sd["c_obs_ppb"].append(round(float(c_obs), 3))
+                sd["c_pred_ppb"].append(round(float(cp), 3))
+                fold_obs.append(float(c_obs))
+                fold_pred.append(float(cp))
+                all_obs.append(float(c_obs))
+                all_pred.append(float(cp))
+
+        if fold_obs:
+            diffs = np.array(fold_obs) - np.array(fold_pred)
+            per_fold.append({
+                "fold":      i,
+                "n_events":  len(test_idx),
+                "n_test":    len(fold_obs),
+                "rmse_ppb":  round(float(np.sqrt(np.mean(diffs * diffs))), 2),
+                "bias_ppb":  round(float(np.mean(diffs)), 2),
+            })
+
+    for sname, sd in per_sensor.items():
+        obs_arr = np.array(sd["c_obs_ppb"])
+        pred_arr = np.array(sd["c_pred_ppb"])
+        diffs = obs_arr - pred_arr
+        sd["n_test"] = int(len(obs_arr))
+        sd["rmse_ppb"] = round(float(np.sqrt(np.mean(diffs * diffs))), 2) if len(diffs) else None
+        sd["bias_ppb"] = round(float(np.mean(diffs)), 2) if len(diffs) else None
+
+    obs_arr = np.array(all_obs)
+    pred_arr = np.array(all_pred)
+    if len(obs_arr) == 0:
+        return {"status": "no_test_rows", "n_events_total": n_events}
+
+    diffs = obs_arr - pred_arr
+    rmse = float(np.sqrt(np.mean(diffs * diffs)))
+    bias = float(np.mean(diffs))
+    c_std = float(np.std(obs_arr)) if len(obs_arr) > 1 else 0.0
+
+    return {
+        "n_folds":          len(per_fold),
+        "k_rule":           "max(2, min(5, n_events // 3))",
+        "fold_type":        "random",
+        "seed":             int(seed),
+        "n_events_total":   n_events,
+        "overall": {
+            "rmse_ppb":        round(rmse, 2),
+            "bias_ppb":        round(bias, 2),
+            "c_obs_std":       round(c_std, 2),
+            "rmse_over_std":   round(rmse / c_std, 3) if c_std > 0 else None,
+            "n_test":          int(len(obs_arr)),
+        },
+        "per_fold":         per_fold,
+        "per_sensor":       per_sensor,
+    }
 
 
 def _collect_event_row(
@@ -561,8 +676,9 @@ def channel_emission_inversion(
     kinds={"python", "s3"},
     partitions_def=CALIBRATION_WEEKLY_PARTITIONS,
     description=(
-        "Per-partition sanity checks: leave-one-sensor-out CV RMSE, forward-"
-        "reconstruction self-consistency, Σ Q budget check. Writes "
+        "Per-partition sanity checks: leave-one-sensor-out CV (sensor "
+        "disagreement), leave-one-time-fold-out CV (random k-fold, adaptive k "
+        "— temporal stability of Q), Σ Q budget check. Writes "
         "weekly/{partition}/diagnostics.json. Skips cleanly when the "
         "upstream inversion was skipped."
     ),
@@ -609,8 +725,37 @@ def calibration_diagnostics(
         "gates": {},
     }
 
-    # --- Gate 1: leave-one-sensor-out CV ---
+    # --- Precompute per-event sensitivity rows (shared by both Gate 1 CVs) ---
     sensor_names = list(SENSORS.keys())
+    per_event_rows: list[dict] = []
+    for ev in events:
+        h2s_obs = ev["h2s_obs"]
+        met_row = ev["met_row"]
+        footprints = ev["footprints"]
+
+        sensors_present = [
+            s for s in SENSORS
+            if h2s_obs.get(s, 0.0) > cfg.background_ppb and s in footprints
+        ]
+        if not sensors_present:
+            continue
+
+        A_ev = build_sensitivity_matrix(channel_segments, met_row, sensors_present, cfg)
+        if A_ev.max() < 1e-6:
+            continue
+
+        c_bg = np.array(
+            [max(h2s_obs[s] - cfg.background_ppb, 0.0) for s in sensors_present],
+            dtype=float,
+        )
+        per_event_rows.append({
+            "time":    ev["time"],
+            "sensors": sensors_present,
+            "A":       A_ev,
+            "c_bg":    c_bg,
+        })
+
+    # --- Gate 1a: leave-one-sensor-out CV ---
     loo_rmse: dict[str, dict] = {}
 
     for held_out in sensor_names:
@@ -619,30 +764,16 @@ def calibration_diagnostics(
         test_rows_A: list[np.ndarray] = []
         test_rows_C: list[float] = []
 
-        for ev in events:
-            h2s_obs = ev["h2s_obs"]
-            met_row = ev["met_row"]
-            footprints = ev["footprints"]
-
-            sensors_present = [
-                s for s in SENSORS
-                if h2s_obs.get(s, 0.0) > cfg.background_ppb and s in footprints
-            ]
-            if not sensors_present:
-                continue
-
-            A_ev = build_sensitivity_matrix(channel_segments, met_row, sensors_present, cfg)
-            if A_ev.max() < 1e-6:
-                continue
-
-            for i, sname in enumerate(sensors_present):
-                c_bg = max(h2s_obs[sname] - cfg.background_ppb, 0.0)
+        for ev_row in per_event_rows:
+            for i, sname in enumerate(ev_row["sensors"]):
+                row_A = ev_row["A"][i, :]
+                row_c = float(ev_row["c_bg"][i])
                 if sname == held_out:
-                    test_rows_A.append(A_ev[i, :])
-                    test_rows_C.append(c_bg)
+                    test_rows_A.append(row_A)
+                    test_rows_C.append(row_c)
                 else:
-                    train_rows_A.append(A_ev[i, :])
-                    train_rows_C.append(c_bg)
+                    train_rows_A.append(row_A)
+                    train_rows_C.append(row_c)
 
         if not train_rows_A or not test_rows_A:
             loo_rmse[held_out] = {"rmse_ppb": None, "bias_ppb": None, "n_test": 0,
@@ -672,14 +803,30 @@ def calibration_diagnostics(
             "c_pred_ppb":  [round(float(v), 3) for v in c_pred],
         }
 
-    gate1_pass = all(
+    gate1a_pass = all(
         (v.get("rmse_over_std") is not None and v["rmse_over_std"] < 1.0
          and abs(v.get("bias_ppb") or 0.0) < 10.0)
         for v in loo_rmse.values()
         if v.get("n_test", 0) > 0
     )
     diagnostics["leave_one_sensor_out"] = loo_rmse
-    diagnostics["gates"]["leave_one_sensor_out_pass"] = bool(gate1_pass)
+    diagnostics["gates"]["leave_one_sensor_out_pass"] = bool(gate1a_pass)
+
+    # --- Gate 1b: leave-one-time-fold-out CV ---
+    # Random k-fold over events (adaptive k); all 3 sensors stay in both
+    # train and test so spatial coverage is the same on both sides. Tests
+    # temporal stability of Q rather than cross-sensor agreement.
+    loto = _time_fold_cv(per_event_rows, cfg, seed=0)
+    diagnostics["leave_one_time_fold_out"] = loto
+    loto_overall = loto.get("overall") or {}
+    rmse_over_std = loto_overall.get("rmse_over_std")
+    bias_ppb = loto_overall.get("bias_ppb")
+    gate1b_pass = (
+        rmse_over_std is not None
+        and rmse_over_std < 1.0
+        and abs(bias_ppb or 0.0) < 10.0
+    )
+    diagnostics["gates"]["leave_one_time_fold_out_pass"] = bool(gate1b_pass)
 
     # --- Gate 2: budget sanity ---
     # Prefer the per-partition Q field parquet; fall back to _latest when
@@ -713,7 +860,8 @@ def calibration_diagnostics(
     diagnostics["gates"]["all_pass"] = bool(all(all_gates)) if all_gates else False
 
     log.info(
-        f"Diagnostics summary: LOO={gate1_pass} | Budget={gate2_pass} (Σ Q={q_total:.1f} g/s) "
+        f"Diagnostics summary: LOSO={gate1a_pass} | LOTO={gate1b_pass} | "
+        f"Budget={gate2_pass} (Σ Q={q_total:.1f} g/s) "
         f"| all_pass={diagnostics['gates']['all_pass']}"
     )
 
@@ -741,10 +889,14 @@ def calibration_diagnostics(
         "status":               dg.MetadataValue.text("ok"),
         "partition":            dg.MetadataValue.text(partition_key or "none"),
         "Q_total_g_s":          dg.MetadataValue.float(round(q_total, 2)),
-        "loo_pass":             dg.MetadataValue.bool(bool(gate1_pass)),
+        "loso_pass":            dg.MetadataValue.bool(bool(gate1a_pass)),
+        "loto_pass":            dg.MetadataValue.bool(bool(gate1b_pass)),
         "budget_pass":          dg.MetadataValue.bool(bool(gate2_pass)),
         "all_gates_pass":       dg.MetadataValue.bool(bool(diagnostics["gates"]["all_pass"])),
-        "loo_rmse_ppb":         dg.MetadataValue.json({k: v.get("rmse_ppb") for k, v in loo_rmse.items()}),
+        "loso_rmse_ppb":        dg.MetadataValue.json({k: v.get("rmse_ppb") for k, v in loo_rmse.items()}),
+        "loto_rmse_ppb":        dg.MetadataValue.float(float(loto_overall.get("rmse_ppb") or 0.0)),
+        "loto_rmse_over_std":   dg.MetadataValue.float(float(loto_overall.get("rmse_over_std") or 0.0)),
+        "loto_n_folds":         dg.MetadataValue.int(int(loto.get("n_folds") or 0)),
         "latest_updated":       dg.MetadataValue.bool(bool(is_recent)),
         "uploaded":             dg.MetadataValue.json(uploaded),
         "run_tag":               dg.MetadataValue.text(run_tag),
@@ -765,7 +917,8 @@ def calibration_diagnostics(
         "Per-partition verification visualizations. Renders: "
         "(1) channel segment map colored by Q_g_s with SENSORS overlay, "
         "(2) leave-one-sensor-out CV predicted-vs-observed scatter, "
-        "(3) Σ Q budget bar vs the 30/167/500 g/s reference lines. "
+        "(3) leave-one-time-fold-out CV predicted-vs-observed scatter, "
+        "(4) Σ Q budget bar vs the 30/167/500 g/s reference lines. "
         "Uploads PNGs under weekly/{partition}/ (and _latest when recent)."
     ),
     deps=[
@@ -821,6 +974,7 @@ def calibration_viz(
     diagnostics = json.loads(s3.getFile(diag_path))
 
     loo = diagnostics.get("leave_one_sensor_out", {}) or {}
+    loto = diagnostics.get("leave_one_time_fold_out", {}) or {}
     budget = diagnostics.get("budget_sanity", {}) or {}
     q_total = float(budget.get("Q_total_g_s", q_df["Q_g_s"].sum()))
 
@@ -932,9 +1086,53 @@ def calibration_viz(
     if is_recent:
         s3.putFile(png_bytes, path=Q_FIELD_VIZ_CV_LATEST_PATH, content_type="image/png")
         uploaded["cv_latest"] = Q_FIELD_VIZ_CV_LATEST_PATH
-    log.info(f"Uploaded CV scatter (partition={partition_key or 'none'})")
+    log.info(f"Uploaded LOSO CV scatter (partition={partition_key or 'none'})")
 
-    # --- Plot 3: Σ Q budget bar ---
+    # --- Plot 3: leave-one-time-fold-out CV scatter ---
+    loto_per_sensor = (loto.get("per_sensor") if isinstance(loto, dict) else None) or {}
+    loto_gate_pass = bool(diagnostics.get("gates", {}).get("leave_one_time_fold_out_pass", False))
+    fig, ax = plt.subplots(figsize=(7, 7))
+    max_val = 1.0
+    for sname, data in loto_per_sensor.items():
+        obs = data.get("c_obs_ppb") or []
+        pred = data.get("c_pred_ppb") or []
+        if not obs or not pred:
+            continue
+        rmse = data.get("rmse_ppb")
+        bias = data.get("bias_ppb")
+        ax.scatter(obs, pred, s=40, alpha=0.75,
+                   c=colors.get(sname, "tab:gray"),
+                   edgecolor="black", linewidth=0.3,
+                   label=f"{sname} (RMSE={rmse}, bias={bias})")
+        max_val = max(max_val, max(obs + pred))
+    lim = max_val * 1.1
+    ax.plot([0, lim], [0, lim], color="black", linestyle="--", linewidth=1, label="1:1")
+    ax.set_xlim(0, lim)
+    ax.set_ylim(0, lim)
+    ax.set_xlabel("Observed C (ppb, held-out time fold)")
+    ax.set_ylabel("Predicted C (ppb, from other folds)")
+    ax.set_title(
+        f"Leave-one-time-fold-out CV (k={loto.get('n_folds', '?')}) — gate pass: "
+        f"{loto_gate_pass}"
+    )
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper left", fontsize=9)
+    ax.set_aspect("equal")
+
+    buf = _io.BytesIO()
+    fig.savefig(buf, format="png", dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    png_bytes = buf.getvalue()
+    if partition_key:
+        weekly_loto = Q_FIELD_WEEKLY_VIZ_LOTO_PATH.format(partition=partition_key)
+        s3.putFile(png_bytes, path=weekly_loto, content_type="image/png")
+        uploaded["loto_weekly"] = weekly_loto
+    if is_recent:
+        s3.putFile(png_bytes, path=Q_FIELD_VIZ_LOTO_LATEST_PATH, content_type="image/png")
+        uploaded["loto_latest"] = Q_FIELD_VIZ_LOTO_LATEST_PATH
+    log.info(f"Uploaded LOTO CV scatter (partition={partition_key or 'none'})")
+
+    # --- Plot 4: Σ Q budget bar ---
     fig, ax = plt.subplots(figsize=(8, 3.5))
     budget_low = float(budget.get("allowed_low", 30.0))
     budget_high = float(budget.get("allowed_high", 500.0))

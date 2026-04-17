@@ -60,8 +60,8 @@ One partition key = one Monday (UTC). Four assets, all partitioned:
 |---|---|---|
 | `rolling_footprint_matrix` | Per-event Lagrangian residence-time footprints for each qualifying (sensor, timestep) in the 7-day window. | *(in-memory list)* |
 | `channel_emission_inversion` | Stacked-block NNLS over the partition. | `weekly/{partition}/Q_field.parquet`, `Q_field.json` |
-| `calibration_diagnostics` | Leave-one-sensor-out CV + Σ Q budget check. | `weekly/{partition}/diagnostics.json` |
-| `calibration_viz` | Three verification PNGs. | `weekly/{partition}/Q_field_map.png`, `loo_cv_scatter.png`, `budget_bar.png` |
+| `calibration_diagnostics` | Gate 1a (leave-one-sensor-out CV) + Gate 1b (leave-one-time-fold-out CV) + Σ Q budget check. | `weekly/{partition}/diagnostics.json` |
+| `calibration_viz` | Four verification PNGs. | `weekly/{partition}/Q_field_map.png`, `loo_cv_scatter.png`, `loto_cv_scatter.png`, `budget_bar.png` |
 
 ### Skip-low-data gate
 
@@ -96,9 +96,10 @@ tijuana/dispersion/calibration/
     2025-01-06/
       Q_field.parquet       # (segment_idx, lat, lon, Q_g_s, channel_name)
       Q_field.json          # GeoDemic-friendly sidecar (active segments only)
-      diagnostics.json      # LOO CV + budget gate results
+      diagnostics.json      # LOSO + LOTO CV + budget gate results
       Q_field_map.png       # channel segments colored by Q_g_s
-      loo_cv_scatter.png    # LOO CV obs-vs-pred scatter
+      loo_cv_scatter.png    # Gate 1a: leave-one-sensor-out CV scatter
+      loto_cv_scatter.png   # Gate 1b: leave-one-time-fold-out CV scatter
       budget_bar.png        # Σ Q vs allowed band
     2025-01-13/ ...
     2026-04-06/ ...
@@ -109,16 +110,17 @@ tijuana/dispersion/calibration/
   viz/
     Q_field_map_latest.png
     loo_cv_scatter_latest.png
+    loto_cv_scatter_latest.png
     budget_bar_latest.png
   S_row_cache/{sensor}/{YYYYMMDDHH}.npy   # footprint row cache (planned)
 ```
 
 ## Diagnostic plots
 
-### Leave-one-sensor-out CV scatter (`loo_cv_scatter.png`)
+### Gate 1a — Leave-one-sensor-out CV scatter (`loo_cv_scatter.png`)
 
-**Purpose.** Independent check that the inversion generalizes instead of
-memorizing its own input.
+**Purpose.** Cross-sensor consistency check: do the three sensors tell
+the same story about the emission field?
 
 **Construction**
 (`h2s_calibration_pipeline.py` — `calibration_diagnostics` asset):
@@ -138,7 +140,7 @@ memorizing its own input.
   that sensor from information it never saw.
 - Legend shows per-sensor RMSE and bias.
 
-**Gate 1 — `leave_one_sensor_out_pass`.** For every sensor with test data:
+**Gate 1a — `leave_one_sensor_out_pass`.** For every sensor with test data:
 
 ```
 rmse_over_std = RMSE(c_pred, c_obs) / std(c_obs) < 1.0
@@ -146,12 +148,66 @@ rmse_over_std = RMSE(c_pred, c_obs) / std(c_obs) < 1.0
 ```
 
 Failing means one sensor disagrees with the story the other two tell —
-most often a geometric degeneracy:
+most often a **geometric degeneracy** (because the inversion is
+spatially underdetermined with 3 sensors against ~100 segments):
 
 - Sensor too far from any channel segment that the other two can constrain.
 - Wind direction puts the held-out sensor downwind of segments that the
   other two aren't sensitive to.
 - Raw obs noise (bad calibration, intermittent drop-outs).
+
+### Gate 1b — Leave-one-time-fold-out CV scatter (`loto_cv_scatter.png`)
+
+**Purpose.** Temporal-stability check: does `Q` fit on some of the week's
+events predict the rest? All 3 sensors stay in both train and test, so
+spatial coverage is held constant and the test isolates whether the
+inversion overfits to individual event clusters or captures a stable
+underlying source distribution.
+
+**Construction**
+(`h2s_calibration_pipeline.py` — `calibration_diagnostics` asset,
+`_time_fold_cv` helper):
+
+1. Pre-compute per-event sensitivity rows (reused from Gate 1a).
+2. Random k-fold shuffle with fixed seed (`np.random.default_rng(0)`) →
+   reproducible fold assignments across reruns of the same partition.
+3. `k = max(2, min(5, n_events // 3))` — adaptive: k=5 when events are
+   plentiful, gracefully down to k=2 on quieter weeks.
+4. For each fold `i`: train NNLS on rows from events in the other k-1
+   folds; predict rows from events in fold `i`. Same `solve_nnls` call
+   and regularization as the real inversion.
+
+**Reading the plot**
+
+- One colored dot per held-out event × sensor. `x` = observed ppb at
+  that sensor; `y` = predicted ppb from Q fit to the *other* time folds.
+- Black dashed 1:1 line. Dots on the line mean `Q` generalizes across
+  time folds within the week.
+- Legend shows per-sensor RMSE and bias (aggregated over all test folds).
+- Title says `k=N` so you can spot weeks that fell back to fewer folds.
+
+**Gate 1b — `leave_one_time_fold_out_pass`.**
+
+```
+overall.rmse_over_std = RMSE(c_pred, c_obs) / std(c_obs) < 1.0
+|overall.bias_ppb|                                       < 10 ppb
+```
+
+Failing most often means **temporal non-stationarity of Q within the
+week**:
+
+- A source turned on or off mid-week (rainfall flush, discharge event,
+  upstream repair) and the single `Q` can't fit both halves.
+- An outlier event with meteorology the rest of the week doesn't cover —
+  check the per-fold RMSEs in `diagnostics.json` for one fold with
+  dramatically worse residuals.
+- Raw obs noise concentrated in one fold.
+
+**Why both gates?** They test different properties and fail from
+different causes. LOSO fails on sensor-geometry problems that do not
+imply the Q field is wrong; LOTO fails on temporal drift that LOSO can
+miss entirely. A run passing both gives a much stronger pass signal
+than either alone.
 
 ### Σ Q budget bar (`budget_bar.png`)
 
@@ -200,10 +256,11 @@ intentional:
 - A backfill run of a 2025 week with `budget_sanity_pass = False` still
   writes its Q field for analysis (it just doesn't touch `_latest`
   anyway, because of the 30-day age filter).
-- A recent-week run with `leave_one_sensor_out_pass = False` still
-  writes to `_latest` — the operator reviews the diagnostics and decides
-  whether to disable the Q field source mode via ops config, rather
-  than losing the whole forecast because one sensor disagreed.
+- A recent-week run with `leave_one_sensor_out_pass = False` or
+  `leave_one_time_fold_out_pass = False` still writes to `_latest` —
+  the operator reviews the diagnostics and decides whether to disable
+  the Q field source mode via ops config, rather than losing the whole
+  forecast because one gate flagged.
 
 ## Tuning knobs (`CalibrationConfig`)
 

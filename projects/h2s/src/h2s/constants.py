@@ -320,8 +320,12 @@ Q_FIELD_WEEKLY_JSON_PATH = f'{CALIBRATION_WEEKLY_BASE_PATH}/{{partition}}/Q_fiel
 Q_FIELD_WEEKLY_DIAGNOSTICS_PATH = f'{CALIBRATION_WEEKLY_BASE_PATH}/{{partition}}/diagnostics.json'
 Q_FIELD_WEEKLY_VIZ_MAP_PATH = f'{CALIBRATION_WEEKLY_BASE_PATH}/{{partition}}/Q_field_map.png'
 Q_FIELD_WEEKLY_VIZ_CV_PATH = f'{CALIBRATION_WEEKLY_BASE_PATH}/{{partition}}/loo_cv_scatter.png'
+Q_FIELD_WEEKLY_VIZ_LOTO_PATH = f'{CALIBRATION_WEEKLY_BASE_PATH}/{{partition}}/loto_cv_scatter.png'
 Q_FIELD_WEEKLY_VIZ_BUDGET_PATH = f'{CALIBRATION_WEEKLY_BASE_PATH}/{{partition}}/budget_bar.png'
 Q_FIELD_WEEKLY_INDEX_PATH = f'{CALIBRATION_WEEKLY_BASE_PATH}/index.json'
+
+# `_latest` LOTO pointer — mirrors Q_FIELD_VIZ_CV_LATEST_PATH's purpose
+Q_FIELD_VIZ_LOTO_LATEST_PATH = f'{CALIBRATION_BASE_PATH}/viz/loto_cv_scatter_latest.png'
 
 # A run writes its Q field to _latest only when the partition's end is within
 # this many days of today. Prevents historical backfills from silently
