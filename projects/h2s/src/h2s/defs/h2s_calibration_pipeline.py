@@ -181,6 +181,61 @@ def _is_partition_recent(partition_key: Optional[str], max_age_days: int) -> boo
     return (now_utc - end).days <= max_age_days
 
 
+def _load_inversion_config_from_sidecar(
+    s3,
+    partition_key: Optional[str],
+    fallback_cfg: "InversionConfig",
+    log,
+) -> "InversionConfig":
+    """Read the InversionConfig used by channel_emission_inversion from its JSON sidecar.
+
+    The sidecar is the single source of truth so that diagnostics evaluate CV
+    under the exact same regularization as was used to fit Q.  Without this,
+    an operator overriding `lambda_l1` on `calibration_diagnostics` alone (or
+    forgetting to set it there) would silently fit Q under one lambda and
+    evaluate gates under another.
+
+    Falls back to the op-level config if the sidecar is missing / unparseable
+    (legacy unpartitioned runs, or the first materialization before
+    `channel_emission_inversion` wrote the enriched sidecar).
+    """
+    from dataclasses import fields
+
+    if partition_key:
+        sidecar_path = Q_FIELD_WEEKLY_JSON_PATH.format(partition=partition_key)
+    else:
+        sidecar_path = Q_FIELD_LATEST_JSON_PATH
+
+    try:
+        payload = json.loads(s3.getFile(sidecar_path))
+    except Exception as exc:
+        log.warning(
+            f"Could not read inversion sidecar {sidecar_path} ({exc}); "
+            f"diagnostics falling back to op-level config."
+        )
+        return fallback_cfg
+
+    sidecar = payload.get("inversion_config") or {}
+    if not sidecar:
+        log.warning(
+            f"Sidecar {sidecar_path} has no inversion_config block — "
+            f"falling back to op-level config. Rerun channel_emission_inversion "
+            f"to populate it."
+        )
+        return fallback_cfg
+
+    valid_keys = {f.name for f in fields(InversionConfig)}
+    loaded = InversionConfig(**{k: v for k, v in sidecar.items() if k in valid_keys})
+
+    if abs(loaded.lambda_l1 - fallback_cfg.lambda_l1) > 1e-9:
+        log.warning(
+            f"Op-level config.lambda_l1={fallback_cfg.lambda_l1} differs from "
+            f"sidecar lambda_l1={loaded.lambda_l1}. Using sidecar (single source "
+            f"of truth — set lambda_l1 only on channel_emission_inversion)."
+        )
+    return loaded
+
+
 def _get_event_times(
     df: pd.DataFrame,
     date_start: pd.Timestamp,
@@ -619,6 +674,10 @@ def channel_emission_inversion(
         )
 
     # --- GeoDemic-friendly JSON sidecar (active segments only) ---
+    # `inversion_config` is the machine-readable contract: downstream assets
+    # (calibration_diagnostics) reconstruct InversionConfig from this block so
+    # Q is fit and evaluated under the exact same regularization.  Leaving the
+    # human-facing `config` block alongside it for ops dashboards.
     json_payload = {
         "timestamp":    pd.Timestamp.utcnow().isoformat(),
         "run_tag":      run_tag,
@@ -630,6 +689,7 @@ def channel_emission_inversion(
         "n_rows":       int(result.get("n_rows", 0)),
         "sensor_rmse_ppb": result.get("sensor_rmse_ppb", {}),
         "active_sources": active,
+        "inversion_config": asdict(cfg),
         "config": {
             "segment_spacing_m": config.segment_spacing_m,
             "lambda_l1":         config.lambda_l1,
@@ -711,17 +771,21 @@ def calibration_diagnostics(
             "partition":            dg.MetadataValue.text(partition_key or "none"),
         })
 
-    channel_segments = build_channel_grid(segment_spacing_m=config.segment_spacing_m)
-    cfg = InversionConfig(
+    fallback_cfg = InversionConfig(
         segment_spacing_m=config.segment_spacing_m,
         lambda_l1=config.lambda_l1,
         lambda_smooth=config.lambda_smooth,
         background_ppb=config.background_ppb,
     )
+    # Pull the exact InversionConfig that channel_emission_inversion used to
+    # fit Q — avoids a CV-under-different-lambda footgun.
+    cfg = _load_inversion_config_from_sidecar(s3, partition_key, fallback_cfg, log)
+    channel_segments = build_channel_grid(segment_spacing_m=cfg.segment_spacing_m)
 
     diagnostics: dict = {
         "timestamp": pd.Timestamp.utcnow().isoformat(),
         "n_events": len(events),
+        "inversion_config": asdict(cfg),
         "gates": {},
     }
 

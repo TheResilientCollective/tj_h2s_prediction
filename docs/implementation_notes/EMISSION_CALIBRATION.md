@@ -274,7 +274,7 @@ intentional:
 | `n_particles` | 1500 | Reduced from 2000 for batch speed. |
 | `hours_back` | 2.0 | Valley-scale (1-7 km sources, 8-37 min travel). Do not raise without re-validating. |
 | `segment_spacing_m` | 150.0 | Channel grid resolution. 150 m is a compromise between spatial resolution and NNLS conditioning. |
-| `lambda_l1` | 0.3 | L1 sparsity. Raise to suppress ringing; lower if Σ Q collapses. |
+| `lambda_l1` | 0.3 | L1 sparsity. Raise to suppress ringing; lower if Σ Q collapses. **Only the value set on `channel_emission_inversion` matters** — diagnostics loads the `InversionConfig` from `Q_field.json` so CV runs under the same regularization that fit Q. |
 | `background_ppb` | 1.0 | Subtracted from `C_obs`. Protects against fitting to pure noise. |
 | `min_rows_for_inversion` | 9 | ≥ 3 events × 3 sensors before we trust NNLS. |
 
@@ -294,11 +294,27 @@ segments (~20/143) clustered near one sensor.
 
 Fix: drop `lambda_l1` to 0.05 – 0.10 and re-run the same partition.
 Expect `Σ Q` to climb toward the anchor and the LOSO/LOTO scatters to
-tighten against the 1:1 line. Launch with the config override:
+tighten against the 1:1 line.
+
+`dg launch` only accepts a YAML *file* via `--config`, not inline JSON.
+Write the override to a file (with `h2s__` op-name prefixes — required
+because the calibration assets use `key_prefix="h2s"`):
+
+```yaml
+# /tmp/calibration_lambda_l1_008.yaml
+ops:
+  h2s__channel_emission_inversion:
+    config:
+      lambda_l1: 0.08
+```
+
+Only `channel_emission_inversion` needs the override — diagnostics reads
+the `InversionConfig` from the `Q_field.json` sidecar so CV evaluates
+under the same lambda Q was fit with. Then:
 
 ```bash
 uv run dg launch --job emissions_calibration_job --partition 2026-03-09 \
-  --config '{"ops": {"calibration_diagnostics": {"config": {"lambda_l1": 0.08}}, "channel_emission_inversion": {"config": {"lambda_l1": 0.08}}, "rolling_footprint_matrix": {"config": {"lambda_l1": 0.08}}, "calibration_viz": {"config": {"lambda_l1": 0.08}}}}'
+  --config /tmp/calibration_lambda_l1_008.yaml
 ```
 
 If `Σ Q` still undershoots, look at `per_fold` in
