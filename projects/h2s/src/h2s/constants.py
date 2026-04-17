@@ -312,6 +312,22 @@ Q_FIELD_VIZ_CV_LATEST_PATH = f'{CALIBRATION_BASE_PATH}/viz/loo_cv_scatter_latest
 Q_FIELD_VIZ_BUDGET_PATH = f'{CALIBRATION_BASE_PATH}/viz/{{run_tag}}/budget_bar.png'
 Q_FIELD_VIZ_BUDGET_LATEST_PATH = f'{CALIBRATION_BASE_PATH}/viz/budget_bar_latest.png'
 
+# Weekly-partitioned calibration outputs (partition key = week-start Monday YYYY-MM-DD).
+# Used by the weekly emissions_calibration_job for backfill + ongoing weekly runs.
+CALIBRATION_WEEKLY_BASE_PATH = f'{CALIBRATION_BASE_PATH}/weekly'
+Q_FIELD_WEEKLY_PATH = f'{CALIBRATION_WEEKLY_BASE_PATH}/{{partition}}/Q_field.parquet'
+Q_FIELD_WEEKLY_JSON_PATH = f'{CALIBRATION_WEEKLY_BASE_PATH}/{{partition}}/Q_field.json'
+Q_FIELD_WEEKLY_DIAGNOSTICS_PATH = f'{CALIBRATION_WEEKLY_BASE_PATH}/{{partition}}/diagnostics.json'
+Q_FIELD_WEEKLY_VIZ_MAP_PATH = f'{CALIBRATION_WEEKLY_BASE_PATH}/{{partition}}/Q_field_map.png'
+Q_FIELD_WEEKLY_VIZ_CV_PATH = f'{CALIBRATION_WEEKLY_BASE_PATH}/{{partition}}/loo_cv_scatter.png'
+Q_FIELD_WEEKLY_VIZ_BUDGET_PATH = f'{CALIBRATION_WEEKLY_BASE_PATH}/{{partition}}/budget_bar.png'
+Q_FIELD_WEEKLY_INDEX_PATH = f'{CALIBRATION_WEEKLY_BASE_PATH}/index.json'
+
+# A run writes its Q field to _latest only when the partition's end is within
+# this many days of today. Prevents historical backfills from silently
+# overwriting the dispersion forecast's live Q field.
+Q_FIELD_LATEST_MAX_AGE_DAYS = 30
+
 # Dispersion visualizations (heatmaps + source maps)
 # Versioned paths use .format(date_str=YYYYMMDD_HH)
 DISPERSION_VIZ_HEATMAP_COARSE_PATH = 'tijuana/forecast/dispersion/visualizations/{date_str}/heatmap_coarse.png'
