@@ -2,13 +2,14 @@
 
 Inverts a time-averaged H2S emission Q field along the Tijuana River channel
 grid by stacking per-sensor × per-timestep footprint + sensitivity rows across
-the qualifying events (≥ 30 ppb at any sensor, stable BL) inside a 7-day
-partition window.
+the qualifying events (≥ 5 ppb at any sensor, stable BL — the smell-
+detection / resident-complaint threshold) inside a 7-day partition window.
 
 Four assets run per weekly partition (partition key = week-start Monday):
 
   1. ``rolling_footprint_matrix``    — per-event residence-time footprints
-                                       for each sensor/timestep in the partition.
+                                       for each sensor/timestep in the partition
+                                       (events ≥ 5 ppb, stable BL).
   2. ``channel_emission_inversion``  — stacked-block NNLS over the partition.
                                        Writes Q_field parquet (per-partition +
                                        `_latest` pointer when the partition is
@@ -99,8 +100,10 @@ class CalibrationConfig(dg.Config):
     date_end: Optional[str] = None    # ISO date (inclusive). Ignored for partitioned
                                       # runs (partition key drives window bounds).
 
-    # Event gating
-    h2s_threshold_ppb: float = 30.0
+    # Event gating — 5 ppb matches the community smell-detection threshold
+    # (residents report nuisance at 5-10 ppb, well below the 30 ppb ORANGE alert).
+    # Lower threshold also helps the NNLS: more rows/week → better conditioning.
+    h2s_threshold_ppb: float = 5.0
     require_stable: bool = True       # stable_atm == 1 (calm nocturnal BL)
     max_events: int = 48              # cap timesteps processed per window
     min_events_per_week: int = 3      # skip weeks with fewer qualifying events than this
@@ -257,8 +260,9 @@ def _collect_event_row(
     partitions_def=CALIBRATION_WEEKLY_PARTITIONS,
     description=(
         "Per-event Lagrangian residence-time footprints over a weekly partition "
-        "of H2S events (≥30 ppb, stable BL). Partition key = week-start Monday; "
-        "the 7-day window is [partition_key, partition_key + 7 days)."
+        "of H2S events (≥5 ppb, stable BL — community smell-detection threshold). "
+        "Partition key = week-start Monday; the 7-day window is "
+        "[partition_key, partition_key + 7 days)."
     ),
 )
 def rolling_footprint_matrix(
