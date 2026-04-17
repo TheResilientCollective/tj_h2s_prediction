@@ -132,6 +132,11 @@ class CalibrationConfig(dg.Config):
     gauss_meandering_deg: float = 20.0  # Gifford (1961) wind meandering σ for stable BL;
                                         # lower values concentrate the plume (raises max_A)
 
+    # Geometry-plausibility pre-filter — events needing more than this much Q
+    # on the single strongest segment under the current kernel are skipped
+    # before NNLS (they can't be reproduced by any forward-model Q).
+    q_required_max_g_s: float = 500.0
+
     # Diagnostics
     min_rows_for_inversion: int = 9   # ≥ 3 events × 3 sensors before we trust NNLS
 
@@ -602,6 +607,7 @@ def channel_emission_inversion(
         lambda_smooth=config.lambda_smooth,
         background_ppb=config.background_ppb,
         gauss_meandering_deg=config.gauss_meandering_deg,
+        q_required_max_g_s=config.q_required_max_g_s,
     )
 
     n_rows_expected = sum(len(e["footprints"]) for e in events)
@@ -648,7 +654,12 @@ def channel_emission_inversion(
     # tuning will not unlock mass — retuning gauss_meandering_deg, stability
     # class, or hours_back is the fix.
     per_event_sens = result.get("per_event_sensitivity", []) or []
-    a_summary: dict = {"n_events": len(per_event_sens)}
+    n_skipped_geom = int(result.get("n_events_skipped_geometry", 0))
+    a_summary: dict = {
+        "n_events":              len(per_event_sens),
+        "n_events_skipped_geometry": n_skipped_geom,
+        "q_required_max_g_s":    cfg.q_required_max_g_s,
+    }
     if per_event_sens:
         req = [e["q_required_peak_g_s"] for e in per_event_sens
                if e.get("q_required_peak_g_s") is not None]
@@ -667,7 +678,8 @@ def channel_emission_inversion(
             f"peak obs max={a_summary['peak_obs_ppb_max']} ppb, "
             f"Q-required median={a_summary.get('q_required_peak_g_s_p50')} g/s, "
             f"events needing >500 g/s: {a_summary['n_events_needing_gt_500_g_s']}/"
-            f"{len(per_event_sens)}"
+            f"{len(per_event_sens)} | geometry-skipped: {n_skipped_geom} "
+            f"(threshold q_required_max_g_s={cfg.q_required_max_g_s})"
         )
 
     # --- Serialize Q field to parquet (all segments, stable schema) ---
@@ -765,6 +777,7 @@ def channel_emission_inversion(
         "status":          dg.MetadataValue.text("ok"),
         "partition":       dg.MetadataValue.text(partition_key or "none"),
         "n_events":        dg.MetadataValue.int(int(result.get("n_events", 0))),
+        "n_events_skipped_geometry": dg.MetadataValue.int(n_skipped_geom),
         "n_nnls_rows":     dg.MetadataValue.int(int(result.get("n_rows", 0))),
         "n_segments":      dg.MetadataValue.int(len(channel_segments)),
         "n_active":        dg.MetadataValue.int(len(active)),
@@ -856,8 +869,12 @@ def calibration_diagnostics(
     }
 
     # --- Precompute per-event sensitivity rows (shared by both Gate 1 CVs) ---
+    # Applies the same geometry-plausibility filter that channel_emission_inversion
+    # applies, so CV evaluates over the same row set that NNLS actually fit.
     sensor_names = list(SENSORS.keys())
+    q_threshold = getattr(cfg, "q_required_max_g_s", None)
     per_event_rows: list[dict] = []
+    n_diag_skipped = 0
     for ev in events:
         h2s_obs = ev["h2s_obs"]
         met_row = ev["met_row"]
@@ -872,6 +889,17 @@ def calibration_diagnostics(
 
         A_ev = build_sensitivity_matrix(channel_segments, met_row, sensors_present, cfg)
         if A_ev.max() < 1e-6:
+            n_diag_skipped += 1
+            continue
+
+        max_A_ev = float(A_ev.max())
+        max_obs_ev = float(max(h2s_obs[s] for s in sensors_present) - cfg.background_ppb)
+        q_req_ev = (max_obs_ev / max_A_ev) if max_A_ev > 1e-6 else None
+        if (
+            q_threshold is not None and q_threshold > 0
+            and (q_req_ev is None or q_req_ev > q_threshold)
+        ):
+            n_diag_skipped += 1
             continue
 
         c_bg = np.array(
@@ -884,6 +912,12 @@ def calibration_diagnostics(
             "A":       A_ev,
             "c_bg":    c_bg,
         })
+
+    diagnostics["n_events_skipped_geometry"] = n_diag_skipped
+    log.info(
+        f"Diagnostics per-event rows: {len(per_event_rows)} kept, "
+        f"{n_diag_skipped} geometry-skipped (q_required_max_g_s={q_threshold})"
+    )
 
     # --- Gate 1a: leave-one-sensor-out CV ---
     loo_rmse: dict[str, dict] = {}

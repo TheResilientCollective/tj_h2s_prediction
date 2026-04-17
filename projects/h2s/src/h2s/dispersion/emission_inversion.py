@@ -118,6 +118,15 @@ class InversionConfig:
     # Background
     background_ppb: float = 1.0
 
+    # Geometry-plausibility pre-filter
+    # Events whose peak observed ppb would require more than this much Q on
+    # the single strongest channel segment (under the current Gaussian kernel)
+    # are geometrically implausible — the plume axis misses every sensor, so
+    # the forward model cannot reproduce the observation no matter what Q is.
+    # Keeping such events in the NNLS drags the solution toward Q≈0.  Set to
+    # None / np.inf to disable.
+    q_required_max_g_s: float = 500.0
+
 
 # ---------------------------------------------------------------------------
 # Channel grid construction
@@ -620,13 +629,31 @@ def batch_inversion_stacked(
         # NNLS will floor under-predict no matter what lambda_l1 you pick.
         max_A_ev = float(A_ev.max())
         max_obs_ev = float(max(h2s_obs[s] for s in sensors_present) - cfg.background_ppb)
+        q_req_ev = (max_obs_ev / max_A_ev) if max_A_ev > 1e-6 else None
+
+        # Apply the geometry-plausibility pre-filter: events the Gaussian
+        # forward model literally can't reproduce (no segment × sensor pair
+        # delivers meaningful ppb per g/s) are skipped before NNLS.  They
+        # stay in per_event_sens with skipped=True so the operator still
+        # sees the count and reason in the sidecar.
+        threshold = getattr(cfg, "q_required_max_g_s", None)
+        skipped = (
+            threshold is not None
+            and threshold > 0
+            and (q_req_ev is None or q_req_ev > threshold)
+        )
+
         per_event_sens.append({
-            "time":               str(event_time),
-            "sensors":            list(sensors_present),
-            "max_A_ppb_per_g_s":  round(max_A_ev, 5),
-            "max_obs_ppb":        round(max_obs_ev, 1),
-            "q_required_peak_g_s": round(max_obs_ev / max_A_ev, 1) if max_A_ev > 1e-6 else None,
+            "time":                str(event_time),
+            "sensors":             list(sensors_present),
+            "max_A_ppb_per_g_s":   round(max_A_ev, 5),
+            "max_obs_ppb":         round(max_obs_ev, 1),
+            "q_required_peak_g_s": round(q_req_ev, 1) if q_req_ev is not None else None,
+            "skipped":             bool(skipped),
         })
+
+        if skipped:
+            continue
 
         for i, sname in enumerate(sensors_present):
             rows_A.append(A_ev[i, :])
@@ -696,12 +723,16 @@ def batch_inversion_stacked(
 
     # Unique event times
     n_events = len({str(m["time"]) for m in row_meta})
+    n_events_skipped_geometry = sum(
+        1 for e in per_event_sens if e.get("skipped")
+    )
 
     return {
         "Q": Q,
         "Q_total_g_s": round(Q_total, 1),
         "active_sources": active_sources,
         "n_events": n_events,
+        "n_events_skipped_geometry": n_events_skipped_geometry,
         "n_rows": len(rows_C),
         "sensor_rmse_ppb": sensor_rmse,
         "per_event_predictions": per_event,

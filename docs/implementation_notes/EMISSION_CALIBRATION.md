@@ -276,6 +276,7 @@ intentional:
 | `segment_spacing_m` | 150.0 | Channel grid resolution. 150 m is a compromise between spatial resolution and NNLS conditioning. |
 | `lambda_l1` | 0.3 | L1 sparsity. Raise to suppress ringing; lower if Σ Q collapses. **Only the value set on `channel_emission_inversion` matters** — diagnostics loads the `InversionConfig` from `Q_field.json` so CV runs under the same regularization that fit Q. |
 | `gauss_meandering_deg` | 20.0 | Gifford wind-meandering σ for the forward Gaussian sensitivity matrix. Narrower (10–15°) concentrates the plume and raises `max_A`; wider smears it. Same sidecar-contract rule as `lambda_l1` — set on `channel_emission_inversion`. |
+| `q_required_max_g_s` | 500.0 | Geometry-plausibility pre-filter. Events whose peak ppb would require more than this much Q on the single strongest segment are dropped before NNLS — the forward model literally cannot reproduce them (wind blew the plume axis past every sensor). Skipped events appear in `Q_field.json → sensitivity_diagnostics.per_event` with `skipped=true`. Set to a very large value (e.g. 1e9) to disable. |
 | `background_ppb` | 1.0 | Subtracted from `C_obs`. Protects against fitting to pure noise. |
 | `min_rows_for_inversion` | 9 | ≥ 3 events × 3 sensors before we trust NNLS. |
 
