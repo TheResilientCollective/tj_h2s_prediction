@@ -278,6 +278,47 @@ intentional:
 | `background_ppb` | 1.0 | Subtracted from `C_obs`. Protects against fitting to pure noise. |
 | `min_rows_for_inversion` | 9 | ≥ 3 events × 3 sensors before we trust NNLS. |
 
+## Operator playbook
+
+### Σ Q collapses well below the 167 g/s anchor on an event-heavy week
+
+Symptom: gates all red, `Σ Q` in single-digit g/s, but the LOSO/LOTO
+scatters show large observed-C dots (≥100 ppb) — real signal is
+present and the inversion is not matching it. Both scatters pile
+below the 1:1 line (predictions systematically low).
+
+Typical cause: `lambda_l1 = 0.3` is too aggressive for this week — the
+L1 penalty is zeroing out segments the big event actually needed.
+Symptomatic tell: the channel map shows only a handful of active
+segments (~20/143) clustered near one sensor.
+
+Fix: drop `lambda_l1` to 0.05 – 0.10 and re-run the same partition.
+Expect `Σ Q` to climb toward the anchor and the LOSO/LOTO scatters to
+tighten against the 1:1 line. Launch with the config override:
+
+```bash
+uv run dg launch --job emissions_calibration_job --partition 2026-03-09 \
+  --config '{"ops": {"calibration_diagnostics": {"config": {"lambda_l1": 0.08}}, "channel_emission_inversion": {"config": {"lambda_l1": 0.08}}, "rolling_footprint_matrix": {"config": {"lambda_l1": 0.08}}, "calibration_viz": {"config": {"lambda_l1": 0.08}}}}'
+```
+
+If `Σ Q` still undershoots, look at `per_fold` in
+`diagnostics["leave_one_time_fold_out"]` — one fold with dramatically
+worse RMSE means the week has a wind-regime outlier that a single `Q`
+can't reconcile (e.g., one event has a wind direction no other event
+in the partition shares). Not a tuning problem — that week genuinely
+has two emission regimes and should be treated as such, or split.
+
+### LOSO fails but LOTO passes (or vice-versa)
+
+- **LOSO red, LOTO green** — geometric degeneracy between the three
+  sensors, not a `Q` problem. The inversion found a physically
+  plausible Q that generalizes across time; it just can't be
+  reconstructed from only two sensors. Usually safe to accept.
+- **LOSO green, LOTO red** — `Q` is non-stationary within the week.
+  One or more sources turned on/off, or a rainfall flush happened.
+  Don't tune your way around it — split the partition or accept that
+  the weekly average Q masks sub-weekly dynamics.
+
 ## Running
 
 ### Single partition (smoke test)
