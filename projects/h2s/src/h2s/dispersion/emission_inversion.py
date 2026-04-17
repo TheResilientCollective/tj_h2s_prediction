@@ -591,6 +591,7 @@ def batch_inversion_stacked(
     rows_A: list[np.ndarray] = []
     rows_C: list[float] = []
     row_meta: list[dict] = []   # parallel list for per-row diagnostics
+    per_event_sens: list[dict] = []   # A-scale diagnostics per event
 
     for ev in events:
         h2s_obs = ev["h2s_obs"]
@@ -611,6 +612,22 @@ def batch_inversion_stacked(
         if A_ev.max() < 1e-6:
             continue
 
+        # A-scale diagnostic: biggest sensitivity coefficient any single
+        # segment can deliver to any sensor for this event, and the Q on
+        # that best segment you'd need to reproduce the peak obs.
+        # If q_required_peak_g_s is > a few hundred g/s per event, the
+        # Gaussian plume geometry is too weak for the observed peak and
+        # NNLS will floor under-predict no matter what lambda_l1 you pick.
+        max_A_ev = float(A_ev.max())
+        max_obs_ev = float(max(h2s_obs[s] for s in sensors_present) - cfg.background_ppb)
+        per_event_sens.append({
+            "time":               str(event_time),
+            "sensors":            list(sensors_present),
+            "max_A_ppb_per_g_s":  round(max_A_ev, 5),
+            "max_obs_ppb":        round(max_obs_ev, 1),
+            "q_required_peak_g_s": round(max_obs_ev / max_A_ev, 1) if max_A_ev > 1e-6 else None,
+        })
+
         for i, sname in enumerate(sensors_present):
             rows_A.append(A_ev[i, :])
             c_bg = max(h2s_obs[sname] - cfg.background_ppb, 0.0)
@@ -630,6 +647,7 @@ def batch_inversion_stacked(
             "n_rows": 0,
             "sensor_rmse_ppb": {},
             "per_event_predictions": [],
+            "per_event_sensitivity": per_event_sens,
             "reason": "no_rows",
         }
 
@@ -687,6 +705,7 @@ def batch_inversion_stacked(
         "n_rows": len(rows_C),
         "sensor_rmse_ppb": sensor_rmse,
         "per_event_predictions": per_event,
+        "per_event_sensitivity": per_event_sens,
     }
 
 

@@ -634,6 +634,36 @@ def channel_emission_inversion(
             for s in top
         ))
 
+    # --- A-scale summary: is the sensitivity matrix physically capable of
+    # reproducing the peak observed concentrations?  q_required_peak_g_s is
+    # the Q on the single strongest segment that would reproduce the event's
+    # peak sensor reading.  If many events need > ~200 g/s per event, the
+    # Gaussian plume kernel is spreading the plume too wide and lambda_l1
+    # tuning will not unlock mass — retuning gauss_meandering_deg, stability
+    # class, or hours_back is the fix.
+    per_event_sens = result.get("per_event_sensitivity", []) or []
+    a_summary: dict = {"n_events": len(per_event_sens)}
+    if per_event_sens:
+        req = [e["q_required_peak_g_s"] for e in per_event_sens
+               if e.get("q_required_peak_g_s") is not None]
+        max_a = [e["max_A_ppb_per_g_s"] for e in per_event_sens]
+        peak_obs = [e["max_obs_ppb"] for e in per_event_sens]
+        a_summary.update({
+            "max_A_ppb_per_g_s_p50":   round(float(np.median(max_a)), 5),
+            "max_A_ppb_per_g_s_max":   round(float(np.max(max_a)), 5),
+            "peak_obs_ppb_max":        round(float(np.max(peak_obs)), 1),
+            "q_required_peak_g_s_p50": round(float(np.median(req)), 1) if req else None,
+            "q_required_peak_g_s_max": round(float(np.max(req)), 1) if req else None,
+            "n_events_needing_gt_500_g_s": int(sum(1 for r in req if r > 500)),
+        })
+        log.info(
+            f"A-scale: max_A p50={a_summary['max_A_ppb_per_g_s_p50']} ppb/(g/s), "
+            f"peak obs max={a_summary['peak_obs_ppb_max']} ppb, "
+            f"Q-required median={a_summary.get('q_required_peak_g_s_p50')} g/s, "
+            f"events needing >500 g/s: {a_summary['n_events_needing_gt_500_g_s']}/"
+            f"{len(per_event_sens)}"
+        )
+
     # --- Serialize Q field to parquet (all segments, stable schema) ---
     rows = q_field_to_parquet_rows(result, channel_segments)
     q_df = pd.DataFrame(rows)
@@ -689,6 +719,10 @@ def channel_emission_inversion(
         "n_rows":       int(result.get("n_rows", 0)),
         "sensor_rmse_ppb": result.get("sensor_rmse_ppb", {}),
         "active_sources": active,
+        "sensitivity_diagnostics": {
+            "summary":    a_summary,
+            "per_event":  per_event_sens,
+        },
         "inversion_config": asdict(cfg),
         "config": {
             "segment_spacing_m": config.segment_spacing_m,
@@ -719,6 +753,7 @@ def channel_emission_inversion(
         "n_active":        dg.MetadataValue.int(len(active)),
         "Q_total_g_s":     dg.MetadataValue.float(round(q_total, 2)),
         "sensor_rmse_ppb": dg.MetadataValue.json(result.get("sensor_rmse_ppb", {})),
+        "a_scale":         dg.MetadataValue.json(a_summary),
         "latest_updated":  dg.MetadataValue.bool(bool(is_recent)),
         "uploaded":        dg.MetadataValue.json(uploaded),
         "run_tag":         dg.MetadataValue.text(run_tag),

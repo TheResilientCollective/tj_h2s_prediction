@@ -324,6 +324,40 @@ can't reconcile (e.g., one event has a wind direction no other event
 in the partition shares). Not a tuning problem — that week genuinely
 has two emission regimes and should be treated as such, or split.
 
+### Σ Q stays low even after dropping `lambda_l1`
+
+If two rounds with `lambda_l1` of 0.3 → 0.1 → 0.05 all land at the
+same Σ Q within a few g/s, the regularizer isn't the constraint — the
+sensitivity matrix `A` can't couple enough ppb per g/s to reproduce
+the peak observations.
+
+Check `channel_emission_inversion`'s asset metadata (or
+`Q_field.json → sensitivity_diagnostics`):
+
+```
+a_scale:
+  max_A_ppb_per_g_s_p50:   0.0008         # median best-segment sensitivity
+  peak_obs_ppb_max:        394            # biggest observed ppb in the week
+  q_required_peak_g_s_p50: 180            # median Q-on-best-segment to explain peak
+  q_required_peak_g_s_max: 12500          # one event would need this
+  n_events_needing_gt_500_g_s: 7/27
+```
+
+If `q_required_peak_g_s` is routinely in the thousands, the Gaussian
+plume geometry cannot reach the observed peaks from any channel
+segment.  `lambda_l1` won't fix that. Candidate levers, in order:
+
+1. **Narrower `gauss_meandering_deg`.** The default (20°) spreads the
+   plume wide for stable-BL events; lowering to 10–15° concentrates
+   the plume and raises `max_A` directly.
+2. **Longer `hours_back`.** If particles are timing out before
+   reaching upstream sources, footprint coverage collapses and Q
+   piles up on whatever few segments are still lit.  Raise in
+   half-hour steps and re-validate LOSO.
+3. **Stability class override.** If the events are calm-BL and the
+   stability classifier is picking unstable, the `σy/σz` bloom
+   dominates. Inspect `inversion_config` and event-time met rows.
+
 ### LOSO fails but LOTO passes (or vice-versa)
 
 - **LOSO red, LOTO green** — geometric degeneracy between the three
