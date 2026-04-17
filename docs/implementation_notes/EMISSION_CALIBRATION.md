@@ -1,0 +1,274 @@
+# Weekly Emission Calibration Pipeline
+
+**Date:** 2026-04-17
+**Scope:** `projects/h2s/src/h2s/defs/h2s_calibration_pipeline.py` and
+`projects/h2s/src/h2s/dispersion/emission_inversion.py`
+**Consumer:** `gaussian_forward_forecast_detailed` in
+`h2s_dispersion_pipeline.py` — prefers `Q_field_latest.parquet` over
+`EMISSION_RATES_PATH` when present.
+
+## Problem
+
+The earlier `emission_rate_inversion` asset fits three zone-level rates
+(east / west / south) against a single static window (Feb 1 – Apr 1 2026)
+and anchors them to a hard-coded total of 167 g/s from the March 13 2026
+event. Two issues:
+
+1. **No feedback loop.** Sensors see one thing, the forecast uses
+   something else. Emissions drift with rainfall, wastewater loads, and
+   season, but the forecast doesn't track any of that.
+2. **Zone-level is too coarse.** Real H2S comes from continuous channel
+   and wetland reaches, not three point-source-like zones. Attributing
+   emissions to 104 river-channel segments captures the spatial
+   structure that drives which sensor sees what.
+
+## Approach — stacked-block NNLS over a 150 m channel grid
+
+Three mathematical steps, reused from the standalone prototype that was
+validated on the Apr 4 2026 events:
+
+1. **LOCATE.** Project combined backward footprints onto a 150 m
+   channel grid (104 segments along the Tijuana River main stem plus
+   Goat Canyon, Smuggler's, estuary, Del Sol tributaries) via a 350 m
+   Gaussian kernel.
+2. **INVERT.** Build a Gaussian sensitivity matrix
+   `A[sensor, segment]` from the same physics as `gaussian_forward`.
+   Solve `Q = argmin ‖A·Q − C_obs‖² + λ₁‖Q‖²` subject to `Q ≥ 0` via
+   `scipy.optimize.nnls` on the augmented system.
+3. **ITERATE.** Re-weight footprints by positive residuals, re-project,
+   add `ΔQ`. Converges in 1-3 iterations.
+
+**Batch stacking** (this is what makes it work). A single event with 3
+sensors is deeply underdetermined against 104 segments. We assemble
+every qualifying event-timestep in the 7-day partition window and stack
+their `A` matrices vertically:
+
+```
+A_stack ∈ ℝ^{N_events · N_sensors × N_segments}   # typically 100-200 rows
+C_obs   ∈ ℝ^{N_events · N_sensors}
+```
+
+With a 5 ppb event threshold (see below) we typically get 100+ rows
+against ~100 columns — overdetermined, and the NNLS floor (`Q ≥ 0`) plus
+L1 regularization picks a sparse, physically plausible solution.
+
+## Pipeline anatomy
+
+One partition key = one Monday (UTC). Four assets, all partitioned:
+
+| Asset | What it does | S3 outputs |
+|---|---|---|
+| `rolling_footprint_matrix` | Per-event Lagrangian residence-time footprints for each qualifying (sensor, timestep) in the 7-day window. | *(in-memory list)* |
+| `channel_emission_inversion` | Stacked-block NNLS over the partition. | `weekly/{partition}/Q_field.parquet`, `Q_field.json` |
+| `calibration_diagnostics` | Leave-one-sensor-out CV + Σ Q budget check. | `weekly/{partition}/diagnostics.json` |
+| `calibration_viz` | Three verification PNGs. | `weekly/{partition}/Q_field_map.png`, `loo_cv_scatter.png`, `budget_bar.png` |
+
+### Skip-low-data gate
+
+`CalibrationConfig.min_events_per_week = 3`. Weeks below this threshold
+short-circuit in `rolling_footprint_matrix` — no particle simulations,
+no NNLS, no diagnostics. Each asset emits `status =
+skipped_insufficient_events` metadata. This makes the 2025-onward
+historical backfill cheap: quiet weeks cost ~O(1), not O(N_particles ×
+N_sensors × 168 h).
+
+### Event threshold
+
+`CalibrationConfig.h2s_threshold_ppb = 5.0` (matches
+`H2S_THRESHOLD_LOW` — the community smell-detection threshold). 30 ppb
+(the ORANGE alert) is too coarse a filter: residents complain well
+before readings reach it, and a lower threshold gives the NNLS more
+rows to fit against.
+
+### `_latest` pointer protection
+
+`Q_FIELD_LATEST_MAX_AGE_DAYS = 30`. A partition run only updates
+`Q_field_latest.parquet` (and the `_latest` pointers for the JSON and
+the three PNGs) when the partition's end is within 30 days of today.
+Historical backfills of 2025 weeks can run freely without clobbering
+the live dispersion forecast's Q field.
+
+## S3 layout
+
+```
+tijuana/dispersion/calibration/
+  weekly/
+    2025-01-06/
+      Q_field.parquet       # (segment_idx, lat, lon, Q_g_s, channel_name)
+      Q_field.json          # GeoDemic-friendly sidecar (active segments only)
+      diagnostics.json      # LOO CV + budget gate results
+      Q_field_map.png       # channel segments colored by Q_g_s
+      loo_cv_scatter.png    # LOO CV obs-vs-pred scatter
+      budget_bar.png        # Σ Q vs allowed band
+    2025-01-13/ ...
+    2026-04-06/ ...
+    index.json              # (reserved — not yet written)
+  Q_field_latest.parquet    # canonical live Q field (recent-week only)
+  Q_field_latest.json
+  inversion_diagnostics_latest.json
+  viz/
+    Q_field_map_latest.png
+    loo_cv_scatter_latest.png
+    budget_bar_latest.png
+  S_row_cache/{sensor}/{YYYYMMDDHH}.npy   # footprint row cache (planned)
+```
+
+## Diagnostic plots
+
+### Leave-one-sensor-out CV scatter (`loo_cv_scatter.png`)
+
+**Purpose.** Independent check that the inversion generalizes instead of
+memorizing its own input.
+
+**Construction**
+(`h2s_calibration_pipeline.py` — `calibration_diagnostics` asset):
+
+1. Pick one sensor (NESTOR, IB CIVIC, or SAN YSIDRO), hide all its rows.
+2. Solve NNLS on rows from the other two sensors only → `Q_train`.
+3. Predict what the held-out sensor should have seen:
+   `c_pred = A_held_out @ Q_train`.
+4. Repeat for each of the three sensors.
+
+**Reading the plot**
+
+- One colored dot per held-out event-timestep. `x` = observed ppb at
+  that sensor; `y` = predicted ppb from Q fit to the *other* two
+  sensors.
+- Black dashed 1:1 line. Dots on the line mean the model can reproduce
+  that sensor from information it never saw.
+- Legend shows per-sensor RMSE and bias.
+
+**Gate 1 — `leave_one_sensor_out_pass`.** For every sensor with test data:
+
+```
+rmse_over_std = RMSE(c_pred, c_obs) / std(c_obs) < 1.0
+|bias|                                           < 10 ppb
+```
+
+Failing means one sensor disagrees with the story the other two tell —
+most often a geometric degeneracy:
+
+- Sensor too far from any channel segment that the other two can constrain.
+- Wind direction puts the held-out sensor downwind of segments that the
+  other two aren't sensitive to.
+- Raw obs noise (bad calibration, intermittent drop-outs).
+
+### Σ Q budget bar (`budget_bar.png`)
+
+**Purpose.** One-line sanity check that the whole inversion gives a
+total emission that's physically plausible.
+
+**Construction.** Sums `Q_g_s` across all channel segments in the
+partition's `Q_field.parquet` → `Σ Q`.
+
+**Reading the plot**
+
+- Green horizontal band at **30-500 g/s** — the allowed range.
+- Gray dashed line at **167 g/s** — the March 13 2026 calibration anchor.
+- Thick vertical bar at the current `Σ Q`. Green if inside the band,
+  red if outside.
+
+**Gate 2 — `budget_sanity_pass`.** `30 ≤ Σ Q ≤ 500 g/s`.
+
+**Failure modes**
+
+- **Σ Q below 30 g/s.** Too much L1 regularization, or the week had
+  only weak events → inversion zeroed out real sources. Loosen
+  `lambda_l1` or lower `h2s_threshold_ppb` (already at the 5 ppb
+  smell-detection floor by default).
+- **Σ Q above 500 g/s.** Numerical blowup — usually an event with a
+  sensor reading the channel geometry can't explain (e.g. a wind shift
+  puts the sensor outside any plausible plume). NNLS piles mass onto
+  the nearest segment to force the fit. Look at the channel map —
+  sharp spike on a single segment is the tell.
+
+### Channel segment map (`Q_field_map.png`)
+
+Gray dots = inactive segments (Q = 0). Colored dots = active segments,
+sized and colored by `Q_g_s`. Blue triangles = the three sensors. This
+one is descriptive rather than a gate — useful for visually confirming
+that hot segments line up with known source regions (Smuggler's / Goat
+Canyon / Saturn Blvd / Dairy Mart Bridge).
+
+## Gate policy
+
+Gates are **published as metadata but do not fail the asset.** The
+dispersion forecast falls back to `EMISSION_RATES_PATH` only when
+`Q_field_latest.parquet` is missing, not when a gate fails. That's
+intentional:
+
+- A backfill run of a 2025 week with `budget_sanity_pass = False` still
+  writes its Q field for analysis (it just doesn't touch `_latest`
+  anyway, because of the 30-day age filter).
+- A recent-week run with `leave_one_sensor_out_pass = False` still
+  writes to `_latest` — the operator reviews the diagnostics and decides
+  whether to disable the Q field source mode via ops config, rather
+  than losing the whole forecast because one sensor disagreed.
+
+## Tuning knobs (`CalibrationConfig`)
+
+| Field | Default | Notes |
+|---|---|---|
+| `window_days` | 7 | Ignored for partitioned runs; partition key drives window. |
+| `h2s_threshold_ppb` | 5.0 | Smell-detection threshold. 30 is alert; 10 is complaint-relevant. |
+| `require_stable` | True | Only fit against nocturnal/calm events where Gaussian is valid. |
+| `max_events` | 48 | Cap timesteps per partition (cost control). |
+| `min_events_per_week` | 3 | Skip gate — see above. |
+| `n_particles` | 1500 | Reduced from 2000 for batch speed. |
+| `hours_back` | 2.0 | Valley-scale (1-7 km sources, 8-37 min travel). Do not raise without re-validating. |
+| `segment_spacing_m` | 150.0 | Channel grid resolution. 150 m is a compromise between spatial resolution and NNLS conditioning. |
+| `lambda_l1` | 0.3 | L1 sparsity. Raise to suppress ringing; lower if Σ Q collapses. |
+| `background_ppb` | 1.0 | Subtracted from `C_obs`. Protects against fitting to pure noise. |
+| `min_rows_for_inversion` | 9 | ≥ 3 events × 3 sensors before we trust NNLS. |
+
+## Running
+
+### Single partition (smoke test)
+
+```bash
+cd projects/h2s
+uv run dg launch --job emissions_calibration_job --partition 2026-04-06
+```
+
+### 2025-onward backfill
+
+66 weekly partitions are available from 2025-01-06 through the most
+recent completed Monday. Launch from the Dagster UI (Assets → `h2s /
+rolling_footprint_matrix` → Backfill) or CLI:
+
+```bash
+# Backfill a range of weeks
+uv run dg launch --job emissions_calibration_job \
+  --partition-range 2025-01-06..2025-03-31
+```
+
+Expect most 2025 weeks to skip with
+`status=skipped_insufficient_events` — that's fine and cheap. Weeks
+with real source activity will write their full Q field + diagnostics.
+
+### Schedule (weekly)
+
+`emissions_calibration_schedule` fires Monday 03:30 UTC,
+materializes the just-completed previous week. Default status is
+`STOPPED` until the first backfill passes diagnostics. Enable via the
+Dagster UI after reviewing weekly diagnostics JSONs.
+
+## Verification — notebook
+
+`notebooks/calibration_inspection.ipynb` pulls `Q_field_latest.parquet`
+and `inversion_diagnostics_latest.json` directly from S3 and
+reproduces the three plots locally. Useful for ad-hoc exploration
+(e.g. comparing a specific backfilled week to the live `_latest`).
+
+## Related notes
+
+- `docs/implementation_notes/EMISSION_RATE_VALIDATION.md` — legacy
+  3-zone `emission_rate_inversion` asset. Calibration pipeline's Q
+  field supersedes it when present; EMISSION_RATES_PATH remains as
+  fallback.
+- `docs/implementation_notes/GRID_FORECAST_TUNING.md` — gridded Gaussian
+  guards (`baseline_scale`, `ppb_clip`). Applies to both 16-source and
+  Q-field forecast paths.
+- `docs/implementation_notes/SOURCE_ATTRIBUTION.md` — Lagrangian
+  backward-particle attribution used upstream by both the legacy
+  inversion and the new calibration.
