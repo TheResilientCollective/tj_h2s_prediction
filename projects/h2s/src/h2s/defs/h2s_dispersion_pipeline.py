@@ -9,7 +9,7 @@ BACKWARD (weekly dispersion_inversion_job):
 
 FORWARD (6h dispersion_forecast_job):
   1. emission_rate_inversion         — re-reads existing EMISSION_RATES_PATH from S3
-  2. gaussian_forward_forecast       — 72h plume forecast using FORECAST_DATA_PATH met
+  2. gaussian_forward_forecast       — 24h plume forecast at 15-min cadence using FORECAST_DATA_15MIN_PATH met
   3. dispersion_alert_check          — threshold check, Slack alert
   4. hysplit_controls_generation     — forward CONTROL bundle, upload to S3 (no execution)
 
@@ -47,7 +47,7 @@ from h2s.constants import (
     DISPERSION_VIZ_TIMESERIES_COARSE_PATH,
     DISPERSION_VIZ_TIMESERIES_DETAILED_PATH,
     EMISSION_RATES_PATH,
-    FORECAST_DATA_PATH,
+    FORECAST_DATA_15MIN_PATH,
     HYSPLIT_BACKWARD_BUNDLE_LATEST,
     HYSPLIT_BACKWARD_BUNDLE_PATH,
     HYSPLIT_FORWARD_BUNDLE_LATEST,
@@ -59,6 +59,7 @@ from h2s.constants import (
 )
 from h2s.dispersion import (
     LagrangianConfig,
+    aggregate_grid_frames_max,
     generate_hysplit_bundle,
     run_forward_model,
     run_forward_model_gridded,
@@ -131,7 +132,12 @@ class HysplitConfig(dg.Config):
 
 
 class ForwardForecastConfig(dg.Config):
-    forecast_hours: int = 72
+    forecast_hours: int = 24
+    cadence_minutes: int = 15
+    # Animation/grid cadence — source frames are aggregated to this cadence
+    # via per-cell max (captures worst-case ppb per bucket). Set equal to
+    # cadence_minutes to disable aggregation.
+    animation_cadence_minutes: int = 60
 
 
 # ==============================================================================
@@ -594,17 +600,17 @@ def hysplit_run_results(
     required_resource_keys={"s3"},
     kinds={"python", "s3"},
     description=(
-        "72h Gaussian plume forward forecast using FORECAST meteorology "
-        "(FORECAST_DATA_PATH / model_forecast.parquet). Loads calibrated emission "
-        "rates from S3. Outputs per-sensor ppb timeseries."
+        "24h Gaussian plume forward forecast at 15-min cadence using FORECAST "
+        "meteorology (FORECAST_DATA_15MIN_PATH / modeldata_forecast_15min.parquet). "
+        "Loads calibrated emission rates from S3. Outputs per-sensor ppb timeseries."
     ),
     deps=[dg.AssetKey(["h2s", "emission_rate_inversion"])],
     metadata={
         # "source": "San Diego APCD H2S location data",
         "description": (
-                "72h Gaussian plume forward forecast using FORECAST meteorology "
-        "(FORECAST_DATA_PATH / model_forecast.parquet). Loads calibrated emission "
-        "rates from S3. Outputs per-sensor ppb timeseries."
+                "24h Gaussian plume forward forecast at 15-min cadence using FORECAST "
+        "meteorology (FORECAST_DATA_15MIN_PATH / modeldata_forecast_15min.parquet). "
+        "Loads calibrated emission rates from S3. Outputs per-sensor ppb timeseries."
         )
     },
 )
@@ -615,9 +621,9 @@ def gaussian_forward_forecast(
     log = context.log
     s3 = context.resources.s3
 
-    # Load FORECAST meteorology (not obs data)
-    log.info(f"Loading forecast met data from S3: {FORECAST_DATA_PATH}")
-    url = s3.get_presigned_url(FORECAST_DATA_PATH)
+    # Load FORECAST meteorology at 15-min cadence (not obs data)
+    log.info(f"Loading 15-min forecast met data from S3: {FORECAST_DATA_15MIN_PATH}")
+    url = s3.get_presigned_url(FORECAST_DATA_15MIN_PATH)
     fc_df = pd.read_parquet(url)
     fc_df["time"] = pd.to_datetime(fc_df["time"], utc=True).dt.tz_convert("America/Los_Angeles")
     log.info(f"Loaded {len(fc_df)} forecast rows, time range: {fc_df['time'].min()} → {fc_df['time'].max()}")
@@ -643,8 +649,14 @@ def gaussian_forward_forecast(
         log.warning(f"Could not load emission rates ({e}) — using calibrated defaults: {emission_rates} g/s")
 
     start_time = fc_df["time"].min()
-    log.info(f"Running Gaussian forward: start={start_time}, hours={config.forecast_hours}")
-    result = run_forward_model(fc_df, emission_rates, start_time, config.forecast_hours)
+    log.info(
+        f"Running Gaussian forward: start={start_time}, hours={config.forecast_hours}, "
+        f"cadence={config.cadence_minutes}min"
+    )
+    result = run_forward_model(
+        fc_df, emission_rates, start_time, config.forecast_hours,
+        cadence_minutes=config.cadence_minutes,
+    )
 
     # Compute per-sensor peaks (ignoring NaN)
     peaks = {}
@@ -664,25 +676,37 @@ def gaussian_forward_forecast(
     log.info("Generating gridded forward forecast (GeoDemic GridData format)")
     grid_frames = run_forward_model_gridded(
         fc_df, emission_rates, start_time, config.forecast_hours,
+        cadence_minutes=config.cadence_minutes,
     )
 
-    # Upload current-hour grid (first frame)
-    if grid_frames:
-        first_frame_json = json.dumps(grid_frames[0])
+    # Aggregate 15-min frames into hourly (or configured cadence) per-cell max.
+    # Each output frame cell = max ppb seen in that hour → operationally the
+    # right view for a hazard animation (captures transient peaks).
+    animation_frames = aggregate_grid_frames_max(
+        grid_frames,
+        source_cadence_minutes=config.cadence_minutes,
+        target_cadence_minutes=config.animation_cadence_minutes,
+    )
+    log.info(
+        f"Aggregated {len(grid_frames)} source frames ({config.cadence_minutes}min) "
+        f"→ {len(animation_frames)} animation frames ({config.animation_cadence_minutes}min, per-cell max)"
+    )
+
+    # Upload current-bucket grid (first aggregated frame = max over first hour)
+    if animation_frames:
+        first_frame_json = json.dumps(animation_frames[0])
         s3.putFile(first_frame_json.encode(), path=DISPERSION_FORWARD_GRID_LATEST_PATH, content_type="application/json")
         grid_versioned = DISPERSION_FORWARD_GRID_PATH.format(run_tag=run_tag)
         s3.putFile(first_frame_json.encode(), path=grid_versioned, content_type="application/json")
-        log.info(f"Uploaded grid (current hour) → {DISPERSION_FORWARD_GRID_LATEST_PATH}")
+        log.info(f"Uploaded grid (first-bucket max) → {DISPERSION_FORWARD_GRID_LATEST_PATH}")
 
-    # Upload multi-frame (all hours) for animation — select every 6th hour to keep size manageable
-    frame_indices = list(range(0, len(grid_frames), 6))
-    if frame_indices[-1] != len(grid_frames) - 1:
-        frame_indices.append(len(grid_frames) - 1)
-    animation_frames = [grid_frames[i] for i in frame_indices]
     animation_payload = {
         "forecast_start": str(start_time),
         "n_frames": len(animation_frames),
-        "frame_interval_hours": 6,
+        "frame_interval_minutes": config.animation_cadence_minutes,
+        "source_cadence_minutes": config.cadence_minutes,
+        "aggregation": "max",
+        "forecast_hours": config.forecast_hours,
         "emission_rates_g_s": {k: float(v) for k, v in emission_rates.items()},
         "frames": animation_frames,
     }
@@ -697,12 +721,12 @@ def gaussian_forward_forecast(
     date_str = pd.Timestamp.utcnow().strftime("%Y%m%d_%H")
     log.info("Generating visualizations (heatmap + source map + timeseries)")
 
-    # 1. Concentration heatmap (current hour)
+    # 1. Concentration heatmap (first bucket, per-cell max over the hour)
     heatmap_path = "n/a"
-    if grid_frames:
+    if animation_frames:
         heatmap_buf = generate_concentration_heatmap(
-            grid_frames[0],
-            title="H2S Concentration Forecast (3-source model)",
+            animation_frames[0],
+            title="H2S Concentration Forecast (3-source model, hourly max)",
             vmax=100.0,
             bounds=VIZ_BOUNDS,
         )
@@ -759,16 +783,16 @@ def gaussian_forward_forecast(
     required_resource_keys={"s3"},
     kinds={"python", "s3"},
     description=(
-        "72h Gaussian plume forward forecast using 16 INDIVIDUAL candidate sources "
-        "(vs 3-zone aggregate model). Provides spatially accurate concentration fields "
-        "for regional hazard mapping. ~5× slower than coarse model."
+        "24h Gaussian plume forward forecast at 15-min cadence using 16 INDIVIDUAL "
+        "candidate sources (vs 3-zone aggregate model). Provides spatially accurate "
+        "concentration fields for regional hazard mapping. ~5× slower than coarse model."
     ),
     deps=[dg.AssetKey(["h2s", "emission_rate_inversion"])],
     metadata={
         "description": (
-            "72h Gaussian plume forward forecast using 16 INDIVIDUAL candidate sources "
-            "(vs 3-zone aggregate model). Provides spatially accurate concentration fields "
-            "for regional hazard mapping. ~5× slower than coarse model."
+            "24h Gaussian plume forward forecast at 15-min cadence using 16 INDIVIDUAL "
+            "candidate sources (vs 3-zone aggregate model). Provides spatially accurate "
+            "concentration fields for regional hazard mapping. ~5× slower than coarse model."
         )
     },
 )
@@ -779,9 +803,9 @@ def gaussian_forward_forecast_detailed(
     log = context.log
     s3 = context.resources.s3
 
-    # Load FORECAST meteorology (not obs data)
-    log.info(f"Loading forecast met data from S3: {FORECAST_DATA_PATH}")
-    url = s3.get_presigned_url(FORECAST_DATA_PATH)
+    # Load FORECAST meteorology at 15-min cadence (not obs data)
+    log.info(f"Loading 15-min forecast met data from S3: {FORECAST_DATA_15MIN_PATH}")
+    url = s3.get_presigned_url(FORECAST_DATA_15MIN_PATH)
     fc_df = pd.read_parquet(url)
     fc_df["time"] = pd.to_datetime(fc_df["time"], utc=True).dt.tz_convert("America/Los_Angeles")
     log.info(f"Loaded {len(fc_df)} forecast rows, time range: {fc_df['time'].min()} → {fc_df['time'].max()}")
@@ -851,16 +875,18 @@ def gaussian_forward_forecast_detailed(
 
     start_time = fc_df["time"].min()
     log.info(
-        f"Running detailed Gaussian forward ({source_mode}): "
-        f"start={start_time}, hours={config.forecast_hours}"
+        f"Running detailed Gaussian forward ({source_mode}): start={start_time}, "
+        f"hours={config.forecast_hours}, cadence={config.cadence_minutes}min"
     )
     if q_field_rows:
         result = run_forward_model_from_Q_field(
             fc_df, q_field_rows, start_time, config.forecast_hours,
+            cadence_minutes=config.cadence_minutes,
         )
     else:
         result = run_forward_model_detailed(
             fc_df, emission_rates_per_source, start_time, config.forecast_hours,
+            cadence_minutes=config.cadence_minutes,
         )
 
     # Compute per-sensor peaks (ignoring NaN)
@@ -879,37 +905,46 @@ def gaussian_forward_forecast_detailed(
 
     # --- GeoDemic-compatible grid output (prefers channel Q field when present) ---
     log.info(
-        f"Generating detailed gridded forward forecast ({source_mode}, GeoDemic GridData format)"
+        f"Generating detailed gridded forward forecast ({source_mode}, GeoDemic GridData format, "
+        f"cadence={config.cadence_minutes}min)"
     )
     if q_field_rows:
         grid_frames = run_forward_model_gridded_from_Q_field(
             fc_df, q_field_rows, start_time, config.forecast_hours,
+            cadence_minutes=config.cadence_minutes,
         )
     else:
         grid_frames = run_forward_model_gridded_detailed(
             fc_df, emission_rates_per_source, start_time, config.forecast_hours,
+            cadence_minutes=config.cadence_minutes,
         )
 
-    # Upload current-hour grid (first frame)
-    if grid_frames:
-        first_frame_json = json.dumps(grid_frames[0])
+    # Aggregate 15-min frames into hourly (or configured cadence) per-cell max.
+    animation_frames = aggregate_grid_frames_max(
+        grid_frames,
+        source_cadence_minutes=config.cadence_minutes,
+        target_cadence_minutes=config.animation_cadence_minutes,
+    )
+    log.info(
+        f"Aggregated {len(grid_frames)} source frames ({config.cadence_minutes}min) "
+        f"→ {len(animation_frames)} animation frames ({config.animation_cadence_minutes}min, per-cell max)"
+    )
+
+    # Upload current-bucket grid (first aggregated frame = max over first hour)
+    if animation_frames:
+        first_frame_json = json.dumps(animation_frames[0])
         s3.putFile(first_frame_json.encode(), path=DISPERSION_FORWARD_GRID_DETAILED_LATEST_PATH, content_type="application/json")
         grid_versioned = DISPERSION_FORWARD_GRID_DETAILED_PATH.format(run_tag=run_tag)
         s3.putFile(first_frame_json.encode(), path=grid_versioned, content_type="application/json")
-        log.info(f"Uploaded detailed grid (current hour) → {DISPERSION_FORWARD_GRID_DETAILED_LATEST_PATH}")
+        log.info(f"Uploaded detailed grid (first-bucket max) → {DISPERSION_FORWARD_GRID_DETAILED_LATEST_PATH}")
 
-    # Upload multi-frame (all hours) for animation — select every 6th hour to keep size manageable
-    frame_indices = list(range(0, len(grid_frames), 6))
-    if frame_indices[-1] != len(grid_frames) - 1:
-        frame_indices.append(len(grid_frames) - 1)
-    animation_frames = [grid_frames[i] for i in frame_indices]
     if q_field_rows:
         active_segments = [r for r in q_field_rows if float(r.get("Q_g_s", 0.0)) >= 1e-3]
         source_summary = {
-            "mode":             "channel_Q_field",
-            "n_segments_total": len(q_field_rows),
+            "mode":              "channel_Q_field",
+            "n_segments_total":  len(q_field_rows),
             "n_segments_active": len(active_segments),
-            "total_Q_g_s":      round(sum(float(r["Q_g_s"]) for r in active_segments), 2),
+            "total_Q_g_s":       round(sum(float(r["Q_g_s"]) for r in active_segments), 2),
         }
     else:
         source_summary = {
@@ -920,11 +955,14 @@ def gaussian_forward_forecast_detailed(
             },
         }
     animation_payload = {
-        "forecast_start":       str(start_time),
-        "n_frames":             len(animation_frames),
-        "frame_interval_hours": 6,
-        "source_summary":       source_summary,
-        "frames":               animation_frames,
+        "forecast_start":         str(start_time),
+        "n_frames":               len(animation_frames),
+        "frame_interval_minutes": config.animation_cadence_minutes,
+        "source_cadence_minutes": config.cadence_minutes,
+        "aggregation":            "max",
+        "forecast_hours":         config.forecast_hours,
+        "source_summary":         source_summary,
+        "frames":                 animation_frames,
     }
     frames_json = json.dumps(animation_payload)
     s3.putFile(frames_json.encode(), path=DISPERSION_FORWARD_GRID_FRAMES_DETAILED_LATEST_PATH, content_type="application/json")
@@ -937,12 +975,12 @@ def gaussian_forward_forecast_detailed(
     date_str = pd.Timestamp.utcnow().strftime("%Y%m%d_%H")
     log.info("Generating detailed visualizations (heatmap + timeseries)")
 
-    # 1. Concentration heatmap (current hour)
+    # 1. Concentration heatmap (first bucket, per-cell max over the hour)
     heatmap_path = "n/a"
-    if grid_frames:
+    if animation_frames:
         heatmap_buf = generate_concentration_heatmap(
-            grid_frames[0],
-            title="H2S Concentration Forecast (16-source detailed model)",
+            animation_frames[0],
+            title="H2S Concentration Forecast (16-source detailed model, hourly max)",
             vmax=100.0,
             bounds=VIZ_BOUNDS,
         )
@@ -1048,15 +1086,29 @@ def dispersion_alert_check(context: dg.AssetExecutionContext) -> dg.MaterializeR
 
     watch_ppb    = ALERT_TIERS["watch"]["threshold"]
     critical_ppb = ALERT_TIERS["critical"]["threshold"]
-    lookahead_h  = 6
+    lookahead_hours = 6
     alerts_triggered = []
+
+    # Derive the forecast start from either forecast's metadata so the lookahead
+    # cutoff works regardless of forecast cadence (hourly or 15-min).
+    start_time_str = (
+        next(iter(forecasts.values())).get("metadata", {}).get("start_time")
+    )
+    if start_time_str:
+        forecast_start = pd.to_datetime(start_time_str, utc=True)
+    else:
+        forecast_start = pd.Timestamp.utcnow()
+    alert_cutoff = forecast_start + pd.Timedelta(hours=lookahead_hours)
 
     # Merge both forecasts: for each (sensor, time) keep the max ppb across models
     # key: (sensor_name, time_str) → {"predicted_ppb": float, "model": str}
     merged: dict[tuple[str, str], dict] = {}
     for label, forecast in forecasts.items():
         for sensor_name, series in forecast.get("timeseries", {}).items():
-            for entry in series[:lookahead_h]:
+            for entry in series:
+                entry_time = pd.to_datetime(entry["time"], utc=True)
+                if entry_time > alert_cutoff:
+                    break
                 ppb = entry.get("predicted_ppb") or 0
                 key = (sensor_name, entry["time"])
                 if key not in merged or ppb > merged[key]["predicted_ppb"]:
@@ -1074,8 +1126,8 @@ def dispersion_alert_check(context: dg.AssetExecutionContext) -> dg.MaterializeR
                                       "time": time_str, "predicted_ppb": ppb, "model": model})
 
     alerts_triggered.sort(key=lambda a: -a["predicted_ppb"])
-    log.info(f"Dispersion alert check: {len(alerts_triggered)} threshold crossings in next {lookahead_h}h "
-             f"(models checked: {list(forecasts.keys())})")
+    log.info(f"Dispersion alert check: {len(alerts_triggered)} threshold crossings in next {lookahead_hours}h "
+             f"(models checked: {list(forecasts.keys())}, entries merged: {len(merged)})")
 
     # Build public URLs for viz assets (same date_str used by forecast assets)
     date_str = pd.Timestamp.utcnow().strftime("%Y%m%d_%H")
@@ -1115,8 +1167,7 @@ def dispersion_alert_check(context: dg.AssetExecutionContext) -> dg.MaterializeR
         lines = [f"• {a['sensor']}: {a['predicted_ppb']:.1f} ppb @ {a['time']}" for a in alerts_triggered[:5]]
         msg = (
             f":warning: *Dispersion model alert — {tier_label}*\n"
-            f"Gaussian plume forward model predicts elevated H₂S in next {lookahead_h}h:\n"
-            f"Gaussian plume forward model predicts elevated H₂S in next {lookahead_h}h "
+            f"Gaussian plume forward model predicts elevated H₂S in next {lookahead_hours}h "
             f"_(models: {models_used})_:\n"
             + "\n".join(lines)
             + f"\n_Emission rates: {emission_rates} g/s_"
@@ -1137,7 +1188,7 @@ def dispersion_alert_check(context: dg.AssetExecutionContext) -> dg.MaterializeR
         "sensors_affected": dg.MetadataValue.text(
             ", ".join({a["sensor"] for a in alerts_triggered}) if alerts_triggered else "none"
         ),
-        "lookahead_hours":  dg.MetadataValue.int(lookahead_h),
+        "lookahead_hours":  dg.MetadataValue.int(lookahead_hours),
         "models_checked":   dg.MetadataValue.text(", ".join(forecasts.keys())),
     })
 

@@ -6,7 +6,7 @@ Runs daily at 14:00 UTC (6 AM PST).
 Assets:
   1. multi_station_model_artifacts — Load all 9 per-station models from S3
   2. source_attribution            — Last 7 days attribution via wind bearing + Gaussian plume
-  3. daily_station_forecasts       — 48h forward prediction per station
+  3. daily_station_forecasts       — 24h forward prediction per station
   4. daily_dashboard_viz           — 5-row PNG dashboard
   5. daily_summary_json            — JSON summary for web dashboards
 """
@@ -336,7 +336,7 @@ def source_attribution(context: dg.AssetExecutionContext) -> pd.DataFrame:
 
 
 # ==============================================================================
-# Asset 3: 48-hour station forecasts
+# Asset 3: 24-hour station forecasts
 # ==============================================================================
 
 @dg.asset(
@@ -344,20 +344,20 @@ def source_attribution(context: dg.AssetExecutionContext) -> pd.DataFrame:
     group_name="h2s_daily",
     required_resource_keys={"s3"},
     kinds={"python", "ml"},
-    description="48-hour H2S forecast per station using per-station regression + classifier models",
+    description="24-hour H2S forecast per station using per-station regression + classifier models",
     ins={
         "multi_station_model_artifacts": dg.AssetIn(key=_KEY("multi_station_model_artifacts")),
     },
     config_schema={
         "obs_bucket": dg.Field(str, default_value="resilentpublic"),
-        "forecast_hours": dg.Field(int, default_value=48),
+        "forecast_hours": dg.Field(int, default_value=24),
     },
 )
 def daily_station_forecasts(
     context: dg.AssetExecutionContext,
     multi_station_model_artifacts: dict,
 ) -> pd.DataFrame:
-    """Run 48h per-station forecasts using loaded per-station models.
+    """Run 24h per-station forecasts using loaded per-station models.
 
     Loads recent observations for lag state initialization, then applies
     the regression + classifier models to the environmental forecast data.
@@ -573,7 +573,7 @@ def daily_dashboard_viz(
     fig.suptitle(f'H₂S Daily Analysis & Forecast Dashboard\n{run_str}',
                  fontsize=16, fontweight='bold', color='white', y=0.99)
 
-    fc48 = (fc_df[fc_df['time'] <= fc_df['time'].min() + pd.Timedelta(hours=48)]
+    fc48 = (fc_df[fc_df['time'] <= fc_df['time'].min() + pd.Timedelta(hours=24)]
             if len(fc_df) > 0 else pd.DataFrame())
 
     # Row 0: Summary cards
@@ -798,7 +798,7 @@ def _compute_source_probability_grid(obs_df: pd.DataFrame):
     group_name="h2s_daily",
     required_resource_keys={"s3", "slack"},
     kinds={"json", "s3", "slack"},
-    description="JSON summary for web dashboards (station stats, 48h rollup, active sources)",
+    description="JSON summary for web dashboards (station stats, 24h rollup, active sources)",
     ins={
         "source_attribution": dg.AssetIn(key=_KEY("source_attribution")),
         "daily_station_forecasts": dg.AssetIn(key=_KEY("daily_station_forecasts")),
@@ -835,7 +835,7 @@ def daily_summary_json(
     summary = {
         'generated_at': datetime.now(timezone.utc).isoformat(),
         'stations': {},
-        'forecast_48h': {},
+        'forecast_24h': {},
         'active_sources': {},
     }
 
@@ -854,16 +854,16 @@ def daily_summary_json(
             'pct_exceed_5': round(float((ss['H2S'] > 5).mean() * 100), 1),
         }
 
-    # Forecast 48h summary
+    # Forecast 24h summary
     if len(fc_df) > 0:
-        t48 = fc_df['time'].min() + pd.Timedelta(hours=48)
-        fc48 = fc_df[fc_df['time'] <= t48]
+        t24 = fc_df['time'].min() + pd.Timedelta(hours=24)
+        fc24 = fc_df[fc_df['time'] <= t24]
         for site, info in STATIONS.items():
-            sf = fc48[fc48['station'] == site]
+            sf = fc24[fc24['station'] == site]
             if len(sf) == 0:
                 continue
             risk_counts = sf['risk'].value_counts().to_dict()
-            summary['forecast_48h'][info['short']] = {
+            summary['forecast_24h'][info['short']] = {
                 'max_h2s': round(float(sf['h2s_pred'].max()), 1),
                 'max_prob_5': round(float(sf['prob_5'].max()), 1),
                 'max_prob_10': round(float(sf['prob_10'].max()), 1),
@@ -913,7 +913,7 @@ def daily_summary_json(
     # --- Slack summary ---
     station_fields = []
     for short, stats in summary.get('stations', {}).items():
-        fc = summary.get('forecast_48h', {}).get(short, {})
+        fc = summary.get('forecast_24h', {}).get(short, {})
         hours_orange = fc.get('hours_orange', 0)
         hours_yellow = fc.get('hours_yellow_high', 0) + fc.get('hours_yellow_low', 0)
         risk_icon = "🟠" if hours_orange > 0 else ("🟡" if hours_yellow > 0 else "🟢")
@@ -923,7 +923,7 @@ def daily_summary_json(
                 f"*{risk_icon} {stats.get('name', short)}*\n"
                 f"Now: {stats.get('last_h2s', 'N/A')} ppb | "
                 f"24h max: {stats.get('max_24h', 'N/A')} ppb\n"
-                f"48h forecast: {fc.get('max_h2s', 'N/A')} ppb max "
+                f"24h forecast: {fc.get('max_h2s', 'N/A')} ppb max "
                 f"({hours_orange}h orange, {hours_yellow}h yellow)"
             ),
         })
@@ -987,7 +987,7 @@ def daily_summary_json(
 
 daily_analysis_job = dg.define_asset_job(
     name="daily_analysis_job",
-    description="Run daily H2S source attribution + 48h forecast + dashboard + JSON summary",
+    description="Run daily H2S source attribution + 24h forecast + dashboard + JSON summary",
     selection=dg.AssetSelection.assets(
         multi_station_model_artifacts,
         source_attribution,

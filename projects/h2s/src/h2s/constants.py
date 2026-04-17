@@ -33,6 +33,7 @@ MH_OUTPUT_PATH = 'tijuana/forecast/multihorizon'
 # Pre-featurized data paths
 OBS_DATA_PATH = 'latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet'
 FORECAST_DATA_PATH = 'latest/tijuana/forecast_data/model_forecast.parquet'
+FORECAST_DATA_15MIN_PATH = 'latest/tijuana/forecast_data/modeldata_forecast_15min.parquet'
 
 # Canonical class ordering (matches XGBoost LabelEncoder: alphabetical)
 H2S_CLASS_NAMES = ['green', 'orange', 'yellow']
@@ -115,6 +116,7 @@ H2S_THRESHOLD_HIGH = 30  # ppb — yellow_high / orange boundary
 PROB_5_CAUTION = 0.25
 PROB_5_ALERT = 0.5
 PROB_10_ALERT = 0.5
+PROB_30_ALERT = 0.35  # p(H2S>30ppb) threshold to trigger ORANGE (used by MH pipeline)
 
 
 
@@ -180,15 +182,20 @@ APCD_SITE_TO_STATION = {
 }
 
 
-def classify_risk(prob_5: float, prob_10: float, h2s_pred: float) -> str:
+def classify_risk(prob_5: float, prob_10: float, h2s_pred: float, prob_30: float = 0.0) -> str:
     """Assign risk tier from predictions (SD County guidance).
 
     GREEN:       H2S < 5 ppb
     YELLOW_LOW:  5 <= H2S < 10 ppb
     YELLOW_HIGH: 10 <= H2S < 30 ppb
     ORANGE:      H2S >= 30 ppb
+
+    When prob_30 is provided (MH pipeline with clf_30ppb model), it drives the
+    ORANGE decision instead of prob_10.  Callers without prob_30 (hourly pipeline)
+    leave it at the default 0.0 and the original prob_10 logic is used unchanged.
     """
-    if prob_10 > PROB_10_ALERT or h2s_pred > H2S_THRESHOLD_HIGH:
+    orange_by_prob = (prob_30 > PROB_30_ALERT) if prob_30 > 0.0 else (prob_10 > PROB_10_ALERT)
+    if orange_by_prob or h2s_pred > H2S_THRESHOLD_HIGH:
         return RISK_ORANGE
     elif prob_5 > PROB_5_ALERT or h2s_pred > H2S_THRESHOLD_MED:
         return RISK_YELLOW_HIGH
