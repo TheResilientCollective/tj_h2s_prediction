@@ -87,6 +87,12 @@ from h2s.defs.h2s_dispersion_pipeline import (
 )
 from h2s.defs.h2s_river_emissions_pipeline import river_emission_grid
 
+from h2s.defs.h2s_calibration_pipeline import (
+    rolling_footprint_matrix,
+    channel_emission_inversion,
+    calibration_diagnostics,
+)
+
 # ============================================================================
 # JOB 1: Monthly Data Extraction (monthly partitioned)
 # ============================================================================
@@ -630,4 +636,54 @@ def dispersion_forecast_schedule(context: dg.ScheduleEvaluationContext):
     """Trigger 6-hourly dispersion forward forecast using current forecast meteorology."""
     return dg.RunRequest(
         run_key=f"dispersion_forecast_{context.scheduled_execution_time.strftime('%Y-%m-%d_%H')}",
+    )
+
+
+# ============================================================================
+# JOB 11: Nightly Rolling Emissions Calibration
+# ============================================================================
+#
+# Stacks per-sensor × per-timestep Lagrangian footprints from a 7-day window
+# of qualifying events (≥ 30 ppb, stable BL), runs channel-snapped NNLS, and
+# writes Q_field_latest.parquet that dispersion_forecast_job reads on next
+# cycle. Diagnostic gates (leave-one-sensor-out CV + Σ Q budget) are
+# published alongside the Q field but do not fail the job — downstream
+# consumers decide whether to fall back to EMISSION_RATES_PATH.
+#
+# Starts STOPPED. Enable after first backfill passes diagnostics.
+# ============================================================================
+
+emissions_calibration_job = dg.define_asset_job(
+    name="emissions_calibration_job",
+    description=(
+        "Nightly rolling-window channel-snapped emission calibration. "
+        "Produces Q_field_latest.parquet (100-segment g/s field along the "
+        "Tijuana River main stem + tributaries) plus CV diagnostics. "
+        "gaussian_forward_forecast_detailed prefers this Q field over "
+        "EMISSION_RATES_PATH when present."
+    ),
+    selection=dg.AssetSelection.assets(
+        rolling_footprint_matrix,
+        channel_emission_inversion,
+        calibration_diagnostics,
+    ),
+    tags={"environment": "production", "pipeline": "h2s_calibration"},
+)
+
+
+# ============================================================================
+# SCHEDULE 11: Nightly emissions calibration (09:00 UTC = 1 AM PST)
+# ============================================================================
+
+@dg.schedule(
+    job=emissions_calibration_job,
+    cron_schedule="0 9 * * *",
+    description="Nightly rolling emissions calibration (09:00 UTC / 1 AM PST)",
+    default_status=dg.DefaultScheduleStatus.STOPPED,
+    tags={"environment": "production", "schedule_type": "emissions_calibration"},
+)
+def emissions_calibration_schedule(context: dg.ScheduleEvaluationContext):
+    """Re-invert the rolling 7-day Q field every night."""
+    return dg.RunRequest(
+        run_key=f"emissions_calibration_{context.scheduled_execution_time.strftime('%Y-%m-%d')}",
     )

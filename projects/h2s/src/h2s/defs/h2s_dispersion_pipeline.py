@@ -55,6 +55,7 @@ from h2s.constants import (
     LAGRANGIAN_ENSEMBLE_PATH,
     LAGRANGIAN_FOOTPRINT_PATH,
     OBS_DATA_PATH, LAGRANGIAN_FOOTPRINT_NAME,
+    Q_FIELD_LATEST_PATH,
 )
 from h2s.dispersion import (
     LagrangianConfig,
@@ -66,6 +67,10 @@ from h2s.dispersion import (
     footprint_to_grid_data,
     run_inversion_window,
     source_attribution,
+)
+from h2s.dispersion.gaussian import (
+    run_forward_model_from_Q_field,
+    run_forward_model_gridded_from_Q_field,
 )
 from h2s.dispersion.visualizations import (
     generate_concentration_heatmap,
@@ -790,39 +795,73 @@ def gaussian_forward_forecast_detailed(
             fc_df["is_night"] = ((utc_h < 6) | (utc_h >= 20)).astype(int)
             log.warning("is_night derived from hour (UTC < 6 or >= 20) — no day_night column found")
 
-    # Load per-source emission rates
+    # Prefer channel-snapped Q field (if present) over 16-source inverted rates.
+    # Q field is written by channel_emission_inversion (h2s_calibration_pipeline);
+    # absence is normal before the first calibration run.
+    q_field_rows: list[dict] = []
+    source_mode = "per_source_16"  # default
     try:
-        rates_bytes = s3.getFile(EMISSION_RATES_PATH)
-        rates_data = json.loads(rates_bytes)
-        emission_rates_per_source = rates_data.get("emission_rates_per_source_g_s", {})
-        rates_method = rates_data.get("method", "unknown")
+        q_parquet_bytes = s3.getFile(Q_FIELD_LATEST_PATH)
+        q_df = pd.read_parquet(io.BytesIO(q_parquet_bytes))
+        q_field_rows = q_df.to_dict(orient="records")
+        active = [r for r in q_field_rows if float(r.get("Q_g_s", 0.0)) >= 1e-3]
+        q_total = sum(float(r["Q_g_s"]) for r in active)
+        source_mode = "channel_Q_field"
+        log.info(
+            f"Q field source mode ({len(active)} active / {len(q_field_rows)} segments, "
+            f"Σ Q = {q_total:.1f} g/s) — from {Q_FIELD_LATEST_PATH}"
+        )
+    except Exception as e:
+        log.info(f"No channel Q field available ({e}) — falling back to 16-source rates")
+        q_field_rows = []
 
-        if not emission_rates_per_source:
-            log.warning("No per-source rates in emission_rates.json — falling back to zone-based defaults")
-            # Distribute zone rates evenly across sources
-            zone_rates = rates_data.get("emission_rates_g_s", DISPERSION_DEFAULT_EMISSION_RATES_GS)
+    if q_field_rows:
+        emission_rates_per_source = {}  # unused when Q field is active
+        rates_method = "channel_Q_field"
+    else:
+        # Load per-source emission rates
+        try:
+            rates_bytes = s3.getFile(EMISSION_RATES_PATH)
+            rates_data = json.loads(rates_bytes)
+            emission_rates_per_source = rates_data.get("emission_rates_per_source_g_s", {})
+            rates_method = rates_data.get("method", "unknown")
+
+            if not emission_rates_per_source:
+                log.warning("No per-source rates in emission_rates.json — falling back to zone-based defaults")
+                # Distribute zone rates evenly across sources
+                zone_rates = rates_data.get("emission_rates_g_s", DISPERSION_DEFAULT_EMISSION_RATES_GS)
+                emission_rates_per_source = {}
+                for zone, sources in _ZONE_MAP.items():
+                    zone_q = zone_rates.get(zone, 0.0)
+                    per_source = zone_q / len(sources) if len(sources) > 0 else 0.0
+                    for src in sources:
+                        emission_rates_per_source[src] = round(per_source, 2)
+
+            log.info(f"Using {len(emission_rates_per_source)} source emission rates (method={rates_method})")
+            top_5 = dict(sorted(emission_rates_per_source.items(), key=lambda x: -x[1])[:5])
+            log.info(f"Top 5 sources: {top_5}")
+        except Exception as e:
+            log.warning(f"Could not load emission rates ({e}) — distributing defaults across 16 sources")
             emission_rates_per_source = {}
             for zone, sources in _ZONE_MAP.items():
-                zone_q = zone_rates.get(zone, 0.0)
+                zone_q = DISPERSION_DEFAULT_EMISSION_RATES_GS[zone]
                 per_source = zone_q / len(sources) if len(sources) > 0 else 0.0
                 for src in sources:
                     emission_rates_per_source[src] = round(per_source, 2)
 
-        log.info(f"Using {len(emission_rates_per_source)} source emission rates (method={rates_method})")
-        top_5 = dict(sorted(emission_rates_per_source.items(), key=lambda x: -x[1])[:5])
-        log.info(f"Top 5 sources: {top_5}")
-    except Exception as e:
-        log.warning(f"Could not load emission rates ({e}) — distributing defaults across 16 sources")
-        emission_rates_per_source = {}
-        for zone, sources in _ZONE_MAP.items():
-            zone_q = DISPERSION_DEFAULT_EMISSION_RATES_GS[zone]
-            per_source = zone_q / len(sources) if len(sources) > 0 else 0.0
-            for src in sources:
-                emission_rates_per_source[src] = round(per_source, 2)
-
     start_time = fc_df["time"].min()
-    log.info(f"Running detailed Gaussian forward (16 sources): start={start_time}, hours={config.forecast_hours}")
-    result = run_forward_model_detailed(fc_df, emission_rates_per_source, start_time, config.forecast_hours)
+    log.info(
+        f"Running detailed Gaussian forward ({source_mode}): "
+        f"start={start_time}, hours={config.forecast_hours}"
+    )
+    if q_field_rows:
+        result = run_forward_model_from_Q_field(
+            fc_df, q_field_rows, start_time, config.forecast_hours,
+        )
+    else:
+        result = run_forward_model_detailed(
+            fc_df, emission_rates_per_source, start_time, config.forecast_hours,
+        )
 
     # Compute per-sensor peaks (ignoring NaN)
     peaks = {}
@@ -838,11 +877,18 @@ def gaussian_forward_forecast_detailed(
     s3.putFile(forecast_json.encode(), path=DISPERSION_FORECAST_DETAILED_LATEST_PATH, content_type="application/json")
     log.info(f"Uploaded detailed sensor forecast → {versioned_path}")
 
-    # --- GeoDemic-compatible grid output (16-source version) ---
-    log.info("Generating detailed gridded forward forecast (16 sources, GeoDemic GridData format)")
-    grid_frames = run_forward_model_gridded_detailed(
-        fc_df, emission_rates_per_source, start_time, config.forecast_hours,
+    # --- GeoDemic-compatible grid output (prefers channel Q field when present) ---
+    log.info(
+        f"Generating detailed gridded forward forecast ({source_mode}, GeoDemic GridData format)"
     )
+    if q_field_rows:
+        grid_frames = run_forward_model_gridded_from_Q_field(
+            fc_df, q_field_rows, start_time, config.forecast_hours,
+        )
+    else:
+        grid_frames = run_forward_model_gridded_detailed(
+            fc_df, emission_rates_per_source, start_time, config.forecast_hours,
+        )
 
     # Upload current-hour grid (first frame)
     if grid_frames:
@@ -857,13 +903,28 @@ def gaussian_forward_forecast_detailed(
     if frame_indices[-1] != len(grid_frames) - 1:
         frame_indices.append(len(grid_frames) - 1)
     animation_frames = [grid_frames[i] for i in frame_indices]
+    if q_field_rows:
+        active_segments = [r for r in q_field_rows if float(r.get("Q_g_s", 0.0)) >= 1e-3]
+        source_summary = {
+            "mode":             "channel_Q_field",
+            "n_segments_total": len(q_field_rows),
+            "n_segments_active": len(active_segments),
+            "total_Q_g_s":      round(sum(float(r["Q_g_s"]) for r in active_segments), 2),
+        }
+    else:
+        source_summary = {
+            "mode":      "per_source_16",
+            "n_sources": 16,
+            "emission_rates_per_source_g_s": {
+                k: float(v) for k, v in emission_rates_per_source.items() if v > 0
+            },
+        }
     animation_payload = {
-        "forecast_start": str(start_time),
-        "n_frames": len(animation_frames),
+        "forecast_start":       str(start_time),
+        "n_frames":             len(animation_frames),
         "frame_interval_hours": 6,
-        "n_sources": 16,
-        "emission_rates_per_source_g_s": {k: float(v) for k, v in emission_rates_per_source.items() if v > 0},
-        "frames": animation_frames,
+        "source_summary":       source_summary,
+        "frames":               animation_frames,
     }
     frames_json = json.dumps(animation_payload)
     s3.putFile(frames_json.encode(), path=DISPERSION_FORWARD_GRID_FRAMES_DETAILED_LATEST_PATH, content_type="application/json")
@@ -889,12 +950,26 @@ def gaussian_forward_forecast_detailed(
         s3.putFile(heatmap_buf.getvalue(), path=heatmap_path, content_type="image/png")
         log.info(f"Uploaded detailed heatmap → {heatmap_path}")
 
-    # 2. Source emission map (16 candidate sources)
+    # 2. Source emission map — channel Q field when available, else 16 candidates
+    if q_field_rows:
+        viz_sources = {}
+        viz_rates: dict[str, float] = {}
+        for r in q_field_rows:
+            if float(r.get("Q_g_s", 0.0)) < 1e-3:
+                continue
+            key = f"seg_{int(r['segment_idx']):03d}"
+            viz_sources[key] = {"lat": float(r["lat"]), "lon": float(r["lon"]), "name": key}
+            viz_rates[key] = float(r["Q_g_s"])
+        viz_title = f"H2S Source Emission Rates (channel Q field, {len(viz_sources)} active segments)"
+    else:
+        viz_sources = CANDIDATE_SOURCES
+        viz_rates = emission_rates_per_source
+        viz_title = "H2S Source Emission Rates (16-source detailed model)"
     source_map_buf = generate_source_emission_map(
-        CANDIDATE_SOURCES,
-        emission_rates_per_source,
+        viz_sources,
+        viz_rates,
         sensors=SENSORS,
-        title="H2S Source Emission Rates (16-source detailed model)",
+        title=viz_title,
         bounds=VIZ_BOUNDS,
     )
     source_map_path = DISPERSION_VIZ_SOURCE_MAP_DETAILED_PATH.format(date_str=date_str)
@@ -910,10 +985,16 @@ def gaussian_forward_forecast_detailed(
     s3.putFile(timeseries_buf.getvalue(), path=timeseries_path, content_type="image/png")
     log.info(f"Uploaded detailed timeseries → {timeseries_path}")
 
+    n_sources_used = (
+        sum(1 for r in q_field_rows if float(r.get("Q_g_s", 0.0)) >= 1e-3)
+        if q_field_rows else len(CANDIDATE_SOURCES)
+    )
     return dg.MaterializeResult(metadata={
+        "source_mode":       dg.MetadataValue.text(source_mode),
+        "rates_method":      dg.MetadataValue.text(rates_method),
         "forecast_start":    dg.MetadataValue.text(str(start_time)),
         "forecast_hours":    dg.MetadataValue.int(config.forecast_hours),
-        "n_sources":         dg.MetadataValue.int(16),
+        "n_sources":         dg.MetadataValue.int(int(n_sources_used)),
         "peak_ppb_NB":       dg.MetadataValue.float(float(peaks.get("NESTOR - BES", 0.0))),
         "peak_ppb_IB":       dg.MetadataValue.float(float(peaks.get("IB CIVIC CTR", 0.0))),
         "peak_ppb_SY":       dg.MetadataValue.float(float(peaks.get("SAN YSIDRO", 0.0))),

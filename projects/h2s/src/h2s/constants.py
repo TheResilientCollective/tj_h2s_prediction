@@ -278,6 +278,25 @@ DISPERSION_SOURCE_FOOTPRINT_GRID_LATEST_PATH = f'{LATEST_BASEPATH}/dispersion/so
 # Physics-based river emission grid (Arrhenius model, updated with dispersion forecast)
 RIVER_EMISSION_GRID_LATEST_PATH = f'{LATEST_BASEPATH}/dispersion/river_emission_grid_latest.json'
 
+# ==============================================================================
+# Channel-snapped Emission Calibration (rolling window NNLS inversion)
+# ==============================================================================
+# Outputs of h2s_calibration_pipeline.channel_emission_inversion — Q field
+# along ~100 river-channel segments rather than 3 coarse zones.
+# Versioned paths use .format(run_tag=run_tag).
+
+CALIBRATION_BASE_PATH = 'tijuana/dispersion/calibration'
+
+Q_FIELD_PATH = f'{CALIBRATION_BASE_PATH}/Q_field_{{run_tag}}.parquet'
+Q_FIELD_LATEST_PATH = f'{CALIBRATION_BASE_PATH}/Q_field_latest.parquet'
+Q_FIELD_LATEST_JSON_PATH = f'{CALIBRATION_BASE_PATH}/Q_field_latest.json'
+Q_FIELD_DIAGNOSTICS_PATH = f'{CALIBRATION_BASE_PATH}/inversion_diagnostics_{{run_tag}}.json'
+Q_FIELD_DIAGNOSTICS_LATEST_PATH = f'{CALIBRATION_BASE_PATH}/inversion_diagnostics_latest.json'
+
+# Per-sensor footprint row cache — reused across nightly rebuilds.
+# Key pattern: {S_ROW_CACHE_PREFIX}/{sensor}/{YYYYMMDDHH}.npy
+S_ROW_CACHE_PREFIX = f'{CALIBRATION_BASE_PATH}/S_row_cache'
+
 # Dispersion visualizations (heatmaps + source maps)
 # Versioned paths use .format(date_str=YYYYMMDD_HH)
 DISPERSION_VIZ_HEATMAP_COARSE_PATH = 'tijuana/forecast/dispersion/visualizations/{date_str}/heatmap_coarse.png'
