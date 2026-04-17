@@ -128,6 +128,10 @@ class CalibrationConfig(dg.Config):
     lambda_smooth: float = 0.0
     background_ppb: float = 1.0
 
+    # Gaussian plume sensitivity-matrix geometry
+    gauss_meandering_deg: float = 20.0  # Gifford (1961) wind meandering σ for stable BL;
+                                        # lower values concentrate the plume (raises max_A)
+
     # Diagnostics
     min_rows_for_inversion: int = 9   # ≥ 3 events × 3 sensors before we trust NNLS
 
@@ -181,21 +185,22 @@ def _is_partition_recent(partition_key: Optional[str], max_age_days: int) -> boo
     return (now_utc - end).days <= max_age_days
 
 
-def _load_inversion_config_from_sidecar(
+def _load_inversion_sidecar(
     s3,
     partition_key: Optional[str],
     fallback_cfg: "InversionConfig",
     log,
-) -> "InversionConfig":
-    """Read the InversionConfig used by channel_emission_inversion from its JSON sidecar.
+) -> tuple["InversionConfig", dict]:
+    """Read the Q_field.json sidecar written by channel_emission_inversion.
 
-    The sidecar is the single source of truth so that diagnostics evaluate CV
-    under the exact same regularization as was used to fit Q.  Without this,
-    an operator overriding `lambda_l1` on `calibration_diagnostics` alone (or
-    forgetting to set it there) would silently fit Q under one lambda and
-    evaluate gates under another.
+    Returns (InversionConfig, full_sidecar_payload_dict).  The sidecar is the
+    single source of truth so that diagnostics evaluate CV under the exact
+    same regularization as was used to fit Q.  Without this, an operator
+    overriding `lambda_l1` on `calibration_diagnostics` alone (or forgetting
+    to set it there) would silently fit Q under one lambda and evaluate
+    gates under another.
 
-    Falls back to the op-level config if the sidecar is missing / unparseable
+    Falls back to `(fallback_cfg, {})` if the sidecar is missing / unparseable
     (legacy unpartitioned runs, or the first materialization before
     `channel_emission_inversion` wrote the enriched sidecar).
     """
@@ -213,7 +218,7 @@ def _load_inversion_config_from_sidecar(
             f"Could not read inversion sidecar {sidecar_path} ({exc}); "
             f"diagnostics falling back to op-level config."
         )
-        return fallback_cfg
+        return fallback_cfg, {}
 
     sidecar = payload.get("inversion_config") or {}
     if not sidecar:
@@ -222,7 +227,7 @@ def _load_inversion_config_from_sidecar(
             f"falling back to op-level config. Rerun channel_emission_inversion "
             f"to populate it."
         )
-        return fallback_cfg
+        return fallback_cfg, payload
 
     valid_keys = {f.name for f in fields(InversionConfig)}
     loaded = InversionConfig(**{k: v for k, v in sidecar.items() if k in valid_keys})
@@ -233,7 +238,7 @@ def _load_inversion_config_from_sidecar(
             f"sidecar lambda_l1={loaded.lambda_l1}. Using sidecar (single source "
             f"of truth — set lambda_l1 only on channel_emission_inversion)."
         )
-    return loaded
+    return loaded, payload
 
 
 def _get_event_times(
@@ -596,6 +601,7 @@ def channel_emission_inversion(
         lambda_l1=config.lambda_l1,
         lambda_smooth=config.lambda_smooth,
         background_ppb=config.background_ppb,
+        gauss_meandering_deg=config.gauss_meandering_deg,
     )
 
     n_rows_expected = sum(len(e["footprints"]) for e in events)
@@ -724,13 +730,24 @@ def channel_emission_inversion(
             "per_event":  per_event_sens,
         },
         "inversion_config": asdict(cfg),
-        "config": {
-            "segment_spacing_m": config.segment_spacing_m,
-            "lambda_l1":         config.lambda_l1,
-            "lambda_smooth":     config.lambda_smooth,
-            "window_days":       config.window_days,
+        "footprint_config": {
+            "hours_back":        config.hours_back,
+            "n_particles":       config.n_particles,
             "h2s_threshold_ppb": config.h2s_threshold_ppb,
+            "require_stable":    config.require_stable,
+            "max_events":        config.max_events,
             "min_events_per_week": config.min_events_per_week,
+        },
+        "config": {
+            "segment_spacing_m":    config.segment_spacing_m,
+            "lambda_l1":            config.lambda_l1,
+            "lambda_smooth":        config.lambda_smooth,
+            "gauss_meandering_deg": config.gauss_meandering_deg,
+            "window_days":          config.window_days,
+            "h2s_threshold_ppb":    config.h2s_threshold_ppb,
+            "min_events_per_week":  config.min_events_per_week,
+            "hours_back":           config.hours_back,
+            "n_particles":          config.n_particles,
         },
     }
     json_bytes = json.dumps(json_payload, indent=2).encode()
@@ -811,16 +828,30 @@ def calibration_diagnostics(
         lambda_l1=config.lambda_l1,
         lambda_smooth=config.lambda_smooth,
         background_ppb=config.background_ppb,
+        gauss_meandering_deg=config.gauss_meandering_deg,
     )
     # Pull the exact InversionConfig that channel_emission_inversion used to
-    # fit Q — avoids a CV-under-different-lambda footgun.
-    cfg = _load_inversion_config_from_sidecar(s3, partition_key, fallback_cfg, log)
+    # fit Q — avoids a CV-under-different-lambda footgun.  Also mirrors the
+    # footprint_config block (hours_back, n_particles, ...) from the sidecar
+    # into diagnostics.json so the operator can see every knob that drove
+    # this partition's Q field in one file.
+    cfg, sidecar_payload = _load_inversion_sidecar(s3, partition_key, fallback_cfg, log)
     channel_segments = build_channel_grid(segment_spacing_m=cfg.segment_spacing_m)
+
+    footprint_cfg = sidecar_payload.get("footprint_config") or {
+        "hours_back":           config.hours_back,
+        "n_particles":          config.n_particles,
+        "h2s_threshold_ppb":    config.h2s_threshold_ppb,
+        "require_stable":       config.require_stable,
+        "max_events":           config.max_events,
+        "min_events_per_week":  config.min_events_per_week,
+    }
 
     diagnostics: dict = {
         "timestamp": pd.Timestamp.utcnow().isoformat(),
         "n_events": len(events),
         "inversion_config": asdict(cfg),
+        "footprint_config": footprint_cfg,
         "gates": {},
     }
 

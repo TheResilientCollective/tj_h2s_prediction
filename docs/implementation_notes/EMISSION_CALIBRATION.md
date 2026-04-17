@@ -275,6 +275,7 @@ intentional:
 | `hours_back` | 2.0 | Valley-scale (1-7 km sources, 8-37 min travel). Do not raise without re-validating. |
 | `segment_spacing_m` | 150.0 | Channel grid resolution. 150 m is a compromise between spatial resolution and NNLS conditioning. |
 | `lambda_l1` | 0.3 | L1 sparsity. Raise to suppress ringing; lower if Σ Q collapses. **Only the value set on `channel_emission_inversion` matters** — diagnostics loads the `InversionConfig` from `Q_field.json` so CV runs under the same regularization that fit Q. |
+| `gauss_meandering_deg` | 20.0 | Gifford wind-meandering σ for the forward Gaussian sensitivity matrix. Narrower (10–15°) concentrates the plume and raises `max_A`; wider smears it. Same sidecar-contract rule as `lambda_l1` — set on `channel_emission_inversion`. |
 | `background_ppb` | 1.0 | Subtracted from `C_obs`. Protects against fitting to pure noise. |
 | `min_rows_for_inversion` | 9 | ≥ 3 events × 3 sensors before we trust NNLS. |
 
