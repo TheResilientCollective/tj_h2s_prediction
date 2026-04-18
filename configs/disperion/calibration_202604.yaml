@@ -1,0 +1,9 @@
+# calibration_narrow_plume:
+ops:
+  h2s__channel_emission_inversion:
+    config:
+      lambda_l1: 0.1
+      gauss_meandering_deg: 12.0
+  h2s__rolling_footprint_matrix:
+    config:
+      hours_back: 3.0
