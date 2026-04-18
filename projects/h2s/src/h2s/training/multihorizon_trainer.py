@@ -162,25 +162,29 @@ def build_horizon_features(site_df, horizon_name, horizon_cfg):
     for offset in horizon_cfg['lag_offsets']:
         col = f'h2s_lag_{offset}h'
         df[col] = pd.Series(h2s).shift(offset).values
-        feature_cols.append(col)
+        if col not in feature_cols:
+            feature_cols.append(col)
 
     # Rolling means at horizon-appropriate staleness
     min_offset = min(horizon_cfg['lag_offsets'])
     for window in horizon_cfg['rolling_windows']:
         col = f'h2s_roll_{window}h_at_{min_offset}h'
         df[col] = pd.Series(h2s).shift(min_offset).rolling(window, min_periods=1).mean().values
-        feature_cols.append(col)
+        if col not in feature_cols:
+            feature_cols.append(col)
 
     # Flow lag
     flow_lag = horizon_cfg['flow_lag']
     col = f'flow_lag_{flow_lag}h'
     df[col] = pd.Series(flow).shift(flow_lag).values
-    feature_cols.append(col)
+    if col not in feature_cols:
+        feature_cols.append(col)
 
     # Flow rolling 24h ending at flow_lag
     col = f'flow_roll_24h_at_{flow_lag}h'
     df[col] = pd.Series(flow).shift(flow_lag).rolling(24, min_periods=1).mean().values
-    feature_cols.append(col)
+    if col not in feature_cols:
+        feature_cols.append(col)
 
     # Daily statistics
     if horizon_cfg['use_daily_stats']:
@@ -351,7 +355,8 @@ def build_forecast_features(fc_site, obs_state, hz_name, hz_cfg):
             df[col] = vals
         else:
             df[col] = obs_state['last_h2s'] if len(h2s_hist) > 0 else 0
-        feature_cols.append(col)
+        if col not in feature_cols:
+            feature_cols.append(col)
 
     # Rolling means with decay
     min_offset = min(hz_cfg['lag_offsets'])
@@ -371,17 +376,20 @@ def build_forecast_features(fc_site, obs_state, hz_name, hz_cfg):
                 if len(h2s_hist) >= window
                 else (obs_state['last_h2s'] if len(h2s_hist) > 0 else 0)
             )
-        feature_cols.append(col)
+        if col not in feature_cols:
+            feature_cols.append(col)
 
     # Flow lag (flow changes slowly, persistence is fine)
     flow_lag = hz_cfg['flow_lag']
     col = f'flow_lag_{flow_lag}h'
     df[col] = obs_state['last_flow']
-    feature_cols.append(col)
+    if col not in feature_cols:
+        feature_cols.append(col)
 
     col = f'flow_roll_24h_at_{flow_lag}h'
     df[col] = np.mean(flow_hist[-24:]) if len(flow_hist) >= 24 else obs_state['last_flow']
-    feature_cols.append(col)
+    if col not in feature_cols:
+        feature_cols.append(col)
 
     # Daily stats
     if hz_cfg['use_daily_stats']:
