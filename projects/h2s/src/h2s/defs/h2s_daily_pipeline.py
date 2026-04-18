@@ -6,7 +6,7 @@ Runs daily at 14:00 UTC (6 AM PST).
 Assets:
   1. multi_station_model_artifacts — Load all 9 per-station models from S3
   2. source_attribution            — Last 7 days attribution via wind bearing + Gaussian plume
-  3. daily_station_forecasts       — 48h forward prediction per station
+  3. daily_station_forecasts       — 24h forward prediction per station
   4. daily_dashboard_viz           — 5-row PNG dashboard
   5. daily_summary_json            — JSON summary for web dashboards
 """
@@ -336,7 +336,7 @@ def source_attribution(context: dg.AssetExecutionContext) -> pd.DataFrame:
 
 
 # ==============================================================================
-# Asset 3: 48-hour station forecasts
+# Asset 3: 24-hour station forecasts
 # ==============================================================================
 
 @dg.asset(
@@ -344,7 +344,7 @@ def source_attribution(context: dg.AssetExecutionContext) -> pd.DataFrame:
     group_name="h2s_daily",
     required_resource_keys={"s3"},
     kinds={"python", "ml"},
-    description="48-hour H2S forecast per station using per-station regression + classifier models",
+    description="24-hour H2S forecast per station using per-station regression + classifier models",
     ins={
         "multi_station_model_artifacts": dg.AssetIn(key=_KEY("multi_station_model_artifacts")),
     },
@@ -573,7 +573,7 @@ def daily_dashboard_viz(
     fig.suptitle(f'H₂S Daily Analysis & Forecast Dashboard\n{run_str}',
                  fontsize=16, fontweight='bold', color='white', y=0.99)
 
-    fc48 = (fc_df[fc_df['time'] <= fc_df['time'].min() + pd.Timedelta(hours=48)]
+    fc48 = (fc_df[fc_df['time'] <= fc_df['time'].min() + pd.Timedelta(hours=24)]
             if len(fc_df) > 0 else pd.DataFrame())
 
     # Row 0: Summary cards

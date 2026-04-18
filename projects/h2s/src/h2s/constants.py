@@ -285,6 +285,53 @@ DISPERSION_SOURCE_FOOTPRINT_GRID_LATEST_PATH = f'{LATEST_BASEPATH}/dispersion/so
 # Physics-based river emission grid (Arrhenius model, updated with dispersion forecast)
 RIVER_EMISSION_GRID_LATEST_PATH = f'{LATEST_BASEPATH}/dispersion/river_emission_grid_latest.json'
 
+# ==============================================================================
+# Channel-snapped Emission Calibration (rolling window NNLS inversion)
+# ==============================================================================
+# Outputs of h2s_calibration_pipeline.channel_emission_inversion — Q field
+# along ~100 river-channel segments rather than 3 coarse zones.
+# Versioned paths use .format(run_tag=run_tag).
+
+CALIBRATION_BASE_PATH = 'tijuana/dispersion/calibration'
+
+Q_FIELD_PATH = f'{CALIBRATION_BASE_PATH}/Q_field_{{run_tag}}.parquet'
+Q_FIELD_LATEST_PATH = f'{CALIBRATION_BASE_PATH}/Q_field_latest.parquet'
+Q_FIELD_LATEST_JSON_PATH = f'{CALIBRATION_BASE_PATH}/Q_field_latest.json'
+Q_FIELD_DIAGNOSTICS_PATH = f'{CALIBRATION_BASE_PATH}/inversion_diagnostics_{{run_tag}}.json'
+Q_FIELD_DIAGNOSTICS_LATEST_PATH = f'{CALIBRATION_BASE_PATH}/inversion_diagnostics_latest.json'
+
+# Per-sensor footprint row cache — reused across nightly rebuilds.
+# Key pattern: {S_ROW_CACHE_PREFIX}/{sensor}/{YYYYMMDDHH}.npy
+S_ROW_CACHE_PREFIX = f'{CALIBRATION_BASE_PATH}/S_row_cache'
+
+# Calibration visualizations — per-run PNGs plus a `_latest` pointer for dashboards.
+Q_FIELD_VIZ_MAP_PATH = f'{CALIBRATION_BASE_PATH}/viz/{{run_tag}}/Q_field_map.png'
+Q_FIELD_VIZ_MAP_LATEST_PATH = f'{CALIBRATION_BASE_PATH}/viz/Q_field_map_latest.png'
+Q_FIELD_VIZ_CV_PATH = f'{CALIBRATION_BASE_PATH}/viz/{{run_tag}}/loo_cv_scatter.png'
+Q_FIELD_VIZ_CV_LATEST_PATH = f'{CALIBRATION_BASE_PATH}/viz/loo_cv_scatter_latest.png'
+Q_FIELD_VIZ_BUDGET_PATH = f'{CALIBRATION_BASE_PATH}/viz/{{run_tag}}/budget_bar.png'
+Q_FIELD_VIZ_BUDGET_LATEST_PATH = f'{CALIBRATION_BASE_PATH}/viz/budget_bar_latest.png'
+
+# Weekly-partitioned calibration outputs (partition key = week-start Monday YYYY-MM-DD).
+# Used by the weekly emissions_calibration_job for backfill + ongoing weekly runs.
+CALIBRATION_WEEKLY_BASE_PATH = f'{CALIBRATION_BASE_PATH}/weekly'
+Q_FIELD_WEEKLY_PATH = f'{CALIBRATION_WEEKLY_BASE_PATH}/{{partition}}/Q_field.parquet'
+Q_FIELD_WEEKLY_JSON_PATH = f'{CALIBRATION_WEEKLY_BASE_PATH}/{{partition}}/Q_field.json'
+Q_FIELD_WEEKLY_DIAGNOSTICS_PATH = f'{CALIBRATION_WEEKLY_BASE_PATH}/{{partition}}/diagnostics.json'
+Q_FIELD_WEEKLY_VIZ_MAP_PATH = f'{CALIBRATION_WEEKLY_BASE_PATH}/{{partition}}/Q_field_map.png'
+Q_FIELD_WEEKLY_VIZ_CV_PATH = f'{CALIBRATION_WEEKLY_BASE_PATH}/{{partition}}/loo_cv_scatter.png'
+Q_FIELD_WEEKLY_VIZ_LOTO_PATH = f'{CALIBRATION_WEEKLY_BASE_PATH}/{{partition}}/loto_cv_scatter.png'
+Q_FIELD_WEEKLY_VIZ_BUDGET_PATH = f'{CALIBRATION_WEEKLY_BASE_PATH}/{{partition}}/budget_bar.png'
+Q_FIELD_WEEKLY_INDEX_PATH = f'{CALIBRATION_WEEKLY_BASE_PATH}/index.json'
+
+# `_latest` LOTO pointer — mirrors Q_FIELD_VIZ_CV_LATEST_PATH's purpose
+Q_FIELD_VIZ_LOTO_LATEST_PATH = f'{CALIBRATION_BASE_PATH}/viz/loto_cv_scatter_latest.png'
+
+# A run writes its Q field to _latest only when the partition's end is within
+# this many days of today. Prevents historical backfills from silently
+# overwriting the dispersion forecast's live Q field.
+Q_FIELD_LATEST_MAX_AGE_DAYS = 30
+
 # Dispersion visualizations (heatmaps + source maps)
 # Versioned paths use .format(date_str=YYYYMMDD_HH)
 DISPERSION_VIZ_HEATMAP_COARSE_PATH = 'tijuana/forecast/dispersion/visualizations/{date_str}/heatmap_coarse.png'

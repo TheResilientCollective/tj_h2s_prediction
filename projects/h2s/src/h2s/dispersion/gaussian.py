@@ -354,6 +354,87 @@ def run_forward_model_detailed(
     )
 
 
+def run_forward_model_from_Q_field(
+    df: pd.DataFrame,
+    q_field: list[dict],
+    start_time: pd.Timestamp,
+    hours: int = 24,
+    ref_sensor: str = "NESTOR - BES",
+    min_q_g_s: float = 1e-3,
+    cadence_minutes: int = 60,
+) -> ForwardModelResult:
+    """Run Gaussian plume forward model from a channel-snapped Q field.
+
+    The Q field is a list of per-segment dicts with `lat`, `lon`, `Q_g_s`, and
+    optionally `segment_idx` / `channel_name` fields — produced by
+    ``batch_inversion_stacked()`` + ``q_field_to_parquet_rows()``. Segments with
+    `Q_g_s < min_q_g_s` are skipped to avoid unnecessary plume evaluations.
+
+    Args:
+        df: DataFrame with time, site_name, wind_speed_10m, wind_direction_10m,
+            temperature_2m, is_night columns.
+        q_field: list of {"lat", "lon", "Q_g_s", ...} — one row per channel segment.
+        start_time: Forecast start (tz-aware).
+        hours: Forecast duration in hours.
+        ref_sensor: Sensor to use for met when per-sensor data is unavailable.
+        min_q_g_s: Skip segments with Q below this threshold.
+    """
+    active = [s for s in q_field if float(s.get("Q_g_s", 0.0)) >= min_q_g_s]
+    total_q = sum(float(s["Q_g_s"]) for s in active)
+
+    n_steps = int(hours * 60 / cadence_minutes)
+    times = pd.date_range(start_time, periods=n_steps, freq=f"{cadence_minutes}min")
+    concentrations = {sname: [] for sname in SENSORS}
+
+    for t in times:
+        for sensor_name, sensor_coords in SENSORS.items():
+            row = df[(df["time"] == t) & (df["site_name"] == sensor_name)]
+            if row.empty:
+                row = df[(df["time"] == t) & (df["site_name"] == ref_sensor)]
+            if row.empty:
+                concentrations[sensor_name].append(np.nan)
+                continue
+
+            ws = float(row["wind_speed_10m"].iloc[0])
+            wd_deg = float(row["wind_direction_10m"].iloc[0])
+            temp_c = float(row["temperature_2m"].iloc[0])
+            is_night = bool(row["is_night"].iloc[0])
+
+            wd_rad = np.radians(wd_deg)
+            u = -ws * np.sin(wd_rad)
+            v = -ws * np.cos(wd_rad)
+            stab = stability_class(ws, is_night)
+
+            total_ug_m3 = 0.0
+            for seg in active:
+                total_ug_m3 += gaussian_plume_concentration(
+                    source_lat=float(seg["lat"]),
+                    source_lon=float(seg["lon"]),
+                    emission_rate_g_s=float(seg["Q_g_s"]),
+                    receptor_lat=sensor_coords["lat"],
+                    receptor_lon=sensor_coords["lon"],
+                    wind_u=u, wind_v=v,
+                    stab=stab,
+                )
+
+            concentrations[sensor_name].append(round(float(ug_m3_to_ppb(total_ug_m3, temp_c)), 3))
+
+    return ForwardModelResult(
+        times=list(times),
+        concentrations=concentrations,
+        emission_rates_g_s={f"seg_{i}": float(s["Q_g_s"]) for i, s in enumerate(active)},
+        metadata={
+            "model": "Gaussian plume (Pasquill-Gifford, Slade 1968, channel-snapped Q field)",
+            "start_time": str(start_time),
+            "hours": hours,
+            "n_segments_total": len(q_field),
+            "n_segments_active": len(active),
+            "total_Q_g_s": round(total_q, 3),
+            "cadence_minutes": cadence_minutes,
+        },
+    )
+
+
 def _build_grid_data(
     concentration_grid: np.ndarray,
     confidence_grid: np.ndarray,
@@ -688,6 +769,117 @@ def run_forward_model_gridded_detailed(
                 "n_sources": len(CANDIDATE_SOURCES),
                 "top_3_sources_g_s": top_3_sources,
                 "emission_rates_per_source_g_s": {k: float(v) for k, v in emission_rates_per_source_g_s.items() if v > 0},
+                "baseline_scale": baseline_scale,
+                "ppb_clip": ppb_clip,
+            },
+        ))
+
+    return frames
+
+
+def run_forward_model_gridded_from_Q_field(
+    df: pd.DataFrame,
+    q_field: list[dict],
+    start_time: pd.Timestamp,
+    hours: int = 24,
+    ref_sensor: str = "NESTOR - BES",
+    min_q_g_s: float = 1e-3,
+    cadence_minutes: int = 60,
+    baseline_scale: float = GRID_BASELINE_SCALE,
+    ppb_clip: float = GRID_PPB_CLIP,
+) -> list[dict]:
+    """Gridded forward forecast from a channel-snapped Q field.
+
+    Mirrors ``run_forward_model_gridded_detailed()`` but iterates over the
+    per-segment Q field instead of the 16 candidate sources. Applies the same
+    ``baseline_scale`` rate multiplier and per-cell ``ppb_clip`` that tame the
+    detailed gridded run; see GRID_FORECAST_TUNING.md for rationale.
+    """
+    from h2s.dispersion.grid_config import (
+        GRID_BOUNDS,
+        GRID_LAT_CENTERS,
+        GRID_LON_CENTERS,
+        GRID_NROWS,
+        GRID_NCOLS,
+        GRID_RESOLUTION_METERS,
+    )
+
+    active = [s for s in q_field if float(s.get("Q_g_s", 0.0)) >= min_q_g_s]
+    total_q = sum(float(s["Q_g_s"]) for s in active)
+
+    n_steps = int(hours * 60 / cadence_minutes)
+    times = pd.date_range(start_time, periods=n_steps, freq=f"{cadence_minutes}min")
+    lon_mesh, lat_mesh = np.meshgrid(GRID_LON_CENTERS, GRID_LAT_CENTERS)
+    sensor_coords = [(s["lat"], s["lon"]) for s in SENSORS.values()]
+
+    frames: list[dict] = []
+
+    for hour_idx, t in enumerate(times):
+        row = df[(df["time"] == t) & (df["site_name"] == ref_sensor)]
+        if row.empty:
+            row = df[df["time"] == t]
+        if row.empty:
+            frames.append(_build_grid_data(
+                concentration_grid=np.zeros((GRID_NROWS, GRID_NCOLS)),
+                confidence_grid=np.full((GRID_NROWS, GRID_NCOLS), 0.1),
+                lat_centers=GRID_LAT_CENTERS,
+                lon_centers=GRID_LON_CENTERS,
+                bounds=GRID_BOUNDS,
+                resolution_meters=GRID_RESOLUTION_METERS,
+                metadata={"time": str(t), "hour_index": hour_idx, "status": "no_met"},
+            ))
+            continue
+
+        row = row.iloc[0]
+        ws = float(row["wind_speed_10m"])
+        wd_deg = float(row["wind_direction_10m"])
+        temp_c = float(row.get("temperature_2m", 20.0))
+        is_night_val = bool(row.get("is_night", 0))
+
+        wd_rad = np.radians(wd_deg)
+        wind_u = -ws * np.sin(wd_rad)
+        wind_v = -ws * np.cos(wd_rad)
+        stab = stability_class(ws, is_night_val)
+
+        total_ppb = np.zeros((GRID_NROWS, GRID_NCOLS))
+        for seg in active:
+            q = float(seg["Q_g_s"]) * baseline_scale
+            if q <= 0:
+                continue
+            conc_ug = _gaussian_plume_grid(
+                source_lat=float(seg["lat"]),
+                source_lon=float(seg["lon"]),
+                emission_rate_g_s=q,
+                lat_grid=lat_mesh,
+                lon_grid=lon_mesh,
+                wind_u=wind_u,
+                wind_v=wind_v,
+                stab=stab,
+            )
+            total_ppb += _ug_grid_to_ppb(conc_ug, temp_c)
+
+        np.minimum(total_ppb, ppb_clip, out=total_ppb)
+        forecast_lead_h = hour_idx * cadence_minutes / 60.0
+        confidence = _confidence_from_distance(lat_mesh, lon_mesh, sensor_coords, forecast_lead_h=forecast_lead_h)
+
+        frames.append(_build_grid_data(
+            concentration_grid=np.round(total_ppb, 3),
+            confidence_grid=np.round(confidence, 3),
+            lat_centers=GRID_LAT_CENTERS,
+            lon_centers=GRID_LON_CENTERS,
+            bounds=GRID_BOUNDS,
+            resolution_meters=GRID_RESOLUTION_METERS,
+            metadata={
+                "time": str(t),
+                "frame_index": hour_idx,
+                "forecast_lead_h": round(forecast_lead_h, 3),
+                "wind_speed_ms": round(ws, 2),
+                "wind_direction_deg": round(wd_deg, 1),
+                "stability_class": stab,
+                "n_segments_active": len(active),
+                "total_Q_g_s": round(total_q, 3),
+                "source_mode": "channel_Q_field",
+                "cadence_minutes": cadence_minutes,
                 "baseline_scale": baseline_scale,
                 "ppb_clip": ppb_clip,
             },

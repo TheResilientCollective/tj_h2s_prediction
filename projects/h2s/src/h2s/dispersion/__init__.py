@@ -24,6 +24,19 @@ from h2s.dispersion.gaussian import (
     CANDIDATE_SOURCES as DISPERSION_CANDIDATE_SOURCES,
 )
 from h2s.dispersion.hysplit_controls import generate_hysplit_bundle
+from h2s.dispersion.emission_inversion import (
+    CHANNEL_WAYPOINTS,
+    InversionConfig,
+    build_channel_grid,
+    project_footprint_to_channel,
+    build_sensitivity_matrix,
+    solve_nnls,
+    calibration_loop,
+    invert_event,
+    batch_inversion_stacked,
+    inversion_to_forward_sources,
+    q_field_to_parquet_rows,
+)
 
 __all__ = [
     "LagrangianConfig",
@@ -42,4 +55,16 @@ __all__ = [
     "DISPERSION_SOURCE_ZONES",
     "DISPERSION_CANDIDATE_SOURCES",
     "generate_hysplit_bundle",
+    # Channel-snapped emission inversion
+    "CHANNEL_WAYPOINTS",
+    "InversionConfig",
+    "build_channel_grid",
+    "project_footprint_to_channel",
+    "build_sensitivity_matrix",
+    "solve_nnls",
+    "calibration_loop",
+    "invert_event",
+    "batch_inversion_stacked",
+    "inversion_to_forward_sources",
+    "q_field_to_parquet_rows",
 ]

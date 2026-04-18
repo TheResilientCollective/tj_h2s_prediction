@@ -132,6 +132,14 @@ def defs():
         river_emission_grid,
     )
 
+    # Import rolling emissions calibration pipeline assets
+    from h2s.defs.h2s_calibration_pipeline import (
+        rolling_footprint_matrix,
+        channel_emission_inversion,
+        calibration_diagnostics,
+        calibration_viz,
+    )
+
     # Import multi-horizon forecast pipeline assets
     from h2s.defs.h2s_multihorizon_pipeline import (
         mh_model_artifacts,
@@ -165,6 +173,8 @@ def defs():
         dispersion_hysplit_execution_job,
         dispersion_inversion_schedule,
         dispersion_forecast_schedule,
+        emissions_calibration_job,
+        emissions_calibration_schedule,
     )
 
     # Create definitions with assets, jobs, schedules, and resources
@@ -209,6 +219,11 @@ def defs():
             dispersion_alert_check,
             # Physics-based river emission grid
             river_emission_grid,
+            # Rolling Emissions Calibration
+            rolling_footprint_matrix,
+            channel_emission_inversion,
+            calibration_diagnostics,
+            calibration_viz,
             # Seed Models
             seed_models,
             # Multi-Horizon Training Pipeline Assets
@@ -249,6 +264,8 @@ def defs():
             dispersion_inversion_job,
             dispersion_forecast_job,
             dispersion_hysplit_execution_job,
+            # Rolling emissions calibration job
+            emissions_calibration_job,
             # Two-tier alert job
             h2s_alert_job,
             # APCD multi-station sensor watch job
@@ -266,6 +283,8 @@ def defs():
             # Dispersion schedules
             dispersion_inversion_schedule,
             dispersion_forecast_schedule,
+            # Calibration schedule
+            emissions_calibration_schedule,
         ],
         sensors=[slack_on_run_failure, h2s_alert_sensor, apcd_sensor_watch_sensor],
         resources=resources[deployment_name]
