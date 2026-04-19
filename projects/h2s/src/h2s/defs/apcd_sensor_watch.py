@@ -139,7 +139,7 @@ def _load_predictions(s3) -> dict:
     except Exception:
         return {}
 
-    fc = summary.get("forecast_48h", {}) or {}
+    fc = summary.get("forecast_24h", {}) or summary.get("forecast_48h", {}) or {}
     stations_obs = summary.get("stations", {}) or {}
 
     preds_by_site: dict = {}
@@ -152,7 +152,7 @@ def _load_predictions(s3) -> dict:
         preds_by_site[site_name] = {
             "short": short,
             "station_key": STATIONS[mapped_name]["key"],
-            "forecast_48h": {
+            "forecast_24h": {
                 "max_h2s_ppb": fc_block.get("max_h2s"),
                 "max_prob_5": fc_block.get("max_prob_5"),
                 "max_prob_10": fc_block.get("max_prob_10"),
@@ -279,15 +279,15 @@ def build_sensor_alert_message(
     # Prediction section
     pred_lines = []
     if pred:
-        fc = pred.get("forecast_48h", {}) or {}
-        max_h2s_ppb = fc.get("max_h2s_ppb")
+        fc = pred.get("forecast_24h", {}) or pred.get("forecast_48h", {}) or {}
+        max_h2s_ppb = fc.get("max_h2s_ppb") or fc.get("max_h2s")
         max_prob_5 = fc.get("max_prob_5")
         max_prob_10 = fc.get("max_prob_10")
         hours_orange = fc.get("hours_orange", 0)
         hours_yellow = fc.get("hours_yellow_high", 0) + fc.get("hours_yellow_low", 0)
         pred_lines = [
             "-" * 52,
-            "Model forecast (next 48h)",
+            "Model forecast (next 24h)",
             f"  Max H2S             {max_h2s_ppb if max_h2s_ppb is not None else 'n/a'} ppb",
             f"  Max P(>5 ppb)       {max_prob_5 if max_prob_5 is not None else 'n/a'}",
             f"  Max P(>10 ppb)      {max_prob_10 if max_prob_10 is not None else 'n/a'}",

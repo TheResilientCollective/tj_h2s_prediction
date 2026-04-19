@@ -34,7 +34,7 @@ def sample_preds():
         "NESTOR - BES": {
             "short": "NB",
             "station_key": "NESTOR__BES",
-            "forecast_48h": {
+            "forecast_24h": {
                 "max_h2s_ppb": 42.0,
                 "max_prob_5": 0.88,
                 "max_prob_10": 0.72,
