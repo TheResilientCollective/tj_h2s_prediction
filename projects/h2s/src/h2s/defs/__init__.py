@@ -16,6 +16,21 @@ from h2s.defs.h2s_pipeline import (
     predictions_export,
 )
 
+from h2s.defs.accuracy_reporting_pipeline import (
+    daily_accuracy_scorecard,
+    rolling_accuracy_scorecards,
+    monthly_accuracy_scorecard,
+    alert_performance,
+    monthly_accuracy_report_html,
+    weekly_scorecard_post,
+    accuracy_reporting_job,
+    monthly_accuracy_job,
+    weekly_scorecard_job,
+    daily_accuracy_schedule,
+    monthly_accuracy_schedule,
+    weekly_scorecard_schedule,
+)
+
 __all__ = [
     "h2s_model_artifacts",
     "raw_environmental_data",
@@ -28,4 +43,17 @@ __all__ = [
     "model_comparison_viz",
     "prediction_timeline_viz",
     "predictions_export",
+    # Accuracy reporting
+    "daily_accuracy_scorecard",
+    "rolling_accuracy_scorecards",
+    "monthly_accuracy_scorecard",
+    "alert_performance",
+    "monthly_accuracy_report_html",
+    "weekly_scorecard_post",
+    "accuracy_reporting_job",
+    "monthly_accuracy_job",
+    "weekly_scorecard_job",
+    "daily_accuracy_schedule",
+    "monthly_accuracy_schedule",
+    "weekly_scorecard_schedule",
 ]
