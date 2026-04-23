@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from urllib.request import urlopen
 
 import pandas as pd
 import panel as pn
@@ -18,9 +17,15 @@ from .constants import ACCURACY_REPORTS_URL
 
 
 def _fetch_json(url: str) -> dict[str, Any] | None:
+    """Fetch JSON from a URL. Works in both server (CPython) and browser (Pyodide)."""
     try:
-        with urlopen(url, timeout=10) as resp:
-            return json.loads(resp.read())
+        try:
+            from pyodide.http import open_url  # type: ignore[import-not-found]
+            return json.loads(open_url(url).read())
+        except ImportError:
+            from urllib.request import urlopen
+            with urlopen(url, timeout=10) as resp:
+                return json.loads(resp.read())
     except Exception:  # noqa: BLE001 — report-missing UX lives in the view
         return None
 

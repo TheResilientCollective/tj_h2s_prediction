@@ -12,7 +12,9 @@
     </option>
     <option name="checkSync" value="true" />
     <option name="env">
-      <map />
+      <map>
+        <entry key="FORECAST_BUCKET" value="test" />
+      </map>
     </option>
     <option name="runType" value="MODULE" />
     <option name="scriptOrModule" value="panel" />
