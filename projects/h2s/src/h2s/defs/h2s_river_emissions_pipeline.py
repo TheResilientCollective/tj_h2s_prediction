@@ -39,7 +39,7 @@ def river_emission_grid(context: dg.AssetExecutionContext) -> dg.MaterializeResu
 
     # Load latest forecast met/flow/tidal conditions
     log.info(f"Loading forecast data from {FORECAST_DATA_PATH}")
-    url = s3.get_presigned_url(FORECAST_DATA_PATH)
+    url = s3.publicUrl(FORECAST_DATA_PATH)
     fc_df = pd.read_parquet(url)
     fc_df["time"] = pd.to_datetime(fc_df["time"], utc=True).dt.tz_convert("America/Los_Angeles")
     log.info(f"Loaded {len(fc_df)} forecast rows; using latest row for current conditions")

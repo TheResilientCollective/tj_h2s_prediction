@@ -274,7 +274,7 @@ def source_attribution(context: dg.AssetExecutionContext) -> pd.DataFrame:
 
     # Load observations from S3 via presigned URL
     s3_path = "latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet"
-    parquet_url = s3.get_presigned_url(path=s3_path, bucket=bucket)
+    parquet_url = s3.publicUrl(path=s3_path, bucket=bucket)
     obs_df = pd.read_parquet(parquet_url)
     context.log.info(f"✓ Loaded observations from S3: {len(obs_df)} rows")
 
@@ -368,7 +368,7 @@ def daily_station_forecasts(
 
     # Load recent observations from S3 via presigned URL
     s3_path = "latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet"
-    parquet_url = s3.get_presigned_url(path=s3_path, bucket=bucket)
+    parquet_url = s3.publicUrl(path=s3_path, bucket=bucket)
     obs_df = pd.read_parquet(parquet_url)
     context.log.info(f"✓ Loaded observations from S3: {len(obs_df)} rows")
 
@@ -378,11 +378,11 @@ def daily_station_forecasts(
 
     # Load model forecast from S3 (try parquet first, then CSV)
     try:
-        fc_url = s3.get_presigned_url(path="latest/tijuana/forecast_data/model_forecast.parquet")
+        fc_url = s3.publicUrl(path="latest/tijuana/forecast_data/model_forecast.parquet")
         fc_df = pd.read_parquet(fc_url)
         context.log.info(f"✓ Loaded model forecast (parquet) from S3: {len(fc_df)} rows")
     except Exception:
-        fc_url = s3.get_presigned_url(path="latest/tijuana/forecast_data/model_forecast.csv")
+        fc_url = s3.publicUrl(path="latest/tijuana/forecast_data/model_forecast.csv")
         fc_df = pd.read_csv(fc_url)
         context.log.info(f"✓ Loaded model forecast (csv) from S3: {len(fc_df)} rows")
     if 'time' not in fc_df.columns and 'date' in fc_df.columns:
@@ -391,7 +391,7 @@ def daily_station_forecasts(
 
     # Load tidal forecast
     try:
-        tidal_url = s3.get_presigned_url(path="latest/tijuana/tidal_forecast/latest.csv")
+        tidal_url = s3.publicUrl(path="latest/tijuana/tidal_forecast/latest.csv")
         tidal_df = pd.read_csv(tidal_url)
         tidal_df['time'] = pd.to_datetime(tidal_df['time'], utc=True)
         tidal_df['_mtime'] = tidal_df['time'].dt.floor('h')
@@ -546,7 +546,7 @@ def daily_dashboard_viz(
     bucket = context.op_config["obs_bucket"]
 
     # Load observations from S3 for historical rows
-    parquet_url = s3.get_presigned_url(
+    parquet_url = s3.publicUrl(
         path="latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet",
         bucket=bucket
     )
@@ -818,7 +818,7 @@ def daily_summary_json(
     bucket = context.op_config["obs_bucket"]
 
     # Load observations from S3 for recent stats
-    parquet_url = s3.get_presigned_url(
+    parquet_url = s3.publicUrl(
         path="latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet",
         bucket=bucket
     )
@@ -895,6 +895,19 @@ def daily_summary_json(
     # Upload to S3
     summary_bytes = json.dumps(summary, indent=2, default=str).encode('utf-8')
     ts = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H')
+
+    # Upload raw forecast CSV to S3 (used by validation pipeline)
+    if len(fc_df) > 0:
+        fc_csv = fc_df.to_csv(index=False)
+        for csv_path in [
+            f"{DAILY_SUMMARY_PATH}/{ts}/daily_station_forecasts.csv",
+            "latest/tijuana/forecast_data/daily_station_forecasts.csv",
+        ]:
+            try:
+                s3.putFile_text(fc_csv, path=csv_path, content_type='text/csv')
+                context.log.info(f"✓ Uploaded forecast CSV to S3: {csv_path}")
+            except Exception as e:
+                context.log.warning(f"Upload failed ({csv_path}): {e}")
     for path in [
         "latest/tijuana/forecast_data/daily_summary.json",
         f"{DAILY_SUMMARY_PATH}/{ts}/daily_summary.json",

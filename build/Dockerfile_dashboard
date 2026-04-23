@@ -1,0 +1,26 @@
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+# Install uv for fast dependency resolution
+RUN pip install --no-cache-dir uv==0.4.*
+
+# Copy dashboard package and install deps
+COPY dashboard/pyproject.toml dashboard/uv.lock ./dashboard/
+RUN cd dashboard && uv sync --frozen --no-dev
+
+# Copy source
+COPY dashboard ./dashboard
+
+EXPOSE 5006
+
+# Railway / container deploys set PORT; fall back to 5006 locally.
+# --address 0.0.0.0 is required for Docker/Railway to route traffic.
+# --allow-websocket-origin=* is required so the Panel websocket accepts
+# connections behind Railway's proxy; tighten this in production.
+ENV PORT=5006
+CMD ["sh", "-c", "cd dashboard && uv run panel serve app.py --address 0.0.0.0 --port ${PORT} --allow-websocket-origin=*"]

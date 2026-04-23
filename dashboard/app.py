@@ -20,6 +20,7 @@ from dashboard.data import filter_data, load_complaints, load_h2s_data, load_loc
 from dashboard.components.map_view import create_map
 from dashboard.components.polar_heatmap import create_polar_heatmap
 from dashboard.components.timeseries_range import create_timeseries
+from dashboard.components.accuracy_view import create_accuracy_view
 
 pn.extension("tabulator", sizing_mode="stretch_width")
 
@@ -99,10 +100,28 @@ def build_dashboard() -> pn.template.FastListTemplate:
         sizing_mode="stretch_width",
     )
 
+    overview_tab = pn.Column(top_row, bottom_row, sizing_mode="stretch_width")
+    accuracy_tab = create_accuracy_view()
+
+    tabs = pn.Tabs(
+        ("Accuracy", accuracy_tab),
+        ("Overview", overview_tab),
+        sizing_mode="stretch_width",
+    )
+
+    # Sidebar widgets only apply to Overview — hide when Accuracy is active
+    sidebar_widgets = pn.Column(logo_placeholder, year_slider, site_selector)
+    sidebar_widgets.visible = tabs.active != 0  # hidden on Accuracy (index 0)
+
+    def _toggle_sidebar(event):
+        sidebar_widgets.visible = event.new != 0
+
+    tabs.param.watch(_toggle_sidebar, "active")
+
     template = pn.template.FastListTemplate(
         title="",
-        sidebar=[logo_placeholder, year_slider, site_selector],
-        main=[top_row, bottom_row],
+        sidebar=[sidebar_widgets],
+        main=[tabs],
         main_max_width="1720px",
         accent_base_color="#FF5722",
         header_background="#FF5722",

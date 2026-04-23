@@ -26,7 +26,7 @@ s3 = S3Resource(
 
 print("=== WIND-DEPENDENT DIFFUSION TEST ===\n")
 print("Loading observation data...")
-url = s3.get_presigned_url(OBS_DATA_PATH)
+url = s3.publicUrl(OBS_DATA_PATH)
 df = pd.read_parquet(url)
 df["time"] = pd.to_datetime(df["time"], utc=True).dt.tz_convert("America/Los_Angeles")
 print(f"Loaded {len(df):,} observations\n")

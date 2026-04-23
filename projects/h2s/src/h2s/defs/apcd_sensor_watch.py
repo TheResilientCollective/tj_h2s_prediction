@@ -179,7 +179,7 @@ def _load_weather_context(s3) -> dict:
     builders can pick fields opportunistically. Returns {} on failure.
     """
     try:
-        url = s3.get_presigned_url(path=OBS_DATA_PATH)
+        url = s3.publicUrl(path=OBS_DATA_PATH)
         obs = pd.read_parquet(url)
     except Exception:
         return {}

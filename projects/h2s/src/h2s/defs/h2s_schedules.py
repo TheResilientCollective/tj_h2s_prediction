@@ -95,6 +95,12 @@ from h2s.defs.h2s_calibration_pipeline import (
     calibration_viz,
 )
 
+from h2s.defs.h2s_validation_pipeline import (
+    daily_station_validation_report,
+    mh_validation_report,
+    forecast_daily_partitions as validation_daily_partitions,
+)
+
 # ============================================================================
 # JOB 1: Monthly Data Extraction (monthly partitioned)
 # ============================================================================
@@ -293,7 +299,7 @@ daily_validation_job = dg.define_asset_job(
     job=forecast_prediction_job,
     cron_schedule=SCHEDULE_6HR,
     description="Run H2S forecast every 6 hours (00:00, 06:00, 12:00, 18:00 UTC)",
-    default_status=dg.DefaultScheduleStatus.STOPPED,
+    default_status=dg.DefaultScheduleStatus.RUNNING,
     tags={"environment": "production", "schedule_type": "forecast"},
 )
 def forecast_prediction_schedule(context: dg.ScheduleEvaluationContext):
@@ -701,4 +707,70 @@ def emissions_calibration_schedule(context: dg.ScheduleEvaluationContext):
         partition_key=partition_key,
         run_key=f"emissions_calibration_{partition_key}",
         tags={"calibration_week": partition_key},
+    )
+
+
+# ============================================================================
+# JOB 12: Daily Station Validation (partitioned)
+# ============================================================================
+
+daily_station_validation_job = dg.define_asset_job(
+    name="daily_station_validation_job",
+    description="Validate daily per-station forecasts against observations",
+    selection=dg.AssetSelection.assets(daily_station_validation_report),
+    partitions_def=validation_daily_partitions,
+    tags={"environment": "production", "pipeline": "h2s_validation"},
+)
+
+
+# ============================================================================
+# JOB 13: Multi-Horizon Validation (partitioned)
+# ============================================================================
+
+mh_validation_job = dg.define_asset_job(
+    name="mh_validation_job",
+    description="Validate multi-horizon forecasts against observations, per horizon band",
+    selection=dg.AssetSelection.assets(mh_validation_report),
+    partitions_def=validation_daily_partitions,
+    tags={"environment": "production", "pipeline": "h2s_validation"},
+)
+
+
+# ============================================================================
+# SCHEDULE 12: Daily Station Validation (9 AM UTC — 1h after hourly validation)
+# ============================================================================
+
+@dg.schedule(
+    job=daily_station_validation_job,
+    cron_schedule="0 9 * * *",
+    description="Daily station forecast validation at 9 AM UTC",
+    default_status=dg.DefaultScheduleStatus.RUNNING,
+    tags={"environment": "production", "schedule_type": "validation"},
+)
+def daily_station_validation_schedule(context: dg.ScheduleEvaluationContext):
+    """Validate yesterday's daily station forecasts against observations."""
+    yesterday_utc = (context.scheduled_execution_time - timedelta(days=1)).date().strftime("%Y-%m-%d")
+    return dg.RunRequest(
+        partition_key=yesterday_utc,
+        run_key=f"daily_station_validation_{yesterday_utc}",
+    )
+
+
+# ============================================================================
+# SCHEDULE 13: Multi-Horizon Validation (9:30 AM UTC)
+# ============================================================================
+
+@dg.schedule(
+    job=mh_validation_job,
+    cron_schedule="30 9 * * *",
+    description="Multi-horizon forecast validation at 9:30 AM UTC",
+    default_status=dg.DefaultScheduleStatus.RUNNING,
+    tags={"environment": "production", "schedule_type": "validation"},
+)
+def mh_validation_schedule(context: dg.ScheduleEvaluationContext):
+    """Validate yesterday's multi-horizon forecasts against observations."""
+    yesterday_utc = (context.scheduled_execution_time - timedelta(days=1)).date().strftime("%Y-%m-%d")
+    return dg.RunRequest(
+        partition_key=yesterday_utc,
+        run_key=f"mh_validation_{yesterday_utc}",
     )
