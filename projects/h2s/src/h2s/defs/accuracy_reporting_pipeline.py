@@ -411,6 +411,30 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def _extract_sites_dict(m: dict[str, Any]) -> dict[str, Any] | None:
+    """Normalise a metrics.json payload into a sites dict (v1 or v2 schema)."""
+    sites_dict = m.get("sites")
+    if sites_dict is not None:
+        return sites_dict
+    # v1 flat schema: wrap into sites dict for uniform processing
+    if m.get("confusion_matrix") is not None:
+        site_key = m.get("site", "NESTOR__BES")
+        return {
+            site_key: {
+                "confusion_matrix": m["confusion_matrix"],
+                "n_predictions": m.get("n_predictions", 0),
+                "n_matched_observations": m.get("n_matched", 0),
+            },
+        }
+    return None
+
+
+# Pipeline subdirectories to scan for per-day metrics.
+# Order matters: daily_station covers all 3 stations, so its metrics are
+# preferred.  The root path (pipeline=None) is the legacy hourly-only fallback.
+_PIPELINES_TO_SCAN: list[str | None] = ["daily_station", "multihorizon", None]
+
+
 def build_period_scorecard(
     store: AccuracyStore,
     start: date,
@@ -419,45 +443,56 @@ def build_period_scorecard(
 ) -> PeriodScorecard:
     """Aggregate per-day metrics.json into a single scorecard for [start, end].
 
+    Scans multiple pipeline subdirectories (daily_station, multihorizon, and
+    the legacy root) for each day and merges all sites found.  When a site
+    appears in more than one pipeline on the same day, daily_station takes
+    precedence (it covers all 3 stations and uses per-station models).
+
     Raises ``dg.Failure`` when no validation days are found in the window.
     """
-    days = store.list_validation_days(start, end)
-    if not days:
+    site_cms: dict[str, list[list[list[int]]]] = {}
+    site_pred_counts: dict[str, int] = {}
+    site_match_counts: dict[str, int] = {}
+    found_any = False
+
+    cur = start
+    while cur <= end:
+        # Collect sites from all pipelines for this day.
+        # Track which sites we've already seen so earlier pipelines in the
+        # list take precedence (daily_station > multihorizon > root).
+        seen_sites_today: set[str] = set()
+
+        for pipeline in _PIPELINES_TO_SCAN:
+            m = store.read_day_metrics(cur, pipeline=pipeline)
+            if not m:
+                continue
+            sites_dict = _extract_sites_dict(m)
+            if not sites_dict:
+                continue
+
+            for site, site_m in sites_dict.items():
+                if site in seen_sites_today:
+                    continue  # already covered by a higher-priority pipeline
+                cm = site_m.get("confusion_matrix")
+                if cm is None:
+                    continue
+                seen_sites_today.add(site)
+                found_any = True
+                site_cms.setdefault(site, []).append(cm)
+                site_pred_counts[site] = site_pred_counts.get(site, 0) + int(
+                    site_m.get("n_predictions", 0)
+                )
+                site_match_counts[site] = site_match_counts.get(site, 0) + int(
+                    site_m.get("n_matched_observations", site_m.get("n_matched", 0))
+                )
+
+        cur += timedelta(days=1)
+
+    if not found_any:
         raise dg.Failure(
             f"No validation metrics found for {scope} window "
             f"[{start.isoformat()} .. {end.isoformat()}]"
         )
-    site_cms: dict[str, list[list[list[int]]]] = {}
-    site_pred_counts: dict[str, int] = {}
-    site_match_counts: dict[str, int] = {}
-
-    for day in days:
-        m = store.read_day_metrics(day)
-        if not m:
-            continue
-        # Handle v1 (flat) and v2 (sites dict) schemas
-        sites_dict = m.get("sites")
-        if sites_dict is None and m.get("confusion_matrix") is not None:
-            # v1 flat schema: wrap into sites dict for uniform processing
-            site_key = m.get("site", "NESTOR__BES")
-            sites_dict = {
-                site_key: {
-                    "confusion_matrix": m["confusion_matrix"],
-                    "n_predictions": m.get("n_predictions", 0),
-                    "n_matched_observations": m.get("n_matched", 0),
-                },
-            }
-        for site, site_m in (sites_dict or {}).items():
-            cm = site_m.get("confusion_matrix")
-            if cm is None:
-                continue
-            site_cms.setdefault(site, []).append(cm)
-            site_pred_counts[site] = site_pred_counts.get(site, 0) + int(
-                site_m.get("n_predictions", 0)
-            )
-            site_match_counts[site] = site_match_counts.get(site, 0) + int(
-                site_m.get("n_matched_observations", site_m.get("n_matched", 0))
-            )
 
     site_cards: list[SiteScorecard] = []
     for site, cms in site_cms.items():
