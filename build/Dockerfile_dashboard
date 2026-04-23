@@ -10,8 +10,8 @@ WORKDIR /app
 RUN pip install --no-cache-dir uv==0.4.*
 
 # Copy dashboard package and install deps
-COPY dashboard/pyproject.toml dashboard/uv.lock ./dashboard/
-RUN cd dashboard && uv sync --frozen --no-dev
+COPY ./pyproject.toml ./uv.lock ./dashboard/
+RUN uv sync --frozen --no-dev
 
 # Copy source
 COPY . ./dashboard
