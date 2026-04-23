@@ -109,9 +109,18 @@ def build_dashboard() -> pn.template.FastListTemplate:
         sizing_mode="stretch_width",
     )
 
+    # Sidebar widgets only apply to Overview — hide when Accuracy is active
+    sidebar_widgets = pn.Column(logo_placeholder, year_slider, site_selector)
+    sidebar_widgets.visible = tabs.active != 0  # hidden on Accuracy (index 0)
+
+    def _toggle_sidebar(event):
+        sidebar_widgets.visible = event.new != 0
+
+    tabs.param.watch(_toggle_sidebar, "active")
+
     template = pn.template.FastListTemplate(
         title="",
-        sidebar=[logo_placeholder, year_slider, site_selector],
+        sidebar=[sidebar_widgets],
         main=[tabs],
         main_max_width="1720px",
         accent_base_color="#FF5722",
