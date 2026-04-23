@@ -104,8 +104,8 @@ def build_dashboard() -> pn.template.FastListTemplate:
     accuracy_tab = create_accuracy_view()
 
     tabs = pn.Tabs(
-        ("Overview", overview_tab),
         ("Accuracy", accuracy_tab),
+        ("Overview", overview_tab),
         sizing_mode="stretch_width",
     )
 

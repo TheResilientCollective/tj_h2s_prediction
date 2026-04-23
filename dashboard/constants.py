@@ -1,17 +1,32 @@
 """Constants for the H2S monitoring dashboard."""
 
-# Data URLs (public S3 bucket, no auth needed)
+import os
+
+S3_BASE = "https://oss.resilientservice.mooo.com"
+
+# Public bucket — complaints, locations, static datasets
+PUBLIC_BUCKET = os.environ.get("PUBLIC_BUCKET", "resilentpublic")
+
+# Forecast bucket — predictions, validation, accuracy reports
+FORECAST_BUCKET = os.environ.get("S3_BUCKET", "test")
+
+# Data URLs (public bucket, no auth needed)
 H2S_DATA_URL = (
-    "https://oss.resilientservice.mooo.com/resilentpublic/"
+    f"{S3_BASE}/{PUBLIC_BUCKET}/"
     "latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet"
 )
 LOCATIONS_URL = (
-    "https://oss.resilientservice.mooo.com/resilentpublic/"
+    f"{S3_BASE}/{PUBLIC_BUCKET}/"
     "latest/tijuana/forecast_data/h2s_locations.csv"
 )
 COMPLAINTS_URL = (
-    "https://oss.resilientservice.mooo.com/resilentpublic/"
+    f"{S3_BASE}/{PUBLIC_BUCKET}/"
     "latest/tijuana/sd_complaints/complaints.csv"
+)
+
+# Accuracy reports URL (forecast bucket)
+ACCURACY_REPORTS_URL = (
+    f"{S3_BASE}/{FORECAST_BUCKET}/tijuana/forecast/accuracy_reports"
 )
 
 # H2S thresholds (ppb) per CAAQS standard

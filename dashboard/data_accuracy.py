@@ -14,12 +14,7 @@ from urllib.request import urlopen
 import pandas as pd
 import panel as pn
 
-from .constants import H2S_DATA_URL
-
-# The accuracy pipeline publishes to the same public bucket used for model
-# inputs; derive the base by stripping the well-known prefix.
-_PUBLIC_ROOT = H2S_DATA_URL.split("/latest/")[0]
-ACCURACY_URL = f"{_PUBLIC_ROOT}/latest/tijuana/forecast/accuracy_reports"
+from .constants import ACCURACY_REPORTS_URL
 
 
 def _fetch_json(url: str) -> dict[str, Any] | None:
@@ -32,17 +27,17 @@ def _fetch_json(url: str) -> dict[str, Any] | None:
 
 @pn.cache(ttl=300)
 def load_latest_scorecards() -> dict[str, Any] | None:
-    return _fetch_json(f"{ACCURACY_URL}/latest.json")
+    return _fetch_json(f"{ACCURACY_REPORTS_URL}/latest.json")
 
 
 @pn.cache(ttl=300)
 def load_rolling_scorecard(window_days: int) -> dict[str, Any] | None:
-    return _fetch_json(f"{ACCURACY_URL}/rolling/{window_days}d/scorecard.json")
+    return _fetch_json(f"{ACCURACY_REPORTS_URL}/rolling/{window_days}d/scorecard.json")
 
 
 @pn.cache(ttl=300)
 def load_alert_performance() -> dict[str, Any] | None:
-    return _fetch_json(f"{ACCURACY_URL}/alert_performance/30d.json")
+    return _fetch_json(f"{ACCURACY_REPORTS_URL}/alert_performance/30d.json")
 
 
 def sites_dataframe(scorecard: dict[str, Any] | None) -> pd.DataFrame:
