@@ -14,7 +14,7 @@ COPY dashboard/pyproject.toml dashboard/uv.lock ./dashboard/
 RUN cd dashboard && uv sync --frozen --no-dev
 
 # Copy source
-COPY dashboard ./dashboard
+COPY . ./dashboard
 
 EXPOSE 5006
 
