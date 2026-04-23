@@ -15,12 +15,12 @@ if _root not in sys.path:
 
 import panel as pn
 
-from dashboard.constants import SITES
-from dashboard.data import filter_data, load_complaints, load_h2s_data, load_locations
-from dashboard.components.map_view import create_map
-from dashboard.components.polar_heatmap import create_polar_heatmap
-from dashboard.components.timeseries_range import create_timeseries
-from dashboard.components.accuracy_view import create_accuracy_view
+from .constants import SITES
+from .data import filter_data, load_complaints, load_h2s_data, load_locations
+from .components.map_view import create_map
+from .components.polar_heatmap import create_polar_heatmap
+from .components.timeseries_range import create_timeseries
+from .components.accuracy_view import create_accuracy_view
 
 pn.extension("tabulator", sizing_mode="stretch_width")
 

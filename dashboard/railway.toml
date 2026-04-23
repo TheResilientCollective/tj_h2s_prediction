@@ -6,7 +6,7 @@ builder = "DOCKERFILE"
 dockerfilePath = "build/Dockerfile_dashboard"
 
 [deploy]
-startCommand = "uv run panel serve app.py --address 0.0.0.0 --port $PORT --allow-websocket-origin=*"
+startCommand = "uv run panel serve dashboard/app.py --address 0.0.0.0 --port $PORT --allow-websocket-origin=*"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
 healthcheckPath = "/"

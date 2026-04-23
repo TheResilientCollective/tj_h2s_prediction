@@ -1,3 +1,4 @@
+# build from dashboard
 FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -14,7 +15,7 @@ COPY ./pyproject.toml ./uv.lock ./
 RUN uv sync --frozen --no-dev
 
 # Copy source
-COPY . /app
+COPY . /app/dashboard
 
 EXPOSE 5006
 
@@ -23,4 +24,4 @@ EXPOSE 5006
 # --allow-websocket-origin=* is required so the Panel websocket accepts
 # connections behind Railway's proxy; tighten this in production.
 ENV PORT=5006
-CMD ["sh", "-c", " uv run panel serve app.py --address 0.0.0.0 --port ${PORT} --allow-websocket-origin=*"]
+CMD ["sh", "-c", " uv run panel serve dashboard/app.py --address 0.0.0.0 --port ${PORT} --allow-websocket-origin=*"]
