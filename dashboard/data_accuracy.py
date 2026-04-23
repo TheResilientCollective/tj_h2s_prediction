@@ -8,12 +8,15 @@ components can plot.
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 import pandas as pd
-import panel as pn
 
 from .constants import ACCURACY_REPORTS_URL
+
+_cache: dict[str, tuple[float, Any]] = {}
+_TTL = 300
 
 
 def _fetch_json(url: str) -> dict[str, Any] | None:
@@ -30,19 +33,27 @@ def _fetch_json(url: str) -> dict[str, Any] | None:
         return None
 
 
-@pn.cache(ttl=300)
+def _cached_fetch(key: str, url: str) -> dict[str, Any] | None:
+    now = time.monotonic()
+    if key in _cache:
+        ts, val = _cache[key]
+        if now - ts < _TTL:
+            return val
+    val = _fetch_json(url)
+    _cache[key] = (now, val)
+    return val
+
+
 def load_latest_scorecards() -> dict[str, Any] | None:
-    return _fetch_json(f"{ACCURACY_REPORTS_URL}/latest.json")
+    return _cached_fetch("latest", f"{ACCURACY_REPORTS_URL}/latest.json")
 
 
-@pn.cache(ttl=300)
 def load_rolling_scorecard(window_days: int) -> dict[str, Any] | None:
-    return _fetch_json(f"{ACCURACY_REPORTS_URL}/rolling/{window_days}d/scorecard.json")
+    return _cached_fetch(f"rolling_{window_days}", f"{ACCURACY_REPORTS_URL}/rolling/{window_days}d/scorecard.json")
 
 
-@pn.cache(ttl=300)
 def load_alert_performance() -> dict[str, Any] | None:
-    return _fetch_json(f"{ACCURACY_REPORTS_URL}/alert_performance/30d.json")
+    return _cached_fetch("alert_perf", f"{ACCURACY_REPORTS_URL}/alert_performance/30d.json")
 
 
 def sites_dataframe(scorecard: dict[str, Any] | None) -> pd.DataFrame:
