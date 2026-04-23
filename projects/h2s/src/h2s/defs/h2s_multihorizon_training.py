@@ -69,7 +69,7 @@ def mh_training_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
     bucket = context.op_config["s3_bucket"]
     s3_path = "latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet"
 
-    parquet_url = s3.get_presigned_url(path=s3_path, bucket=bucket)
+    parquet_url = s3.publicUrl(path=s3_path, bucket=bucket)
     raw_df = pd.read_parquet(parquet_url)
     context.log.info(f"Loaded training data from S3 ({bucket}/{s3_path}): {len(raw_df)} rows")
 

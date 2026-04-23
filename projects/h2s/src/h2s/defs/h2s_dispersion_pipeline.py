@@ -177,7 +177,7 @@ def lagrangian_source_attribution(
                                            )
 
     log.info(f"Loading obs data from S3: {OBS_DATA_PATH}")
-    url = s3.get_presigned_url(OBS_DATA_PATH)
+    url = s3.publicUrl(OBS_DATA_PATH)
     df = pd.read_parquet(url)
     df["time"] = pd.to_datetime(df["time"], utc=True).dt.tz_convert("America/Los_Angeles")
     log.info(f"Loaded {len(df)} obs rows")
@@ -411,7 +411,7 @@ def hysplit_controls_generation(
     df = None
     if config.mode in ("backward_traj", "backward_disp"):
         log.info(f"Loading obs data for backward mode from {OBS_DATA_PATH}")
-        url = s3.get_presigned_url(OBS_DATA_PATH)
+        url = s3.publicUrl(OBS_DATA_PATH)
         df = pd.read_parquet(url)
         df["time"] = pd.to_datetime(df["time"], utc=True).dt.tz_convert("America/Los_Angeles")
 
@@ -623,7 +623,7 @@ def gaussian_forward_forecast(
 
     # Load FORECAST meteorology at 15-min cadence (not obs data)
     log.info(f"Loading 15-min forecast met data from S3: {FORECAST_DATA_15MIN_PATH}")
-    url = s3.get_presigned_url(FORECAST_DATA_15MIN_PATH)
+    url = s3.publicUrl(FORECAST_DATA_15MIN_PATH)
     fc_df = pd.read_parquet(url)
     fc_df["time"] = pd.to_datetime(fc_df["time"], utc=True).dt.tz_convert("America/Los_Angeles")
     log.info(f"Loaded {len(fc_df)} forecast rows, time range: {fc_df['time'].min()} → {fc_df['time'].max()}")
@@ -805,7 +805,7 @@ def gaussian_forward_forecast_detailed(
 
     # Load FORECAST meteorology at 15-min cadence (not obs data)
     log.info(f"Loading 15-min forecast met data from S3: {FORECAST_DATA_15MIN_PATH}")
-    url = s3.get_presigned_url(FORECAST_DATA_15MIN_PATH)
+    url = s3.publicUrl(FORECAST_DATA_15MIN_PATH)
     fc_df = pd.read_parquet(url)
     fc_df["time"] = pd.to_datetime(fc_df["time"], utc=True).dt.tz_convert("America/Los_Angeles")
     log.info(f"Loaded {len(fc_df)} forecast rows, time range: {fc_df['time'].min()} → {fc_df['time'].max()}")

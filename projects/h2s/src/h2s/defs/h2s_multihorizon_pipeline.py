@@ -137,7 +137,7 @@ def mh_observation_state(context: dg.AssetExecutionContext) -> dict:
     bucket = context.op_config["s3_bucket"]
     s3_path = "latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet"
 
-    parquet_url = s3.get_presigned_url(path=s3_path, bucket=bucket)
+    parquet_url = s3.publicUrl(path=s3_path, bucket=bucket)
     obs_df = pd.read_parquet(parquet_url)
     obs_df['time'] = pd.to_datetime(obs_df['time'], utc=True)
     obs_df = obs_df[(obs_df['h2s_measured'] == True) & (obs_df['H2S'] <= 500)].copy()

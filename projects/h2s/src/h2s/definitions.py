@@ -151,6 +151,12 @@ def defs():
         mh_forecast_job,
     )
 
+    # Import validation pipeline assets
+    from h2s.defs.h2s_validation_pipeline import (
+        daily_station_validation_report,
+        mh_validation_report,
+    )
+
     # Import schedules and jobs
     from h2s.defs.h2s_schedules import (
         monthly_data_extraction_job,
@@ -175,6 +181,10 @@ def defs():
         dispersion_forecast_schedule,
         emissions_calibration_job,
         emissions_calibration_schedule,
+        daily_station_validation_job,
+        daily_station_validation_schedule,
+        mh_validation_job,
+        mh_validation_schedule,
     )
 
     # Create definitions with assets, jobs, schedules, and resources
@@ -238,6 +248,9 @@ def defs():
             mh_dashboard_viz,
             mh_summary_export,
             mh_slack_alerts,
+            # Validation Pipeline Assets
+            daily_station_validation_report,
+            mh_validation_report,
         ],
         jobs=[
             # Prediction jobs
@@ -270,6 +283,9 @@ def defs():
             h2s_alert_job,
             # APCD multi-station sensor watch job
             apcd_sensor_watch_job,
+            # Validation jobs
+            daily_station_validation_job,
+            mh_validation_job,
         ],
         schedules=[
             forecast_prediction_schedule,
@@ -285,6 +301,9 @@ def defs():
             dispersion_forecast_schedule,
             # Calibration schedule
             emissions_calibration_schedule,
+            # Validation schedules
+            daily_station_validation_schedule,
+            mh_validation_schedule,
         ],
         sensors=[slack_on_run_failure, h2s_alert_sensor, apcd_sensor_watch_sensor],
         resources=resources[deployment_name]

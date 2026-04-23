@@ -113,11 +113,11 @@ def _save_state(s3, state: dict) -> None:
 def _load_recent(s3, hours: int = 12) -> pd.DataFrame:
     """Load last N hours of Nestor data from S3 observation parquet."""
     public_bucket = os.environ.get("PUBLIC_BUCKET", s3.S3_BUCKET)
-    url = s3.get_presigned_url(path=OBS_DATA_PATH, bucket=public_bucket)
+    url = s3.publicUrl(path=OBS_DATA_PATH, bucket=public_bucket)
     df = pd.read_parquet(url)
     df["time"] = pd.to_datetime(df["time"], utc=True)
 
-    cutoff = pd.Timestamp.utcnow().tz_localize("UTC") - pd.Timedelta(hours=hours)
+    cutoff = pd.Timestamp.now("UTC") - pd.Timedelta(hours=hours)
     nestor = df[df["site_name"].str.contains(ALERT_SITE_NAME, case=False, na=False)].copy()
     return nestor[nestor["time"] >= cutoff].sort_values("time").reset_index(drop=True)
 
@@ -282,7 +282,7 @@ def evaluate_alerts(df: pd.DataFrame, s3) -> dict:
         "critical" : { send_onset, send_summary, onset_msg, summary_msg }
         "state"    : updated state dict — caller must persist via _save_state()
     """
-    now = pd.Timestamp.utcnow().tz_localize("UTC")
+    now = pd.Timestamp.now("UTC")
     state = _load_state(s3)
     out = {}
 

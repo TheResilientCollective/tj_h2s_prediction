@@ -453,7 +453,7 @@ def rolling_footprint_matrix(
     s3 = context.resources.s3
 
     log.info(f"Loading obs data from S3: {OBS_DATA_PATH}")
-    url = s3.get_presigned_url(OBS_DATA_PATH)
+    url = s3.publicUrl(OBS_DATA_PATH)
     df = pd.read_parquet(url)
     df["time"] = pd.to_datetime(df["time"], utc=True).dt.tz_convert("America/Los_Angeles")
     log.info(f"Loaded {len(df)} obs rows; range {df['time'].min()} → {df['time'].max()}")

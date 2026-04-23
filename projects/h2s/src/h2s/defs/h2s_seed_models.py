@@ -102,7 +102,7 @@ def _find_latest_models_dir() -> Path | None:
 def _load_training_data(s3, bucket, context):
     """Load training parquet from S3 for inline model training."""
     context.log.info(f"Loading training data from S3 ({bucket}/{TRAINING_DATA_S3_PATH})...")
-    url = s3.get_presigned_url(path=TRAINING_DATA_S3_PATH, bucket=bucket)
+    url = s3.publicUrl(path=TRAINING_DATA_S3_PATH, bucket=bucket)
     raw_df = pd.read_parquet(url)
     context.log.info(f"Loaded {len(raw_df)} rows from S3")
     return raw_df

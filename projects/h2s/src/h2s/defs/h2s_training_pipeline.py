@@ -161,7 +161,7 @@ def monthly_training_data(context: dg.AssetExecutionContext) -> pd.DataFrame:
         s3_path = context.op_config["s3_data_path"]
         context.log.info(f"Loading from S3: {s3_path}")
         try:
-            data_url = s3_resource.get_presigned_url(path=s3_path)
+            data_url = s3_resource.publicUrl(path=s3_path)
             if s3_path.endswith('.parquet'):
                 df = pd.read_parquet(data_url)
             else:

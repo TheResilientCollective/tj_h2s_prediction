@@ -39,6 +39,20 @@ FORECAST_DATA_15MIN_PATH = 'latest/tijuana/forecast_data/modeldata_forecast_15mi
 H2S_CLASS_NAMES = ['green', 'orange', 'yellow']
 H2S_CLASS_TO_INT = {'green': 0, 'orange': 1, 'yellow': 2}
 
+# Validation pipeline identifiers
+PIPELINE_HOURLY = "hourly"
+PIPELINE_DAILY_STATION = "daily_station"
+PIPELINE_MULTIHORIZON = "multihorizon"
+VALIDATION_SCHEMA_VERSION = 2
+
+# 4-tier risk → 3-class mapping for validation
+RISK_TO_3CLASS = {
+    'GREEN': 'green',
+    'YELLOW_LOW': 'yellow',
+    'YELLOW_HIGH': 'yellow',
+    'ORANGE': 'orange',
+}
+
 # ==============================================================================
 # Station & Source Geography
 # ==============================================================================

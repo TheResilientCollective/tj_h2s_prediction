@@ -22,16 +22,15 @@ testable without a Dagster context. Dagster assets at the bottom wire them
 together and handle I/O.
 """
 
-from __future__ import annotations
 
 import json
 import os
 import shutil
+import urllib.request
 import subprocess
 import tempfile
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
-from io import BytesIO
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -39,12 +38,14 @@ import numpy as np
 import pandas as pd
 
 import dagster as dg
+from dagster import AssetExecutionContext
+
+from h2s.resources.minio import S3Resource
 
 # ---------------------------------------------------------------------------
 # S3 layout
 # ---------------------------------------------------------------------------
 
-BUCKET = os.environ.get("H2S_S3_BUCKET", "test")
 VALIDATION_PREFIX = "tijuana/forecast/validation"
 ACCURACY_PREFIX = "tijuana/forecast/accuracy_reports"
 FORECAST_PREFIX = "tijuana/forecast/output"
@@ -343,62 +344,62 @@ def regime_slices(
 
 
 # ---------------------------------------------------------------------------
-# Thin S3 client (MinIO-compatible)
+# Thin S3 wrapper around S3Resource (MinIO-compatible)
 # ---------------------------------------------------------------------------
 
 
 class AccuracyStore:
-    """Read historical `metrics.json` files and write rollup artifacts."""
+    """Read historical `metrics.json` files and write rollup artifacts.
 
-    def __init__(self, bucket: str = BUCKET) -> None:
-        # Imported lazily so unit tests don't need boto3 installed.
-        import boto3  # type: ignore[import]
+    Uses the project's :class:`S3Resource` (minio client) so that no extra
+    dependency (boto3) is needed.
+    """
 
-        self._s3 = boto3.client(
-            "s3",
-            endpoint_url=os.environ.get("S3_ENDPOINT_URL"),
-            aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID"),
-            aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
-            region_name=os.environ.get("AWS_REGION", "us-east-1"),
-        )
-        self._bucket = bucket
+    def __init__(self, s3: S3Resource) -> None:
+        self._s3 = s3
 
     def read_json(self, key: str) -> dict[str, Any] | None:
         try:
-            obj = self._s3.get_object(Bucket=self._bucket, Key=key)
-        except self._s3.exceptions.NoSuchKey:
+            url = self._s3.publicUrl(path=key)
+            with urllib.request.urlopen(url) as resp:  # noqa: S310
+                return json.loads(resp.read())
+        except Exception:
             return None
-        return json.loads(obj["Body"].read())
 
     def write_json(self, key: str, payload: dict[str, Any]) -> None:
-        self._s3.put_object(
-            Bucket=self._bucket,
-            Key=key,
-            Body=json.dumps(payload, default=str, indent=2).encode("utf-8"),
-            ContentType="application/json",
-        )
+        body = json.dumps(payload, default=str, indent=2)
+        self._s3.putFile_text(data=body, path=key, content_type="application/json")
 
     def read_csv(self, key: str) -> pd.DataFrame:
-        obj = self._s3.get_object(Bucket=self._bucket, Key=key)
-        return pd.read_csv(BytesIO(obj["Body"].read()))
+        url = self._s3.publicUrl(path=key)
+        return pd.read_csv(url)
 
-    def list_validation_days(self, since: date, until: date) -> list[date]:
+    def list_validation_days(
+        self, since: date, until: date, pipeline: str | None = None,
+    ) -> list[date]:
         """Return the set of validation days present under the validation
-        prefix within [since, until]."""
+        prefix within [since, until].
+
+        If *pipeline* is given (e.g. "hourly", "daily_station"), look under
+        the per-pipeline subdirectory.  Otherwise fall back to the legacy
+        root ``metrics.json``.
+        """
         days: list[date] = []
         cur = since
         while cur <= until:
-            key = f"{VALIDATION_PREFIX}/{cur.isoformat()}/metrics.json"
-            try:
-                self._s3.head_object(Bucket=self._bucket, Key=key)
+            if self.read_day_metrics(cur, pipeline=pipeline) is not None:
                 days.append(cur)
-            except Exception:  # noqa: BLE001 — 404s are expected
-                pass
             cur += timedelta(days=1)
         return days
 
-    def read_day_metrics(self, day: date) -> dict[str, Any] | None:
-        return self.read_json(f"{VALIDATION_PREFIX}/{day.isoformat()}/metrics.json")
+    def read_day_metrics(
+        self, day: date, pipeline: str | None = None,
+    ) -> dict[str, Any] | None:
+        if pipeline:
+            key = f"{VALIDATION_PREFIX}/{day.isoformat()}/{pipeline}/metrics.json"
+        else:
+            key = f"{VALIDATION_PREFIX}/{day.isoformat()}/metrics.json"
+        return self.read_json(key)
 
 
 # ---------------------------------------------------------------------------
@@ -416,8 +417,16 @@ def build_period_scorecard(
     end: date,
     scope: str,
 ) -> PeriodScorecard:
-    """Aggregate per-day metrics.json into a single scorecard for [start, end]."""
+    """Aggregate per-day metrics.json into a single scorecard for [start, end].
+
+    Raises ``dg.Failure`` when no validation days are found in the window.
+    """
     days = store.list_validation_days(start, end)
+    if not days:
+        raise dg.Failure(
+            f"No validation metrics found for {scope} window "
+            f"[{start.isoformat()} .. {end.isoformat()}]"
+        )
     site_cms: dict[str, list[list[list[int]]]] = {}
     site_pred_counts: dict[str, int] = {}
     site_match_counts: dict[str, int] = {}
@@ -426,7 +435,19 @@ def build_period_scorecard(
         m = store.read_day_metrics(day)
         if not m:
             continue
-        for site, site_m in (m.get("sites") or {}).items():
+        # Handle v1 (flat) and v2 (sites dict) schemas
+        sites_dict = m.get("sites")
+        if sites_dict is None and m.get("confusion_matrix") is not None:
+            # v1 flat schema: wrap into sites dict for uniform processing
+            site_key = m.get("site", "NESTOR__BES")
+            sites_dict = {
+                site_key: {
+                    "confusion_matrix": m["confusion_matrix"],
+                    "n_predictions": m.get("n_predictions", 0),
+                    "n_matched_observations": m.get("n_matched", 0),
+                },
+            }
+        for site, site_m in (sites_dict or {}).items():
             cm = site_m.get("confusion_matrix")
             if cm is None:
                 continue
@@ -435,7 +456,7 @@ def build_period_scorecard(
                 site_m.get("n_predictions", 0)
             )
             site_match_counts[site] = site_match_counts.get(site, 0) + int(
-                site_m.get("n_matched_observations", 0)
+                site_m.get("n_matched_observations", site_m.get("n_matched", 0))
             )
 
     site_cards: list[SiteScorecard] = []
@@ -478,11 +499,18 @@ daily_partitions = dg.DailyPartitionsDefinition(start_date="2024-01-01")
 @dg.asset(
     partitions_def=daily_partitions,
     group_name="accuracy_reporting",
+    required_resource_keys={"s3"},
     description="Daily scorecard aggregated from that day's metrics.json",
 )
-def daily_accuracy_scorecard(context: dg.AssetExecutionContext) -> dict[str, Any]:
+def daily_accuracy_scorecard(context: AssetExecutionContext) -> dict[str, Any]:
     day = date.fromisoformat(context.partition_key)
-    store = AccuracyStore()
+    store = AccuracyStore(context.resources.s3)
+    metrics = store.read_day_metrics(day)
+    if metrics is None:
+        raise dg.Failure(
+            f"No metrics.json found for {day.isoformat()} at "
+            f"{VALIDATION_PREFIX}/{day.isoformat()}/metrics.json"
+        )
     card = build_period_scorecard(store, day, day, scope="daily")
     store.write_json(
         f"{ACCURACY_PREFIX}/daily/{day.isoformat()}/scorecard.json",
@@ -498,12 +526,13 @@ def daily_accuracy_scorecard(context: dg.AssetExecutionContext) -> dict[str, Any
 
 @dg.asset(
     group_name="accuracy_reporting",
+    required_resource_keys={"s3"},
     description="Rolling 7d/30d/90d scorecards written to S3 and a combined "
                 "`latest.json` pointer for downstream UIs.",
     deps=[daily_accuracy_scorecard],
 )
-def rolling_accuracy_scorecards(context: dg.AssetExecutionContext) -> dict[str, Any]:
-    store = AccuracyStore()
+def rolling_accuracy_scorecards(context: AssetExecutionContext) -> dict[str, Any]:
+    store = AccuracyStore(context.resources.s3)
     today = datetime.now(timezone.utc).date()
     summary: dict[str, Any] = {"generated_at": _now_iso(), "windows": {}}
     for window in ROLLING_WINDOWS_DAYS:
@@ -523,11 +552,12 @@ def rolling_accuracy_scorecards(context: dg.AssetExecutionContext) -> dict[str, 
 
 @dg.asset(
     group_name="accuracy_reporting",
+    required_resource_keys={"s3"},
     description="Calendar-month scorecard for the previous complete month.",
     deps=[daily_accuracy_scorecard],
 )
-def monthly_accuracy_scorecard(context: dg.AssetExecutionContext) -> dict[str, Any]:
-    store = AccuracyStore()
+def monthly_accuracy_scorecard(context: AssetExecutionContext) -> dict[str, Any]:
+    store = AccuracyStore(context.resources.s3)
     today = datetime.now(timezone.utc).date()
     first_of_this_month = today.replace(day=1)
     last_of_prev = first_of_this_month - timedelta(days=1)
@@ -542,12 +572,13 @@ def monthly_accuracy_scorecard(context: dg.AssetExecutionContext) -> dict[str, A
 
 @dg.asset(
     group_name="accuracy_reporting",
+    required_resource_keys={"s3"},
     description="Alert-level precision/recall for green/yellow/orange over the "
                 "rolling 30-day window.",
     deps=[daily_accuracy_scorecard],
 )
-def alert_performance(context: dg.AssetExecutionContext) -> dict[str, Any]:
-    store = AccuracyStore()
+def alert_performance(context: AssetExecutionContext) -> dict[str, Any]:
+    store = AccuracyStore(context.resources.s3)
     today = datetime.now(timezone.utc).date()
     card = build_period_scorecard(
         store, today - timedelta(days=30), today, scope="rolling"
@@ -581,12 +612,13 @@ QUARTO_TEMPLATE = _REPO_ROOT / "projects" / "h2s" / "reports" / "monthly_accurac
 
 @dg.asset(
     group_name="accuracy_reporting",
+    required_resource_keys={"s3"},
     description="Render the monthly Quarto accuracy report to HTML and upload "
                 "to S3 under `accuracy_reports/monthly/{YYYY-MM}/`. Netlify "
                 "publishing is handled by the generic netlify_triggers flow.",
     deps=[monthly_accuracy_scorecard],
 )
-def monthly_accuracy_report_html(context: dg.AssetExecutionContext) -> dict[str, Any]:
+def monthly_accuracy_report_html(context: AssetExecutionContext) -> dict[str, Any]:
     if not QUARTO_TEMPLATE.exists():
         raise dg.Failure(f"Quarto template not found: {QUARTO_TEMPLATE}")
     if shutil.which("quarto") is None:
@@ -620,15 +652,14 @@ def monthly_accuracy_report_html(context: dg.AssetExecutionContext) -> dict[str,
                 raise dg.Failure("quarto produced no HTML output")
             html_path = candidates[0]
 
-        store = AccuracyStore()
+        s3 = context.resources.s3
         key = f"{ACCURACY_PREFIX}/monthly/{period}/report.html"
-        store._s3.put_object(  # noqa: SLF001 — intentional; write_json only handles JSON
-            Bucket=store._bucket,
-            Key=key,
-            Body=html_path.read_bytes(),
-            ContentType="text/html; charset=utf-8",
+        s3.putFile(
+            data=html_path.read_bytes(),
+            path=key,
+            content_type="text/html; charset=utf-8",
         )
-        context.log.info("uploaded monthly report to s3://%s/%s", store._bucket, key)
+        context.log.info("uploaded monthly report to s3://%s/%s", s3.S3_BUCKET, key)
         return {"period": period, "s3_key": key}
 
 
@@ -638,7 +669,7 @@ def monthly_accuracy_report_html(context: dg.AssetExecutionContext) -> dict[str,
                 "SLACK_WEBHOOK_URL in the environment.",
     deps=[rolling_accuracy_scorecards],
 )
-def weekly_scorecard_post(context: dg.AssetExecutionContext) -> dict[str, Any]:
+def weekly_scorecard_post(context: AssetExecutionContext) -> dict[str, Any]:
     from h2s.reporting import weekly_scorecard  # local import — avoid at import time
 
     if "SLACK_WEBHOOK_URL" not in os.environ:
@@ -669,8 +700,9 @@ weekly_scorecard_job = dg.define_asset_job(
 
 @dg.schedule(
     job=accuracy_reporting_job,
-    cron_schedule="30 8 * * *",  # 30 minutes after daily validation finishes.
+    cron_schedule="0 10 * * *",  # after all validation schedules (hourly 8AM, station 9AM, MH 9:30AM).
     execution_timezone="UTC",
+    default_status=dg.DefaultScheduleStatus.RUNNING,
 )
 def daily_accuracy_schedule(context: dg.ScheduleEvaluationContext):
     partition = (context.scheduled_execution_time.date() - timedelta(days=1)).isoformat()
@@ -684,6 +716,7 @@ def daily_accuracy_schedule(context: dg.ScheduleEvaluationContext):
     job=monthly_accuracy_job,
     cron_schedule="0 9 1 * *",  # first day of the month, after rollups settle.
     execution_timezone="UTC",
+    default_status=dg.DefaultScheduleStatus.RUNNING,
 )
 def monthly_accuracy_schedule(context: dg.ScheduleEvaluationContext):
     return dg.RunRequest(run_key=f"monthly-{context.scheduled_execution_time:%Y-%m}")
@@ -693,6 +726,7 @@ def monthly_accuracy_schedule(context: dg.ScheduleEvaluationContext):
     job=weekly_scorecard_job,
     cron_schedule="0 16 * * 1",  # Mondays 09:00 America/Los_Angeles = 16:00 UTC.
     execution_timezone="UTC",
+    default_status=dg.DefaultScheduleStatus.RUNNING,
 )
 def weekly_scorecard_schedule(context: dg.ScheduleEvaluationContext):
     return dg.RunRequest(

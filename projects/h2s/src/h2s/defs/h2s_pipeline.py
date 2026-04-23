@@ -23,6 +23,7 @@ from h2s.constants import (
     LATEST_FORECAST,
     MODEL_PATH,
     OBS_DATA_PATH,
+    PIPELINE_DAILY_STATION,
     VALIDATION_PATH,
     VISUALIZATIONS_PATH,
 )
@@ -143,7 +144,7 @@ def preprocessed_features(
         context.log.info(f"   Reading from PUBLIC_BUCKET: {public_bucket}")
 
         try:
-            data_url = s3.get_presigned_url(path=data_path, bucket=public_bucket)
+            data_url = s3.publicUrl(path=data_path, bucket=public_bucket)
             df = pd.read_parquet(data_url)
             context.log.info(f"✓ Loaded {len(df)} rows from observation data")
         except Exception as e:
@@ -191,7 +192,7 @@ def preprocessed_features(
         context.log.info(f"   Reading from PUBLIC_BUCKET: {public_bucket}")
 
         try:
-            data_url = s3.get_presigned_url(path=data_path, bucket=public_bucket)
+            data_url = s3.publicUrl(path=data_path, bucket=public_bucket)
             df = pd.read_parquet(data_url)
             context.log.info(f"✓ Loaded {len(df)} rows from forecast data")
         except Exception as e:
@@ -577,7 +578,7 @@ def confusion_matrix_viz(
     # Load observation data from S3
     context.log.info(f"Loading observation data from S3: {OBS_DATA_PATH}")
     try:
-        obs_url = s3_resource.get_presigned_url(path=OBS_DATA_PATH, bucket=public_bucket)
+        obs_url = s3_resource.publicUrl(path=OBS_DATA_PATH, bucket=public_bucket)
         actuals_df = pd.read_parquet(obs_url)
         context.log.info(f"✓ Loaded {len(actuals_df)} rows from S3 (bucket: {public_bucket})")
     except Exception as e:
@@ -698,7 +699,7 @@ def model_comparison_viz(
     # Load observation data from S3
     context.log.info(f"Loading observation data from S3: {OBS_DATA_PATH}")
     try:
-        obs_url = s3_resource.get_presigned_url(path=OBS_DATA_PATH, bucket=public_bucket)
+        obs_url = s3_resource.publicUrl(path=OBS_DATA_PATH, bucket=public_bucket)
         actuals_df = pd.read_parquet(obs_url)
         context.log.info(f"✓ Loaded {len(actuals_df)} rows from S3 (bucket: {public_bucket})")
     except Exception as e:
@@ -792,7 +793,7 @@ def prediction_timeline_viz(
     # Load observation data from S3 (optional — viz works without it)
     obs_data = None
     try:
-        obs_url = s3_resource.get_presigned_url(path=OBS_DATA_PATH, bucket=public_bucket)
+        obs_url = s3_resource.publicUrl(path=OBS_DATA_PATH, bucket=public_bucket)
         obs_data = pd.read_parquet(obs_url)
         context.log.info(f"✓ Loaded {len(obs_data)} rows from observation data (bucket: {public_bucket})")
         h2s_cols = [col for col in obs_data.columns if col.upper() == 'H2S' or 'h2s' in col.lower()]
@@ -851,7 +852,7 @@ def cross_correlation_viz(
     # Load observation data from S3
     context.log.info(f"Loading observation data from S3: {OBS_DATA_PATH}")
     try:
-        obs_url = s3_resource.get_presigned_url(path=OBS_DATA_PATH, bucket=public_bucket)
+        obs_url = s3_resource.publicUrl(path=OBS_DATA_PATH, bucket=public_bucket)
         obs_data = pd.read_parquet(obs_url)
         context.log.info(f"✓ Loaded {len(obs_data)} rows from S3 (bucket: {public_bucket})")
     except Exception as e:
@@ -1040,7 +1041,7 @@ def daily_validation_report(context: dg.AssetExecutionContext) -> None:
     for hour in ["00", "06", "12", "18"]:
         s3_path = f"{HOURLY_PREDICTIONS_PATH}/model=nestor_xgboost/year={y}/month={m}/day={d}/hour={hour}/h2s_predictions.csv"
         try:
-            csv_url = s3_resource.get_presigned_url(path=s3_path)
+            csv_url = s3_resource.publicUrl(path=s3_path)
             df = pd.read_csv(csv_url)
             df["run_hour"] = hour
             prediction_dfs.append(df)
@@ -1049,8 +1050,11 @@ def daily_validation_report(context: dg.AssetExecutionContext) -> None:
             context.log.warning(f"No predictions found for {yesterday}_{hour}: {e}")
 
     if not prediction_dfs:
-        context.log.warning(f"No predictions found for {yesterday} — skipping validation report")
-        return
+        raise dg.Failure(
+            f"No predictions found for {yesterday} in "
+            f"{HOURLY_PREDICTIONS_PATH}/model=nestor_xgboost/year={y}/month={m}/day={d}/hour={{00,06,12,18}}/. "
+            f"Is forecast_prediction_schedule running?"
+        )
 
     predictions_df = pd.concat(prediction_dfs, ignore_index=True)
     context.log.info(f"Combined {len(predictions_df)} predictions across {len(prediction_dfs)} runs")
@@ -1070,7 +1074,7 @@ def daily_validation_report(context: dg.AssetExecutionContext) -> None:
 
     # Load actual H2S measurements from OBS_DATA_PATH (FAIL if missing)
     context.log.info(f"Loading observation data from {OBS_DATA_PATH} (bucket: {public_bucket})")
-    parquet_url = s3_resource.get_presigned_url(path=OBS_DATA_PATH, bucket=public_bucket)
+    parquet_url = s3_resource.publicUrl(path=OBS_DATA_PATH, bucket=public_bucket)
     actuals_df = pd.read_parquet(parquet_url)
     context.log.info(f"✓ Loaded {len(actuals_df)} total observation rows from S3")
 
@@ -1098,11 +1102,10 @@ def daily_validation_report(context: dg.AssetExecutionContext) -> None:
     context.log.info(f"✓ Loaded {len(actuals_df)} actual H2S measurements for NESTOR-BES on {yesterday}")
 
     if len(actuals_df) == 0:
-        context.log.warning(
-            f"No observation data found for NESTOR-BES on {yesterday} — sensors likely offline. "
-            f"Skipping validation report."
+        raise dg.Failure(
+            f"No observation data found for NESTOR-BES on {yesterday}. "
+            f"Sensors may be offline or {OBS_DATA_PATH} may not cover this date."
         )
-        return
 
     validation_base = f"{VALIDATION_PATH}/{yesterday}"
 
@@ -1126,11 +1129,11 @@ def daily_validation_report(context: dg.AssetExecutionContext) -> None:
     context.log.info(f"Merged {len(merged)} predictions with actuals (match rate: {len(merged)/len(predictions_df):.1%})")
 
     if len(merged) == 0:
-        context.log.warning(
-            f"No predictions matched with actuals for {yesterday} — time alignment issue or sensors offline. "
-            f"Skipping validation report."
+        raise dg.Failure(
+            f"No predictions matched with actuals for {yesterday}. "
+            f"Predictions: {predictions_df['time'].min()} to {predictions_df['time'].max()}, "
+            f"Actuals: {actuals_df['time'].min()} to {actuals_df['time'].max()}"
         )
-        return
 
     # Categorize actual H2S values
     def categorize_h2s(value):
@@ -1146,11 +1149,10 @@ def daily_validation_report(context: dg.AssetExecutionContext) -> None:
     merged = merged[merged['actual_category'].notna()].copy()
 
     if len(merged) == 0:
-        context.log.warning(
-            f"No valid H2S measurements for {yesterday} — sensors likely offline for maintenance. "
-            f"Skipping validation report."
+        raise dg.Failure(
+            f"No valid H2S measurements for {yesterday} after filtering NaNs. "
+            f"Sensors may be offline for maintenance."
         )
-        return
 
     # Convert string categories to integers (for calculate_metrics compatibility)
     y_true_int = merged['actual_category'].map(H2S_CLASS_TO_INT)
@@ -1170,15 +1172,14 @@ def daily_validation_report(context: dg.AssetExecutionContext) -> None:
         positive_class=1
     )
 
-    # Build metrics output structure
-    metrics_output = {
-        "date": yesterday,
-        "timestamp": datetime.now().isoformat(),
-        "site": "NESTOR__BES",
+    # Build v2 metrics output structure (sites dict for accuracy_reporting compat)
+    site_metrics = {
         "n_predictions": len(predictions_df),
-        "n_matched": len(merged),
+        "n_matched_observations": len(merged),
         "match_rate": float(len(merged) / len(predictions_df)),
         "balanced_accuracy": float(metrics_dict['balanced_accuracy']),
+        "false_alarm_rate": float(far),
+        "confusion_matrix": metrics_dict['confusion_matrix'],
         "class_metrics": {
             cls: {
                 "precision": float(metrics_dict.get(f'precision_{cls}', 0.0)),
@@ -1187,19 +1188,32 @@ def daily_validation_report(context: dg.AssetExecutionContext) -> None:
             }
             for cls in ['green', 'yellow', 'orange']
         },
-        "confusion_matrix": metrics_dict['confusion_matrix'],  # Already a list
-        "false_alarm_rate": float(far)
+        "regression_metrics": None,
+    }
+    metrics_output = {
+        "schema_version": 2,
+        "date": yesterday,
+        "pipeline": "hourly",
+        "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "sites": {
+            "NESTOR__BES": site_metrics,
+        },
+        "horizon_metrics": None,
     }
 
-    # Upload metrics.json to S3
+    # Upload metrics.json to S3 (both legacy root and hourly subdir)
     metrics_json = json.dumps(metrics_output, indent=2)
-    s3_resource.putFile(
-        metrics_json.encode('utf-8'),
+    for metrics_path in [
         f"{validation_base}/metrics.json",
-        bucket=s3_resource.S3_BUCKET,
-        content_type='application/json'
-    )
-    context.log.info(f"✓ Uploaded metrics.json (balanced_accuracy={metrics_output['balanced_accuracy']:.3f}, FAR={far:.3f})")
+        f"{validation_base}/hourly/metrics.json",
+    ]:
+        s3_resource.putFile(
+            metrics_json.encode('utf-8'),
+            metrics_path,
+            bucket=s3_resource.S3_BUCKET,
+            content_type='application/json'
+        )
+    context.log.info(f"✓ Uploaded metrics.json (balanced_accuracy={site_metrics['balanced_accuracy']:.3f}, FAR={far:.3f})")
 
     # Generate and upload validation plots (FAIL on error)
     all_stations = [
@@ -1308,7 +1322,7 @@ def monthly_performance_viz(context: dg.AssetExecutionContext) -> None:
     for i in range(30):
         date = today - timedelta(days=i+1)
         date_str = date.strftime("%Y-%m-%d")
-        metrics_path = f"{VALIDATION_PATH}/{date_str}/metrics.json"
+        metrics_path = f"{VALIDATION_PATH}/{date_str}/{PIPELINE_DAILY_STATION}/metrics.json"
 
         try:
             metrics_bytes = s3_resource.getFile(metrics_path, bucket=s3_resource.S3_BUCKET)
