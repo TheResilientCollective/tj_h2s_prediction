@@ -24,4 +24,4 @@ EXPOSE 5006
 # --allow-websocket-origin=* is required so the Panel websocket accepts
 # connections behind Railway's proxy; tighten this in production.
 ENV PORT=5006
-CMD ["sh", "-c", " uv run panel serve dashboard/app.py --address 0.0.0.0 --port ${PORT} --allow-websocket-origin=*"]
+CMD ["sh", "-c", " uv run panel serve dashboard/app.py --address 127.0.0.1 --port ${PORT} --allow-websocket-origin=*"]
