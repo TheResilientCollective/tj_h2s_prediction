@@ -1,4 +1,4 @@
-# Build context: repo root (Railway sets this automatically)
+# Build context: dashboard/
 FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -10,12 +10,12 @@ WORKDIR /app
 # Install uv for fast dependency resolution
 RUN pip install --no-cache-dir uv==0.4.*
 
-# Copy dashboard package manifest and install deps
-COPY dashboard/pyproject.toml dashboard/uv.lock ./
+# Copy manifest and install deps
+COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 
 # Copy dashboard source
-COPY dashboard/ /app/dashboard/
+COPY . /app/dashboard/
 
 EXPOSE 5006
 

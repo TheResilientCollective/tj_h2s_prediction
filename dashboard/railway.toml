@@ -3,7 +3,8 @@
 
 [build]
 builder = "DOCKERFILE"
-dockerfilePath = "build/Dockerfile_dashboard"
+dockerfilePath = "Dockerfile"
+
 
 [deploy]
 startCommand = "uv run panel serve dashboard/app.py --address 0.0.0.0 --port $PORT --allow-websocket-origin=*"
