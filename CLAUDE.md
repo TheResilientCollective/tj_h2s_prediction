@@ -79,6 +79,17 @@ tj_h2s_prediction/
 ├── nestor_xgboost_weighted_model.json  # 4.2 MB trained model (root copy)
 └── nestor_preprocessing_info.json      # Feature metadata (JSON, not pickle)
 ```
+### Asset Development Guidelines
+When creating new assets:
+1. Use consistent imports: `dagster`, `pandas`, `geopandas`, `requests`
+2. Import shared utilities: `from utils import store_assets`
+3. Require necessary resources: `s3`, `slack`
+  * use s3.publicUrl to generate S3 URLs for visualization metadata and Slack alerts
+  * avoid s3.get_presigned_url
+6. Include proper error handling and logging with `get_dagster_logger()`
+7. use utils/store_assets to Store data in both raw and processed formats.
+
+8. Add automation conditions for scheduling (e.g., `AutomationCondition.eager()`)
 
 ## Operational Runbooks
 
