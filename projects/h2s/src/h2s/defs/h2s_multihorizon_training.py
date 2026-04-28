@@ -155,32 +155,43 @@ def mh_trained_models(
         hz_cfg = HORIZONS[hz_name]
         context.log.info(f"  Horizon {hz_name}: {hz_cfg['description']}")
 
-        # Build horizon-specific features on top of pre-featurized data
-        hz_df, feature_cols = build_horizon_features(sdf, hz_name, hz_cfg)
-        hz_df = hz_df.dropna(subset=feature_cols).reset_index(drop=True)
+        # Build long-format (origin, lead_hour) training rows. Targets are
+        # H2S(origin + lead_hour) — i.e. an honest forecast at lead `h`.
+        hz_df, feature_cols, targets = build_horizon_features(sdf, hz_name, hz_cfg)
 
         if len(hz_df) < 100:
             context.log.warning(f"    Only {len(hz_df)} rows after dropna, skipping")
             continue
 
+        # Split by origin time so (origin, h=6) and (origin, h=7) never end up
+        # on opposite sides of the split.
+        unique_origins = np.sort(hz_df['origin_time'].unique())
+        n_train_origins = max(1, int(len(unique_origins) * TRAIN_FRACTION))
+        cutoff = unique_origins[n_train_origins - 1]
+        train_mask = (hz_df['origin_time'] <= cutoff).values
+
         X = hz_df[feature_cols].values
-        y_cont = hz_df['H2S'].values
-        y_5 = hz_df['exceed_5'].values
-        y_10 = hz_df['exceed_10'].values
-        y_30 = hz_df['exceed_30'].values
+        y_cont = targets['y_reg']
+        y_5 = targets['y_5']
+        y_10 = targets['y_10']
+        y_30 = targets['y_30']
 
-        split = int(len(hz_df) * TRAIN_FRACTION)
-        Xtr, Xte = X[:split], X[split:]
+        Xtr, Xte = X[train_mask], X[~train_mask]
 
-        context.log.info(f"    {len(hz_df)} rows (train:{split}, test:{len(hz_df)-split}), {len(feature_cols)} features")
+        context.log.info(
+            f"    {len(hz_df)} rows ({len(unique_origins)} origins, "
+            f"train_origins:{n_train_origins}, "
+            f"train:{int(train_mask.sum())}, test:{int((~train_mask).sum())}), "
+            f"{len(feature_cols)} features, lead_range={hz_cfg['lead_range']}"
+        )
 
         hz_models = {}
         hz_metrics = {}
         task_defs = [
-            ('regression', y_cont[:split], y_cont[split:]),
-            ('clf_5ppb',   y_5[:split],    y_5[split:]),
-            ('clf_10ppb',  y_10[:split],   y_10[split:]),
-            ('clf_30ppb',  y_30[:split],   y_30[split:]),
+            ('regression', y_cont[train_mask], y_cont[~train_mask]),
+            ('clf_5ppb',   y_5[train_mask],    y_5[~train_mask]),
+            ('clf_10ppb',  y_10[train_mask],   y_10[~train_mask]),
+            ('clf_30ppb',  y_30[train_mask],   y_30[~train_mask]),
         ]
 
         for task, ytr, yte in task_defs:
@@ -254,16 +265,30 @@ def mh_training_report(
 
     for hz_name in models:
         hz_cfg = HORIZONS[hz_name]
-        hz_df, feature_cols = build_horizon_features(sdf, hz_name, hz_cfg)
-        hz_df = hz_df.dropna(subset=feature_cols).reset_index(drop=True)
+        hz_df, feature_cols, targets = build_horizon_features(sdf, hz_name, hz_cfg)
 
-        split = int(len(hz_df) * TRAIN_FRACTION)
+        if len(hz_df) == 0:
+            report['horizons'][hz_name] = {
+                'n_features': len(feature_cols),
+                'features': feature_cols,
+                'n_train': 0,
+                'n_test': 0,
+                'tasks': {},
+            }
+            continue
+
+        unique_origins = np.sort(hz_df['origin_time'].unique())
+        n_train_origins = max(1, int(len(unique_origins) * TRAIN_FRACTION))
+        cutoff = unique_origins[n_train_origins - 1]
+        train_mask = (hz_df['origin_time'] <= cutoff).values
+        test_mask = ~train_mask
+
         X = hz_df[feature_cols].values
-        Xte = X[split:]
-        yte_c = hz_df['H2S'].values[split:]
-        yte_5 = hz_df['exceed_5'].values[split:]
-        yte_10 = hz_df['exceed_10'].values[split:]
-        yte_30 = hz_df['exceed_30'].values[split:]
+        Xte = X[test_mask]
+        yte_c = targets['y_reg'][test_mask]
+        yte_5 = targets['y_5'][test_mask]
+        yte_10 = targets['y_10'][test_mask]
+        yte_30 = targets['y_30'][test_mask]
 
         tasks_metrics = {}
         for task, yte in [('regression', yte_c), ('clf_5ppb', yte_5), ('clf_10ppb', yte_10), ('clf_30ppb', yte_30)]:
@@ -286,8 +311,8 @@ def mh_training_report(
         report['horizons'][hz_name] = {
             'n_features': len(feature_cols),
             'features': feature_cols,
-            'n_train': split,
-            'n_test': len(hz_df) - split,
+            'n_train': int(train_mask.sum()),
+            'n_test': int(test_mask.sum()),
             'tasks': tasks_metrics,
         }
 
