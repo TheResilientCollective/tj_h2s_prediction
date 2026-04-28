@@ -201,8 +201,14 @@ def mh_forecasts(
 
     forecast_df['time'] = pd.to_datetime(forecast_df['time'], utc=True)
     fc_start = forecast_df['time'].min()
+    # Forecast issue time — anchor for lead_hour and origin-anchored features.
+    # Per-station obs_state may have a slightly different last-observation time
+    # but using fc_start keeps every horizon slice aligned to the same origin.
+    origin_time = fc_start
 
-    # Clip to 24-hour window — source may contain 48h or 72h of data
+    # Clip to 24-hour window — source may contain 48h or 72h of data.
+    # NOTE: widening this clip is required if 24_48h / 48_72h are ever added
+    # to FORECAST_HORIZON_BOUNDS.
     fc_end = fc_start + pd.Timedelta(hours=24)
     forecast_df = forecast_df[forecast_df['time'] < fc_end].copy()
     context.log.info(f"Forecast window: {fc_start} → {fc_end} ({len(forecast_df)} rows after 24h clip)")
@@ -233,8 +239,12 @@ def mh_forecasts(
             if len(hz_slice) == 0:
                 continue
 
-            # Build horizon-specific features
-            hz_feat, feature_cols = build_forecast_features(hz_slice, obs_state, hz_name, hz_cfg)
+            # Build horizon-specific features (origin-anchored lags + forecast-time
+            # exogenous features + lead_hour). origin_time is the forecast issue
+            # time so lead_hour = (row.time - origin_time) hours.
+            hz_feat, feature_cols = build_forecast_features(
+                hz_slice, obs_state, hz_name, hz_cfg, origin_time
+            )
 
             # Use stored feature list if available (ensures column order matches training)
             stored_cols = horizon_features.get(hz_name, {}).get(site_name)
