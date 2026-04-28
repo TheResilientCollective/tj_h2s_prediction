@@ -1,14 +1,13 @@
 """Multi-Horizon H2S Model Training Pipeline.
 
-Trains 4 horizons × 3 stations × 4 tasks = 48 models. Each horizon uses
-features that honestly reflect what's known at that lead time.
+Trains 4 horizons × 3 stations × 3 tasks = 36 models.
+Each horizon uses features that honestly reflect what's known at that lead time.
 
-Models are streamed to S3 staging during training (one pickle at a time) and
-promoted to their final paths via server-side copy on deployment:
+Models are stored as pickle files at:
   tijuana/forecast/models/multihorizon/{horizon}/{station_key}/{task}.pkl
 """
 
-import gc
+import io
 import json
 import pickle
 from datetime import datetime, timezone
@@ -16,12 +15,12 @@ from datetime import datetime, timezone
 import dagster as dg
 import numpy as np
 import pandas as pd
-from minio.commonconfig import CopySource
 
-from h2s.constants import MH_MODELS_S3_BASE, MH_STAGING_S3_BASE
+from h2s.constants import MH_MODELS_S3_BASE
 from h2s.training.multi_station_trainer import (
     eval_classifier,
     eval_regressor,
+    get_feature_importance,
     train_and_select,
     TRAIN_FRACTION,
 )
@@ -31,6 +30,7 @@ from h2s.training.multihorizon_trainer import (
     HORIZON_NAMES,
     STATION_PARTITION_MAP,
     STATIONS,
+    TASKS,
     build_horizon_features,
 )
 
@@ -130,21 +130,15 @@ def mh_trained_models(
 ) -> dict:
     """Train regression + classifier models for all 4 horizons at one station.
 
-    Each model is pickled and uploaded to a per-run S3 staging prefix as soon
-    as it is trained, then dropped from memory. Only metadata (S3 paths,
-    eval metrics, feature lists) is returned — keeping the asset output small
-    so Dagster's IO manager doesn't pin all 16 trained models in RAM.
+    Returns dict with:
+      - 'models': {horizon: {task: model_object}}
+      - 'horizon_features': {horizon: [feature_col_names]}
     """
     partition = context.partition_key
     site_name = STATION_PARTITION_MAP[partition]
-    station_key = STATIONS[site_name]['key']
     ensemble_margin = context.op_config["ensemble_margin"]
-    s3 = context.resources.s3
-    run_id = context.run_id
-    staging_prefix = f"{MH_STAGING_S3_BASE}/{run_id}/{station_key}"
 
-    context.log.info(f"Training MH models for {site_name} (partition: {partition}, run_id: {run_id})")
-    context.log.info(f"Staging prefix: s3://{s3.S3_BUCKET}/{staging_prefix}")
+    context.log.info(f"Training MH models for {site_name} (partition: {partition})")
 
     sdf = mh_training_data[
         mh_training_data['site_name'] == site_name
@@ -153,11 +147,9 @@ def mh_trained_models(
     if len(sdf) < 100:
         raise ValueError(f"Insufficient data for {site_name}: {len(sdf)} rows")
 
-    staging_paths: dict = {}
-    all_features: dict = {}
-    all_metrics: dict = {}
-    all_choices: dict = {}
-    all_splits: dict = {}
+    all_models = {}
+    all_features = {}
+    all_metrics = {}
 
     for hz_name in HORIZON_NAMES:
         hz_cfg = HORIZONS[hz_name]
@@ -169,8 +161,6 @@ def mh_trained_models(
 
         if len(hz_df) < 100:
             context.log.warning(f"    Only {len(hz_df)} rows after dropna, skipping")
-            del hz_df, targets
-            gc.collect()
             continue
 
         # Split by origin time so (origin, h=6) and (origin, h=7) never end up
@@ -179,108 +169,56 @@ def mh_trained_models(
         n_train_origins = max(1, int(len(unique_origins) * TRAIN_FRACTION))
         cutoff = unique_origins[n_train_origins - 1]
         train_mask = (hz_df['origin_time'] <= cutoff).values
-        test_mask = ~train_mask
 
         X = hz_df[feature_cols].values
-        Xtr, Xte = X[train_mask], X[test_mask]
+        y_cont = targets['y_reg']
+        y_5 = targets['y_5']
+        y_10 = targets['y_10']
+        y_30 = targets['y_30']
 
-        n_train = int(train_mask.sum())
-        n_test = int(test_mask.sum())
+        Xtr, Xte = X[train_mask], X[~train_mask]
+
         context.log.info(
             f"    {len(hz_df)} rows ({len(unique_origins)} origins, "
             f"train_origins:{n_train_origins}, "
-            f"train:{n_train}, test:{n_test}), "
+            f"train:{int(train_mask.sum())}, test:{int((~train_mask).sum())}), "
             f"{len(feature_cols)} features, lead_range={hz_cfg['lead_range']}"
         )
 
+        hz_models = {}
+        hz_metrics = {}
         task_defs = [
-            ('regression', targets['y_reg'][train_mask], targets['y_reg'][test_mask]),
-            ('clf_5ppb',   targets['y_5'][train_mask],   targets['y_5'][test_mask]),
-            ('clf_10ppb',  targets['y_10'][train_mask],  targets['y_10'][test_mask]),
-            ('clf_30ppb',  targets['y_30'][train_mask],  targets['y_30'][test_mask]),
+            ('regression', y_cont[train_mask], y_cont[~train_mask]),
+            ('clf_5ppb',   y_5[train_mask],    y_5[~train_mask]),
+            ('clf_10ppb',  y_10[train_mask],   y_10[~train_mask]),
+            ('clf_30ppb',  y_30[train_mask],   y_30[~train_mask]),
         ]
-
-        hz_paths: dict = {}
-        hz_metrics: dict = {}
-        hz_choices: dict = {}
 
         for task, ytr, yte in task_defs:
             context.log.info(f"    Training {task}...")
-            model, choice, _ = train_and_select(
+            model, choice, metrics = train_and_select(
                 Xtr, Xte, ytr, yte, task, ensemble_margin=ensemble_margin
             )
+            hz_models[task] = model
+            hz_metrics[task] = {k: v for k, v in metrics.items() if k != 'feature_importance'}
             context.log.info(f"      Selected: {choice}")
 
-            # Evaluate on test set with the selected model and remap importance
-            # to the horizon-specific feature names (train_and_select uses the
-            # global MODEL_FEATURES list, which is wrong for MH features).
-            if task == 'regression':
-                eval_metrics = eval_regressor(model, Xte, yte)
-            else:
-                eval_metrics = eval_classifier(model, Xte, yte)
-
-            fi_named: dict = {}
-            imp = getattr(model, 'feature_importances_', None)
-            if imp is not None:
-                imp = np.asarray(imp)
-                top_idx = np.argsort(imp)[::-1][:10]
-                fi_named = {
-                    feature_cols[i]: round(float(imp[i]), 4)
-                    for i in top_idx
-                    if i < len(feature_cols)
-                }
-
-            # Stream the pickled model straight to S3 staging.
-            staging_path = f"{staging_prefix}/{hz_name}/{task}.pkl"
-            model_bytes = pickle.dumps(model)
-            s3.putFile(
-                model_bytes,
-                staging_path,
-                bucket=s3.S3_BUCKET,
-                content_type='application/octet-stream',
-            )
-            context.log.info(
-                f"      Staged {hz_name}/{task} ({len(model_bytes) / 1e6:.1f} MB) -> {staging_path}"
-            )
-
-            hz_paths[task] = staging_path
-            hz_metrics[task] = {**eval_metrics, 'selected': choice, 'feature_importance': fi_named}
-            hz_choices[task] = choice
-
-            # Free the model + bytes before the next task.
-            del model, model_bytes
-            gc.collect()
-
-        staging_paths[hz_name] = hz_paths
+        all_models[hz_name] = hz_models
         all_features[hz_name] = feature_cols
         all_metrics[hz_name] = hz_metrics
-        all_choices[hz_name] = hz_choices
-        all_splits[hz_name] = {'n_train': n_train, 'n_test': n_test}
-
-        # Drop the horizon feature matrix before building the next one.
-        del hz_df, X, Xtr, Xte, targets, train_mask, test_mask
-        gc.collect()
 
     context.add_output_metadata({
         "station": site_name,
         "partition": partition,
-        "run_id": run_id,
-        "staging_prefix": staging_prefix,
-        "horizons_trained": list(staging_paths.keys()),
-        "models_count": sum(len(m) for m in staging_paths.values()),
-        "algorithm_choices": all_choices,
+        "horizons_trained": list(all_models.keys()),
+        "models_count": sum(len(m) for m in all_models.values()),
+        "algorithm_choices": {
+            hz: {t: all_metrics[hz][t].get('selected', '?') for t in all_metrics[hz]}
+            for hz in all_metrics
+        },
     })
 
-    return {
-        "run_id": run_id,
-        "station_key": station_key,
-        "site_name": site_name,
-        "models_s3": staging_paths,
-        "horizon_features": all_features,
-        "metrics": all_metrics,
-        "splits": all_splits,
-        "algorithm_choices": all_choices,
-    }
+    return {"models": all_models, "horizon_features": all_features}
 
 
 # ==============================================================================
@@ -294,44 +232,87 @@ def mh_trained_models(
     required_resource_keys={"s3"},
     kinds={"json", "s3"},
     description="JSON training metrics report for one station's MH models, uploaded to S3",
-    ins={"mh_trained_models": dg.AssetIn(key=_KEY("mh_trained_models"))},
+    ins={
+        "mh_training_data": dg.AssetIn(key=_KEY("mh_training_data")),
+        "mh_trained_models": dg.AssetIn(key=_KEY("mh_trained_models")),
+    },
 )
 def mh_training_report(
     context: dg.AssetExecutionContext,
+    mh_training_data: pd.DataFrame,
     mh_trained_models: dict,
 ) -> dict:
-    """Generate and upload training metrics report for one station's MH models.
-
-    All test-set metrics and feature importances were computed inline by
-    `mh_trained_models` and stored in its return dict, so this asset does not
-    deserialize any model and does not rebuild the long-format feature
-    matrices.
-    """
+    """Generate and upload training metrics report for one station's MH models."""
     partition = context.partition_key
     site_name = STATION_PARTITION_MAP[partition]
     s3 = context.resources.s3
     station_key = STATIONS[site_name]['key']
 
-    metrics_by_hz = mh_trained_models['metrics']
+    models = mh_trained_models['models']
     horizon_features = mh_trained_models['horizon_features']
-    splits = mh_trained_models.get('splits', {})
+
+    sdf = mh_training_data[
+        mh_training_data['site_name'] == site_name
+    ].sort_values('time').reset_index(drop=True)
 
     report = {
         'generated_at': datetime.now(timezone.utc).isoformat(),
         'station': site_name,
         'partition': partition,
-        'run_id': mh_trained_models.get('run_id'),
+        'n_records': len(sdf),
         'horizons': {},
     }
 
-    for hz_name, tasks_metrics in metrics_by_hz.items():
-        feature_cols = horizon_features.get(hz_name, [])
-        hz_split = splits.get(hz_name, {})
+    for hz_name in models:
+        hz_cfg = HORIZONS[hz_name]
+        hz_df, feature_cols, targets = build_horizon_features(sdf, hz_name, hz_cfg)
+
+        if len(hz_df) == 0:
+            report['horizons'][hz_name] = {
+                'n_features': len(feature_cols),
+                'features': feature_cols,
+                'n_train': 0,
+                'n_test': 0,
+                'tasks': {},
+            }
+            continue
+
+        unique_origins = np.sort(hz_df['origin_time'].unique())
+        n_train_origins = max(1, int(len(unique_origins) * TRAIN_FRACTION))
+        cutoff = unique_origins[n_train_origins - 1]
+        train_mask = (hz_df['origin_time'] <= cutoff).values
+        test_mask = ~train_mask
+
+        X = hz_df[feature_cols].values
+        Xte = X[test_mask]
+        yte_c = targets['y_reg'][test_mask]
+        yte_5 = targets['y_5'][test_mask]
+        yte_10 = targets['y_10'][test_mask]
+        yte_30 = targets['y_30'][test_mask]
+
+        tasks_metrics = {}
+        for task, yte in [('regression', yte_c), ('clf_5ppb', yte_5), ('clf_10ppb', yte_10), ('clf_30ppb', yte_30)]:
+            if task not in models[hz_name]:
+                continue
+            model = models[hz_name][task]
+            if task == 'regression':
+                m = eval_regressor(model, Xte, yte)
+            else:
+                m = eval_classifier(model, Xte, yte)
+            fi = get_feature_importance(model)
+            # Remap feature importance to horizon feature names
+            fi_named = {}
+            imp = getattr(model, 'feature_importances_', None)
+            if imp is not None:
+                idx = np.argsort(imp)[::-1][:10]
+                fi_named = {feature_cols[i]: round(float(imp[i]), 4) for i in idx if i < len(feature_cols)}
+            tasks_metrics[task] = {**m, 'feature_importance': fi_named}
+
         report['horizons'][hz_name] = {
             'n_features': len(feature_cols),
             'features': feature_cols,
-            'n_train': int(hz_split.get('n_train', 0)),
-            'n_test': int(hz_split.get('n_test', 0)),
+            'n_train': int(train_mask.sum()),
+            'n_test': int(test_mask.sum()),
             'tasks': tasks_metrics,
         }
 
@@ -381,15 +362,10 @@ def mh_model_deployment(
     context: dg.AssetExecutionContext,
     mh_trained_models: dict,
 ) -> dict:
-    """Promote staged MH models to their final S3 paths when approved.
+    """Upload trained MH models to S3 when deployment is approved.
 
-    `mh_trained_models` already wrote each pickled model to a per-run staging
-    prefix, so deployment is a sequence of S3 server-side copies — no model is
-    ever held in this asset's memory. Final layout (unchanged):
-
-      multihorizon/{horizon}/{station_key}/{task}.pkl
-      multihorizon/{station_key}/horizon_features.json
-      multihorizon/{station_key}/deployment_metadata.json
+    Models are written to: multihorizon/{horizon}/{station_key}/{task}.pkl
+    Also writes horizon_features.json and deployment_metadata.json.
     """
     partition = context.partition_key
     site_name = STATION_PARTITION_MAP[partition]
@@ -404,38 +380,38 @@ def mh_model_deployment(
         )
         return {"status": "pending_approval", "station": site_name}
 
-    staging_paths = mh_trained_models['models_s3']
+    models = mh_trained_models['models']
     horizon_features = mh_trained_models['horizon_features']
 
-    context.log.info(f"Deploying MH models for {site_name} via S3 server-side copy")
-    client = s3.getClient()
-    bucket = s3.S3_BUCKET
-    uploaded: dict = {}
-    for hz_name, hz_paths in staging_paths.items():
-        for task, staging_path in hz_paths.items():
-            final_path = f"{MH_MODELS_S3_BASE}/{hz_name}/{station_key}/{task}.pkl"
-            client.copy_object(bucket, final_path, CopySource(bucket, staging_path))
-            context.log.info(f"  Copied {staging_path} -> {final_path}")
-            uploaded[f"{hz_name}/{task}"] = final_path
+    context.log.info(f"Deploying MH models for {site_name} to S3")
+    uploaded = {}
+    for hz_name, hz_models in models.items():
+        for task, model in hz_models.items():
+            s3_path = f"{MH_MODELS_S3_BASE}/{hz_name}/{station_key}/{task}.pkl"
+            model_bytes = pickle.dumps(model)
+            s3.putFile(model_bytes, s3_path, bucket=s3.S3_BUCKET, content_type='application/octet-stream')
+            context.log.info(f"  Uploaded {hz_name}/{task} -> {s3_path}")
+            uploaded[f"{hz_name}/{task}"] = s3_path
 
+    # Upload horizon features for this station
     feat_path = f"{MH_MODELS_S3_BASE}/{station_key}/horizon_features.json"
     feat_bytes = json.dumps(horizon_features, indent=2).encode('utf-8')
-    s3.putFile(feat_bytes, feat_path, bucket=bucket, content_type='application/json')
+    s3.putFile(feat_bytes, feat_path, bucket=s3.S3_BUCKET, content_type='application/json')
     context.log.info(f"  Uploaded horizon_features.json -> {feat_path}")
 
+    # Deployment metadata
     meta = {
         'deployed_at': datetime.now(timezone.utc).isoformat(),
         'station': site_name,
         'partition': partition,
-        'run_id': mh_trained_models.get('run_id'),
         'models': uploaded,
-        'horizons': list(staging_paths.keys()),
+        'horizons': list(models.keys()),
     }
     meta_path = f"{MH_MODELS_S3_BASE}/{station_key}/deployment_metadata.json"
     s3.putFile(
         json.dumps(meta, indent=2).encode('utf-8'),
         meta_path,
-        bucket=bucket,
+        bucket=s3.S3_BUCKET,
         content_type='application/json',
     )
 
@@ -443,7 +419,7 @@ def mh_model_deployment(
         "status": "deployed",
         "station": site_name,
         "models_uploaded": len(uploaded),
-        "horizons": list(staging_paths.keys()),
+        "horizons": list(models.keys()),
     })
     return {"status": "deployed", "station": site_name, "models": uploaded}
 

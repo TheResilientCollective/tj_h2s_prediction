@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import dagster as dg
+import numpy as np
 import pandas as pd
 
 from h2s.constants import (
@@ -233,7 +234,10 @@ def _train_and_seed_phase3(s3, bucket, context, raw_df, uploaded, dry_run, tasks
     tasks_to_train = tasks_filter or ['regression', 'clf_5ppb', 'clf_10ppb', 'clf_30ppb']
     context.log.info(f"Phase 3: Training MH models from S3 data — tasks: {tasks_to_train}")
 
-    # Load existing feature columns if available (avoids feature-count mismatch)
+    # Optional override: a local horizon_features.json from a previous run.
+    # Only honored when its columns are present in the new long-format df —
+    # files generated before the (origin, lead_hour) refactor are silently
+    # ignored with a warning.
     local_features: dict = {}
     if local_features_path is not None and Path(local_features_path).exists():
         local_features = json.loads(Path(local_features_path).read_text())
@@ -249,13 +253,6 @@ def _train_and_seed_phase3(s3, bucket, context, raw_df, uploaded, dry_run, tasks
     df['exceed_10'] = (df['H2S'] > 10).astype(int)
     df['exceed_30'] = (df['H2S'] > 30).astype(int)
 
-    _task_y_col = {
-        'regression': 'H2S',
-        'clf_5ppb': 'exceed_5',
-        'clf_10ppb': 'exceed_10',
-        'clf_30ppb': 'exceed_30',
-    }
-
     all_horizon_features = {}
 
     for site_name, station_key in STATION_KEYS.items():
@@ -268,29 +265,54 @@ def _train_and_seed_phase3(s3, bucket, context, raw_df, uploaded, dry_run, tasks
 
         for hz_name in MH_HORIZON_NAMES:
             hz_cfg = HORIZONS[hz_name]
-            hz_df, derived_cols = build_horizon_features(sdf, hz_name, hz_cfg)
-
-            # Prefer stored feature columns so clf_30ppb uses the same feature set as
-            # the existing local models (avoids feature-count mismatch at inference time)
-            if local_features and hz_name in local_features and site_name in local_features[hz_name]:
-                feature_cols = local_features[hz_name][site_name]
-                context.log.info(f"  {hz_name}: using {len(feature_cols)} stored features (vs {len(derived_cols)} derived)")
-            else:
-                feature_cols = derived_cols
-
-            hz_df = hz_df.dropna(subset=feature_cols).reset_index(drop=True)
+            hz_df, derived_cols, targets = build_horizon_features(sdf, hz_name, hz_cfg)
 
             if len(hz_df) < 100:
-                context.log.warning(f"  {hz_name}: only {len(hz_df)} rows after dropna, skipping")
+                context.log.warning(f"  {hz_name}: only {len(hz_df)} rows, skipping")
                 continue
 
+            # Honor stored override only if every column is present in the new
+            # long-format df. Pre-refactor files lack `lead_hour` and any
+            # horizon-specific column with the new naming scheme.
+            feature_cols = derived_cols
+            if local_features and hz_name in local_features and site_name in local_features[hz_name]:
+                candidate = local_features[hz_name][site_name]
+                missing = [c for c in candidate if c not in hz_df.columns]
+                if not missing:
+                    feature_cols = candidate
+                    context.log.info(
+                        f"  {hz_name}: using {len(feature_cols)} stored features "
+                        f"(vs {len(derived_cols)} derived)"
+                    )
+                else:
+                    context.log.warning(
+                        f"  {hz_name}: stored features are incompatible with current "
+                        f"training contract (missing {len(missing)} cols, e.g. {missing[:3]}); "
+                        f"using {len(derived_cols)} derived features instead"
+                    )
+
+            # Group-by-origin split so (origin, h=6) and (origin, h=7) cannot
+            # straddle the train/test boundary.
+            unique_origins = np.sort(hz_df['origin_time'].unique())
+            n_train_origins = max(1, int(len(unique_origins) * TRAIN_FRACTION))
+            cutoff = unique_origins[n_train_origins - 1]
+            train_mask = (hz_df['origin_time'] <= cutoff).values
+
             X = hz_df[feature_cols].values
-            split = int(len(hz_df) * TRAIN_FRACTION)
+            target_for_task = {
+                'regression': targets['y_reg'],
+                'clf_5ppb':   targets['y_5'],
+                'clf_10ppb':  targets['y_10'],
+                'clf_30ppb':  targets['y_30'],
+            }
 
             for task in tasks_to_train:
-                y_col = _task_y_col[task]
-                y = hz_df[y_col].values
-                model, choice, _ = train_and_select(X[:split], X[split:], y[:split], y[split:], task)
+                y = target_for_task[task]
+                model, choice, _ = train_and_select(
+                    X[train_mask], X[~train_mask],
+                    y[train_mask], y[~train_mask],
+                    task,
+                )
                 s3_path = f"{MH_MODELS_S3_BASE}/{hz_name}/{station_key}/{task}.pkl"
                 if dry_run:
                     context.log.info(f"[DRY RUN] {hz_name}/{station_key}/{task} ({choice})")
