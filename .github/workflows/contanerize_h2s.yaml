@@ -113,7 +113,7 @@ jobs:
           tags: |
             type=ref,event=tag
             type=ref,event=branch
-            type=semver,pattern={{version}}
+            type=semver,pattern={{vers
             type=sha
       - name: Build and push
         id: build
