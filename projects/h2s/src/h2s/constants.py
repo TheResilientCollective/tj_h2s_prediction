@@ -28,6 +28,7 @@ TRAINING_SNAPSHOTS_PATH = 'tijuana/forecast/training_snapshots'
 
 # Multi-horizon forecast paths
 MH_MODELS_S3_BASE = 'tijuana/forecast/models/multihorizon'
+MH_STAGING_S3_BASE = 'tijuana/forecast/models/multihorizon/_staging'
 MH_OUTPUT_PATH = 'tijuana/forecast/multihorizon'
 
 # Pre-featurized data paths
