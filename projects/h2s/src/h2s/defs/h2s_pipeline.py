@@ -7,7 +7,7 @@ and exports results to S3 with visualizations.
 
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from zoneinfo import ZoneInfo
 
