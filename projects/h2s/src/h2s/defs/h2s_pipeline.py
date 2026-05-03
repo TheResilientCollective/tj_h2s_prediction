@@ -1278,11 +1278,12 @@ def daily_validation_report(context: dg.AssetExecutionContext) -> None:
     }
 
     if metrics_output:
+        site_m = metrics_output.get('sites', {}).get('NESTOR__BES', metrics_output)
         metadata.update({
-            "balanced_accuracy": metrics_output['balanced_accuracy'],
-            "false_alarm_rate": metrics_output['false_alarm_rate'],
-            "n_matched": metrics_output['n_matched'],
-            "match_rate": metrics_output['match_rate'],
+            "balanced_accuracy": site_m['balanced_accuracy'],
+            "false_alarm_rate": site_m['false_alarm_rate'],
+            "n_matched": site_m.get('n_matched_observations', site_m.get('n_matched')),
+            "match_rate": site_m['match_rate'],
         })
 
     context.add_output_metadata(metadata)
@@ -1327,6 +1328,10 @@ def monthly_performance_viz(context: dg.AssetExecutionContext) -> None:
         try:
             metrics_bytes = s3_resource.getFile(metrics_path, bucket=s3_resource.S3_BUCKET)
             metrics_data = json.loads(metrics_bytes.decode('utf-8'))
+            # Normalize v2 schema (sites dict) to flat structure for plotting
+            if 'sites' in metrics_data:
+                site_data = metrics_data['sites'].get('NESTOR__BES', {})
+                metrics_data = {**metrics_data, **site_data}
             metrics_data['date_obj'] = date
             metrics_list.append(metrics_data)
             context.log.debug(f"✓ Loaded metrics for {date_str}")
