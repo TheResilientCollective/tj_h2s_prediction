@@ -645,3 +645,4 @@ See README.md for complete column list.
 - `DEPLOYMENT_GUIDE.md` - Complete API reference, integration examples
 - `NESTOR_BES_H2S_Forecasting_Report.md` - Technical report
 - `Complete_Model_Testing_Summary.md` - Model evaluation
+- `experiments/` - Research-style retrain experiments; each subfolder has its own `README.md` / `RESULTS.md`. Calibration-aligned evaluation harness lives in `projects/h2s/src/h2s/training/calibration_eval.py`.
