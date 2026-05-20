@@ -36,7 +36,7 @@ def ensure_base_features(df: pd.DataFrame, flow_col: str = FLOW_COL) -> pd.DataF
         - Wind rolling: wind_speed_10m_avg_2h/3h/4h, wind_gusts_10m_max_2h/3h/4h
         - Flow derivatives: flow_log, flow_low, flow_high, flow_lag_6h, flow_rolling_24h
         - Interactions: wind_temp_interaction, humidity_temp_interaction
-        - Stability: stable_atm
+        - Stability: stable_atm, wind_x_stable_atm
         - Tidal encoding: tidal_state_encoded
         - SBIWTP defaults: sbiwtp_flow_mgd, sbiwtp_anomaly, sbiwtp_deficit,
                           sbiwtp_flow_x_temp, sbiwtp_hourly_mgd, sbiwtp_sli
@@ -135,6 +135,15 @@ def ensure_base_features(df: pd.DataFrame, flow_col: str = FLOW_COL) -> pd.DataF
             df['stable_atm'] = ((df['wind_speed_10m'] < 5) & (df['is_night'] == 1)).astype(int)
         else:
             df['stable_atm'] = 0
+
+    # wind × regime interaction — lets the tree learn the sign flip
+    # calibration finding #3 documented (`f_volatilization ∝ wind²` is anti-skilled
+    # in the trapped regime; H2S anti-correlates with wind during stagnation).
+    if 'wind_x_stable_atm' not in df.columns:
+        if 'wind_speed_10m' in df.columns:
+            df['wind_x_stable_atm'] = df['wind_speed_10m'] * df['stable_atm']
+        else:
+            df['wind_x_stable_atm'] = 0.0
 
     # ========================================================================
     # Group I: Tidal state encoding

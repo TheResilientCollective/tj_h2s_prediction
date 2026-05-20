@@ -222,7 +222,7 @@ def classify_risk(prob_5: float, prob_10: float, h2s_pred: float, prob_30: float
 # Model Feature Lists
 # ==============================================================================
 
-# Core features (36) — available without SBIWTP feed
+# Core features (38) — available without SBIWTP feed
 CORE_FEATURES = [
     'temperature_2m', 'wind_speed_10m', 'wind_direction_sin', 'wind_direction_cos',
     'wind_gusts_10m', 'precipitation', 'relative_humidity_2m', 'surface_pressure',
@@ -234,7 +234,7 @@ CORE_FEATURES = [
     'is_night', 'source_regime',
     'flow_log', 'flow_low', 'flow_high',
     'wind_temp_interaction', 'humidity_temp_interaction',
-    'stable_atm',
+    'stable_atm', 'wind_x_stable_atm',
     'h2s_lag_1h', 'h2s_lag_3h', 'h2s_lag_6h',
     'h2s_rolling_6h', 'h2s_rolling_24h',
     'flow_lag_6h', 'flow_rolling_24h',
@@ -246,7 +246,7 @@ SBIWTP_FEATURES = [
     'sbiwtp_flow_x_temp', 'sbiwtp_hourly_mgd', 'sbiwtp_sli',
 ]
 
-# Full 43-feature set used by per-station models
+# Full 44-feature set used by per-station models
 MODEL_FEATURES = CORE_FEATURES + SBIWTP_FEATURES
 
 # Alias for multihorizon compatibility
