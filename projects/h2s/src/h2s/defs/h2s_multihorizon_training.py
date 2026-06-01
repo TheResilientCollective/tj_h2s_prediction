@@ -179,6 +179,7 @@ def mh_trained_models(
         n_train_origins = max(1, int(len(unique_origins) * TRAIN_FRACTION))
         cutoff = unique_origins[n_train_origins - 1]
         train_mask = (hz_df['origin_time'] <= cutoff).values
+
         test_mask = ~train_mask
 
         X = hz_df[feature_cols].values
@@ -190,14 +191,17 @@ def mh_trained_models(
             f"    {len(hz_df)} rows ({len(unique_origins)} origins, "
             f"train_origins:{n_train_origins}, "
             f"train:{n_train}, test:{n_test}), "
+
             f"{len(feature_cols)} features, lead_range={hz_cfg['lead_range']}"
         )
 
         task_defs = [
+
             ('regression', targets['y_reg'][train_mask], targets['y_reg'][test_mask]),
             ('clf_5ppb',   targets['y_5'][train_mask],   targets['y_5'][test_mask]),
             ('clf_10ppb',  targets['y_10'][train_mask],  targets['y_10'][test_mask]),
             ('clf_30ppb',  targets['y_30'][train_mask],  targets['y_30'][test_mask]),
+
         ]
 
         hz_paths: dict = {}
