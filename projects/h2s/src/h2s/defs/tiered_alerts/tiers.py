@@ -54,6 +54,15 @@ class TierResult:
     fire: bool                         # gate_passed AND score >= 0.5
 
 
+# Per-horizon Tier 3 acceptance criteria (design §6.1)
+TIER3_TARGETS: dict[str, tuple[float, float]] = {
+    "nowcast":   (0.65, 0.80),
+    "near":      (0.60, 0.75),
+    "mid":       (0.55, 0.70),
+    "day_ahead": (0.50, 0.65),
+}
+
+
 # ---------------------------------------------------------------------------
 # Config loading
 # ---------------------------------------------------------------------------

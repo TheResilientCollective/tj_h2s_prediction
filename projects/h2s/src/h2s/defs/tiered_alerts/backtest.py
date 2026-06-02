@@ -25,8 +25,6 @@ from h2s.constants import (
 )
 from .features import compute_horizon_features, _NIGHT_HOURS
 from .tiers import (
-    TierResult,
-    check_nesting,
     compute_score,
     gate_tier1,
     gate_tier2,
@@ -34,6 +32,7 @@ from .tiers import (
     load_config,
     HORIZON_ORDER,
     HORIZON_WINDOWS_H,
+    TIER3_TARGETS,
     TierNestingError,
 )
 
@@ -41,14 +40,6 @@ _FALLBACK_URL = (
     "https://oss.resilientservice.mooo.com/resilentpublic/"
     "latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet"
 )
-
-# Per-horizon Tier 3 acceptance criteria (design §6.1)
-_TARGETS: dict[str, tuple[float, float]] = {
-    "nowcast":   (0.65, 0.80),
-    "near":      (0.60, 0.75),
-    "mid":       (0.55, 0.70),
-    "day_ahead": (0.50, 0.65),
-}
 
 
 def _load_data(path: str | None) -> pd.DataFrame:
@@ -94,8 +85,12 @@ def _site_max_h2s(df: pd.DataFrame, site_name: str, t_start: pd.Timestamp, t_end
     ]
     if sub.empty or "H2S" not in sub.columns:
         return 0.0
-    v = sub["H2S"].max()
-    return float(v) if not pd.isna(v) else 0.0
+    v: object = sub["H2S"].max()
+    try:
+        fv = float(v)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
+    return 0.0 if np.isnan(fv) else fv
 
 
 def run_backtest(
@@ -170,18 +165,26 @@ def run_backtest(
                 ppb = threshold_map[tier_key]
 
                 n_exc = _n_stations_above(df, t_start, t_end, ppb)
-                nb_max = df[
-                    (df["site_name"] == "NESTOR - BES") &
-                    (df["time"] >= t_start) & (df["time"] < t_end)
-                ]["H2S"].max() if "H2S" in df.columns else float("nan")
-
-                nb_max = float(nb_max) if not pd.isna(nb_max) else 0.0
+                _nb_raw = (
+                    df.loc[
+                        (df["site_name"] == "NESTOR - BES") &
+                        (df["time"] >= t_start) & (df["time"] < t_end),
+                        "H2S",
+                    ].max()
+                    if "H2S" in df.columns else float("nan")
+                )
+                try:
+                    _nb_f = float(_nb_raw)  # type: ignore[arg-type]
+                    nb_max: float = 0.0 if np.isnan(_nb_f) else _nb_f
+                except (TypeError, ValueError):
+                    nb_max = 0.0
 
                 # Lead time: hours from evaluation to first exceedance in window
-                exc_sub = df[
+                exc_sub: pd.Series = df.loc[
                     (df["H2S"] >= ppb) &
-                    (df["time"] >= t_start) & (df["time"] < t_end)
-                ]["time"]
+                    (df["time"] >= t_start) & (df["time"] < t_end),
+                    "time",
+                ]
                 if exc_sub.empty:
                     lead_time = float("nan")
                 else:
@@ -238,7 +241,7 @@ def run_backtest(
         t3["actual"] = t3["n_stations_exceeding"] >= 1
 
         for horizon in HORIZON_ORDER:
-            h_df = t3[t3["horizon"] == horizon]
+            h_df: pd.DataFrame = t3.loc[t3["horizon"] == horizon]
             if h_df.empty:
                 continue
             tp = int(( h_df["fired"] &  h_df["actual"]).sum())
@@ -247,7 +250,7 @@ def run_backtest(
             prec  = tp / (tp + fp) if (tp + fp) > 0 else 0.0
             rec   = tp / (tp + fn) if (tp + fn) > 0 else 0.0
             f1    = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
-            lt    = h_df.loc[h_df["fired"] & h_df["actual"], "lead_time_hours"]
+            lt: pd.Series = h_df.loc[h_df["fired"] & h_df["actual"], "lead_time_hours"]
             stats[horizon] = {
                 "precision": round(prec, 3),
                 "recall":    round(rec, 3),
@@ -266,12 +269,164 @@ def run_backtest(
     return records_df, stats
 
 
+def _compute_metrics(group: pd.DataFrame) -> dict:
+    tp = int(( group["fired"] &  group["actual"]).sum())
+    fp = int(( group["fired"] & ~group["actual"]).sum())
+    fn = int((~group["fired"] &  group["actual"]).sum())
+    prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    rec  = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1   = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
+    lt   = group.loc[group["fired"] & group["actual"], "lead_time_hours"]
+    return {
+        "precision":        round(prec, 3),
+        "recall":           round(rec, 3),
+        "f1":               round(f1, 3),
+        "mean_lead_time_h": round(float(lt.mean()), 2) if not lt.empty else float("nan"),
+        "n_events":         tp + fn,
+        "n_fires":          tp + fp,
+        "n_rows":           len(group),
+    }
+
+
+def generate_report(records_df: pd.DataFrame, output_dir: Path | None = None) -> pd.DataFrame:
+    """Compute monthly × horizon × day/night metrics from a backtest records DataFrame.
+
+    Works on the parquet saved by run_backtest — no re-evaluation needed.
+    Returns a tidy DataFrame and optionally saves CSV + per-tier summary prints.
+    """
+    df = records_df.copy()
+    df["evaluated_at"] = pd.to_datetime(df["evaluated_at"], utc=True)
+    df["month"] = df["evaluated_at"].dt.to_period("M").astype(str)
+    df["period"] = df["daytime_horizon"].map(lambda x: "day" if x else "night")
+    df["actual"] = df["n_stations_exceeding"] >= 1
+
+    rows = []
+    for tier in ("tier_1", "tier_2", "tier_3"):
+        tier_df: pd.DataFrame = df.loc[df["tier"] == tier].copy()
+        threshold_map = {"tier_1": 5.0, "tier_2": 10.0, "tier_3": 30.0}
+        ppb = threshold_map[tier]
+        tier_df["actual"] = tier_df["actual_max_h2s_nb"] >= ppb
+
+        for keys3, grp3 in tier_df.groupby(["month", "horizon", "period"]):
+            k3 = tuple(keys3)  # type: ignore[arg-type]
+            month_k, horizon_k, period_k = str(k3[0]), str(k3[1]), str(k3[2])
+            m = _compute_metrics(grp3)  # type: ignore[arg-type]
+            rows.append({"tier": tier, "month": month_k, "horizon": horizon_k, "period": period_k, **m})
+
+        # Overall (all months, day+night) per tier × horizon
+        for keys1, grp1 in tier_df.groupby("horizon"):
+            horizon_k = str(keys1)
+            m = _compute_metrics(grp1)  # type: ignore[arg-type]
+            rows.append({"tier": tier, "month": "ALL", "horizon": horizon_k, "period": "all", **m})
+
+    report_df = pd.DataFrame(rows).sort_values(["tier", "month", "horizon", "period"])
+
+    # Print summary for Tier 3 (the acceptance-criteria tier)
+    print("\n=== Monthly Tier 3 report (day / night) ===")
+    t3: pd.DataFrame = report_df.loc[
+        (report_df["tier"] == "tier_3") & (report_df["month"] != "ALL")
+    ]
+    months_list: list[str] = sorted(t3["month"].unique().tolist())
+    for month in months_list:
+        print(f"\n  {month}")
+        for horizon in HORIZON_ORDER:
+            for period in ("day", "night"):
+                row: pd.DataFrame = t3.loc[
+                    (t3["month"] == month) &
+                    (t3["horizon"] == horizon) &
+                    (t3["period"] == period)
+                ]
+                if row.empty:
+                    continue
+                r = row.iloc[0]
+                target_prec, target_rec = TIER3_TARGETS[horizon]
+                ok = "✓" if r["precision"] >= target_prec and r["recall"] >= target_rec else "✗"
+                print(
+                    f"    {ok} {horizon:<12} {period:<6}  "
+                    f"prec={r['precision']:.3f}  rec={r['recall']:.3f}  "
+                    f"F1={r['f1']:.3f}  events={r['n_events']}  "
+                    f"lead={r['mean_lead_time_h']:.1f}h"
+                )
+
+    print("\n=== Overall Tier 3 (all months) ===")
+    t3_all: pd.DataFrame = report_df.loc[
+        (report_df["tier"] == "tier_3") & (report_df["month"] == "ALL")
+    ]
+    for _, r in t3_all.iterrows():
+        horizon_str = str(r["horizon"])
+        target_prec, target_rec = TIER3_TARGETS.get(horizon_str, (0.0, 0.0))
+        ok = "✓" if r["precision"] >= target_prec and r["recall"] >= target_rec else "✗"
+        print(
+            f"  {ok} {horizon_str:<12}  "
+            f"prec={r['precision']:.3f} (≥{target_prec})  "
+            f"rec={r['recall']:.3f} (≥{target_rec})  "
+            f"F1={r['f1']:.3f}  events={r['n_events']}  "
+            f"lead={r['mean_lead_time_h']:.1f}h"
+        )
+
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        out_path = output_dir / "tier_backtest_report.csv"
+        report_df.to_csv(out_path, index=False)
+        print(f"\nReport saved → {out_path}")
+
+    return report_df
+
+
+def generate_html_report(records_df: pd.DataFrame, output_dir: Path) -> Path:
+    """Build a self-contained HTML report with embedded charts from backtest records."""
+    from .report import build_html_report
+    output_dir.mkdir(parents=True, exist_ok=True)
+    report_df = generate_report(records_df, output_dir=None)
+    html = build_html_report(records_df, report_df)
+    out_path = output_dir / "tier_backtest_report.html"
+    out_path.write_text(html, encoding="utf-8")
+    print(f"HTML report saved → {out_path}")
+    return out_path
+
+
+def generate_monthly_site(
+    records_df: pd.DataFrame,
+    output_dir: Path,
+    months_back: int = 12,
+) -> Path:
+    """Write one HTML page per month + index.html into output_dir/monthly/."""
+    from .report import generate_static_site
+    report_df = generate_report(records_df, output_dir=None)
+    site_dir = output_dir / "monthly"
+    return generate_static_site(records_df, report_df, site_dir, months_back=months_back)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Backtest tiered H2S alert system")
     parser.add_argument("--data", help="Path to modeldata_h2s_nofill.parquet")
     parser.add_argument("--output", default="./output/tier_backtest", help="Output directory")
     parser.add_argument("--emit-stats", action="store_true", help="Print quiet-night feature stats")
+    parser.add_argument(
+        "--report-only",
+        metavar="RECORDS_PARQUET",
+        help="Skip backtest; load existing records parquet and generate monthly report",
+    )
+    parser.add_argument("--html", action="store_true", help="Also write HTML report with charts")
+    parser.add_argument("--monthly-html", action="store_true",
+                        help="Write one HTML page per month + index (past 12 months)")
+    parser.add_argument("--months-back", type=int, default=12,
+                        help="How many months to include in --monthly-html (default: 12)")
     args = parser.parse_args()
+
+    out_dir = Path(args.output)
+
+    if args.report_only:
+        print(f"Loading records from {args.report_only} ...")
+        records_df = pd.read_parquet(args.report_only)
+        print(f"  {len(records_df):,} records")
+        if args.monthly_html:
+            generate_monthly_site(records_df, out_dir, months_back=args.months_back)
+        if args.html:
+            generate_html_report(records_df, output_dir=out_dir)
+        if not args.monthly_html and not args.html:
+            generate_report(records_df, output_dir=out_dir)
+        return
 
     print("Loading data...")
     df = _load_data(args.data)
@@ -289,15 +444,15 @@ def main():
     print("Running backtest (hourly evaluation)...")
     records_df, stats = run_backtest(df, config, emit_stats=args.emit_stats)
 
-    out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
     records_df.to_parquet(out_dir / "tier_backtest_records.parquet", index=False)
     print(f"\nSaved {len(records_df):,} records → {out_dir / 'tier_backtest_records.parquet'}")
 
+    # Overall Tier 3 acceptance check
     print("\n--- Per-horizon Tier 3 results ---")
     all_pass = True
     for horizon, s in stats.items():
-        target_prec, target_rec = _TARGETS[horizon]
+        target_prec, target_rec = TIER3_TARGETS[horizon]
         prec_ok = s["precision"] >= target_prec
         rec_ok  = s["recall"]    >= target_rec
         status  = "✓" if prec_ok and rec_ok else "✗"
@@ -310,6 +465,14 @@ def main():
         )
         if not (prec_ok and rec_ok):
             all_pass = False
+
+    # Monthly + day/night report
+    if args.monthly_html:
+        generate_monthly_site(records_df, out_dir, months_back=args.months_back)
+    if args.html:
+        generate_html_report(records_df, output_dir=out_dir)
+    if not args.monthly_html and not args.html:
+        generate_report(records_df, output_dir=out_dir)
 
     if not all_pass:
         print("\n✗ Some horizons missed acceptance targets (design §6.1).")
