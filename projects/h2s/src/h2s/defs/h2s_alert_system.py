@@ -84,17 +84,20 @@ def _empty_tier_state() -> dict:
     }
 
 
+_OBS_TIER_KEYS = ("watch", "critical")
+
+
 def _load_state(s3) -> dict:
     """Load alert state from S3.  Returns default state if not found."""
     try:
         data = s3.getFile(ALERT_STATE_S3_PATH)
         stored = json.loads(data.decode("utf-8"))
-        for tier_key in ALERT_TIERS:
+        for tier_key in _OBS_TIER_KEYS:
             if tier_key not in stored:
                 stored[tier_key] = _empty_tier_state()
         return stored
     except Exception:
-        return {tier_key: _empty_tier_state() for tier_key in ALERT_TIERS}
+        return {tier_key: _empty_tier_state() for tier_key in _OBS_TIER_KEYS}
 
 
 def _save_state(s3, state: dict) -> None:
@@ -287,12 +290,13 @@ def evaluate_alerts(df: pd.DataFrame, s3) -> dict:
     out = {}
 
     if df.empty:
-        return {t: _empty_result() for t in ALERT_TIERS} | {"state": state}
+        return {t: _empty_result() for t in _OBS_TIER_KEYS} | {"state": state}
 
     latest = df.iloc[-1]
     latest_ppb = latest["H2S"]
 
-    for tier_key, tier_cfg in ALERT_TIERS.items():
+    for tier_key in _OBS_TIER_KEYS:
+        tier_cfg = ALERT_TIERS[tier_key]
         threshold = tier_cfg["threshold"]
         ts = state[tier_key]
         result = _empty_result()
@@ -453,7 +457,7 @@ def h2s_alert_sensor(context: dg.SensorEvaluationContext):
 
     any_action = any(
         results[t]["send_onset"] or results[t]["send_summary"]
-        for t in ALERT_TIERS
+        for t in _OBS_TIER_KEYS
     )
 
     if any_action:

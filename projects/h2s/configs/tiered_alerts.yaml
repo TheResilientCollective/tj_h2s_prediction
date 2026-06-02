@@ -1,0 +1,105 @@
+# Tiered H2S Alert System — configuration
+#
+# Hard-gate thresholds: drawn from Cohen's d analysis (design §2, §3.4).
+# Do NOT change without consulting the author.
+#
+# Score weights: initialized from Cohen's d values (design §2.3).
+# Negative weights → lower value = higher risk (SBIWTP flow, wind speed, precipitation).
+# Positive weights → higher value = higher risk (stable_atm, temp, dewpoint at 30 ppb).
+#
+# quiet_night_stats: means and standard deviations from quiet-night population
+# (0 active stations, Nov 2023 – Apr 2026, night hours only).
+# TODO(quiet_night_stats): re-derive from modeldata_h2s_nofill.parquet after
+# each major dataset refresh. Run `backtest.py --emit-stats` to regenerate.
+
+# --- Hard-gate thresholds ---
+gates:
+  tier_1:
+    sbiwtp_flow_below_baseline_offset: 0.5   # flow < baseline - 0.5 MGD (i.e., < 23.0 MGD)
+    sbiwtp_anomaly_threshold: 0.0            # anomaly < 0
+  tier_2:
+    wind_speed_threshold: 4.0               # wind_speed_mean < 4.0 m/s
+    min_stations_passing_tier1: 2
+  tier_3:
+    temp_min_threshold: 13.0               # temp_min > 13 °C
+    dewpoint_threshold: 11.0               # dewpoint_mean > 11 °C
+    stable_atm_fraction_threshold: 0.6    # stable_atm_fraction > 0.6
+
+# --- Per-tier score weights (Cohen's d values, sign per risk direction) ---
+# TODO(weights): retrain logistic regression on labeled nights + daytime
+# recalibration once >= 2 years of data accumulate (see design §8.6).
+tiers:
+  tier_1:
+    score_weights:
+      sbiwtp_flow_mgd:  -1.44   # lower flow → higher risk (d=-1.44)
+      sbiwtp_anomaly:   -0.93   # negative anomaly → higher risk
+      sbiwtp_sli:        0.63   # higher SLI → higher risk (d=+0.63)
+      sbiwtp_deficit:    0.64   # larger deficit → higher risk
+      precipitation:    -0.64   # less rain → higher risk
+      flow_log:         -0.52   # lower border flow → higher risk
+  tier_2:
+    score_weights:
+      sbiwtp_flow_mgd:  -1.44
+      sbiwtp_anomaly:   -0.93
+      sbiwtp_sli:        0.63
+      sbiwtp_deficit:    0.64
+      precipitation:    -0.64
+      flow_log:         -0.52
+      wind_speed_10m:   -0.58   # lower wind → higher risk
+      wind_speed_min:   -0.53
+      stable_atm:        0.38   # stable atm → higher risk
+  tier_3:
+    score_weights:
+      sbiwtp_flow_mgd:  -1.44
+      sbiwtp_anomaly:   -0.93
+      sbiwtp_sli:        0.63
+      sbiwtp_deficit:    0.64
+      precipitation:    -0.64
+      flow_log:         -0.52
+      wind_speed_10m:   -0.58
+      wind_speed_min:   -0.53
+      stable_atm:        0.38
+      temperature_2m:    0.70   # warmer nights → higher risk at 30 ppb (d=+0.70)
+      dewpoint_2m:       0.50   # higher dewpoint → higher risk (d=+0.50)
+      surface_pressure: -0.42   # lower pressure → higher risk (d=-0.42)
+
+# --- Quiet-night feature statistics (used for z-score normalization) ---
+# Source: 0-active-station nights, Nov 2023 – Apr 2026, night hours (20:00–07:59 PT)
+# PLACEHOLDER — regenerate with `uv run python -m h2s.defs.tiered_alerts.backtest --emit-stats`
+quiet_night_stats:
+  sbiwtp_flow_mgd:
+    mean: 25.2
+    std:  3.8
+  sbiwtp_anomaly:
+    mean: 0.05
+    std:  3.5
+  sbiwtp_sli:
+    mean: 0.0
+    std:  0.5
+  sbiwtp_deficit:
+    mean: -1.7
+    std:  3.8
+  precipitation:
+    mean: 0.08
+    std:  0.4
+  flow_log:
+    mean: 0.8    # log of typical border flow ~2.2 m3/s
+    std:  0.6
+  wind_speed_10m:
+    mean: 4.6
+    std:  2.1
+  wind_speed_min:
+    mean: 2.8
+    std:  1.8
+  stable_atm:
+    mean: 0.22   # fraction of night hours with stable_atm=1 on quiet nights
+    std:  0.41
+  temperature_2m:
+    mean: 14.2
+    std:  3.1
+  dewpoint_2m:
+    mean: 10.4
+    std:  3.0
+  surface_pressure:
+    mean: 1015.0
+    std:  4.5

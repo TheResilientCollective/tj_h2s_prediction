@@ -219,8 +219,11 @@ def _empty_tier_state() -> dict:
     }
 
 
+_OBS_TIER_KEYS = ("watch", "critical")
+
+
 def _empty_station_state() -> dict:
-    return {tier: _empty_tier_state() for tier in ALERT_TIERS}
+    return {tier: _empty_tier_state() for tier in _OBS_TIER_KEYS}
 
 
 def _load_sensor_state(s3) -> dict:
@@ -236,7 +239,7 @@ def _load_sensor_state(s3) -> dict:
         if site_name not in stored:
             stored[site_name] = _empty_station_state()
         else:
-            for tier in ALERT_TIERS:
+            for tier in _OBS_TIER_KEYS:
                 if tier not in stored[site_name]:
                     stored[site_name][tier] = _empty_tier_state()
     return stored
@@ -532,7 +535,8 @@ def evaluate_apcd_alerts(
         site_state = state.setdefault(site_name, _empty_station_state())
         site_pred = preds.get(site_name)
 
-        for tier_key, tier_cfg in ALERT_TIERS.items():
+        for tier_key in _OBS_TIER_KEYS:
+            tier_cfg = ALERT_TIERS[tier_key]
             threshold = tier_cfg["threshold"]
             ts = site_state.setdefault(tier_key, _empty_tier_state())
             above = latest_ppb >= threshold

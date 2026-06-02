@@ -142,6 +142,26 @@ EXTREME_EVENT_PATH = 'tijuana/forecast/extreme_events'
 # ==============================================================================
 
 ALERT_TIERS = {
+    # Forecast-based pre-alert tiers (Tiers 1–3 — internal ops channel)
+    "tier_1": {
+        "label":       "PLANT-SIGNAL",
+        "threshold":   5.0,
+        "audience":    "Ops (internal)",
+        "channel_env": "SLACK_CHANNEL_OPS",
+    },
+    "tier_2": {
+        "label":       "MULTI-SITE-RISK",
+        "threshold":   10.0,
+        "audience":    "Ops (internal)",
+        "channel_env": "SLACK_CHANNEL_OPS",
+    },
+    "tier_3": {
+        "label":       "EXCEEDANCE-RISK",
+        "threshold":   30.0,
+        "audience":    "Ops (internal)",
+        "channel_env": "SLACK_CHANNEL_OPS",
+    },
+    # Observation-based exceedance tiers (Tiers 4–5 — existing behavior preserved)
     "watch": {
         "label":     "WATCH",
         "threshold": 30.0,

@@ -4,6 +4,48 @@ All notable changes to the H2S Forecasting System are documented here.
 
 ## [Unreleased]
 
+### Added — Tiered H₂S Pre-Alert System (Tiers 1–3)
+
+Three forecast-based pre-alert tiers complement the existing observation-based
+WATCH (Tier 4) and CRITICAL (Tier 5) alerts. All three new tiers post to the
+`SLACK_CHANNEL_OPS` channel (internal ops), support shadow mode
+(`TIERED_ALERTS_SHADOW=true`), and are evaluated across four forecast horizons
+(nowcast 0–3 h, near 3–6 h, mid 6–12 h, day-ahead 12–24 h).
+
+| Tier | Label | Signal |
+|------|-------|--------|
+| 1 | PLANT-SIGNAL | SBIWTP flow below baseline + negative anomaly |
+| 2 | MULTI-SITE-RISK | Tier 1 at ≥ 2 stations + wind speed < 4 m/s |
+| 3 | EXCEEDANCE-RISK | Tier 2 + high temp, dewpoint, atmospheric stability |
+
+**New files:**
+- `projects/h2s/src/h2s/defs/tiered_alerts/__init__.py`
+- `projects/h2s/src/h2s/defs/tiered_alerts/tiers.py` — Horizon enum, gate functions, score function, nesting invariant
+- `projects/h2s/src/h2s/defs/tiered_alerts/features.py` — Horizon feature slicing, NB→IB fallback, `stable_atm_fraction`
+- `projects/h2s/src/h2s/defs/tiered_alerts/state.py` — Backward-compatible S3 state extension with per-cell debounce
+- `projects/h2s/src/h2s/defs/tiered_alerts/messages.py` — Slack Block Kit tier message builder
+- `projects/h2s/src/h2s/defs/tiered_alerts/assets.py` — Dagster assets: `tiered_alert_features`, `tier_1/2/3_scores`, `tier_alert_dispatcher`
+- `projects/h2s/src/h2s/defs/tiered_alerts/schedules.py` — `tiered_alerts_job`, `tiered_alerts_schedule` (6-hourly, auto-started)
+- `projects/h2s/src/h2s/defs/tiered_alerts/backtest.py` — CLI replay against historical parquet
+- `projects/h2s/configs/tiered_alerts.yaml` — Hard-gate thresholds, Cohen's d score weights, quiet-night feature stats
+- `projects/h2s/tests/test_tiered_alerts_tiers.py`
+- `projects/h2s/tests/test_tiered_alerts_state.py`
+- `projects/h2s/tests/test_tiered_alerts_backtest.py`
+
+**Modified files:**
+- `projects/h2s/src/h2s/constants.py` — Extended `ALERT_TIERS` with tier_1/2/3 entries
+- `projects/h2s/src/h2s/defs/h2s_alert_system.py` — Scoped obs-tier loops to `_OBS_TIER_KEYS = ("watch", "critical")`
+- `projects/h2s/src/h2s/defs/apcd_sensor_watch.py` — Same `_OBS_TIER_KEYS` scoping
+- `projects/h2s/src/h2s/definitions.py` — Registered new assets, job, and schedule
+
+**New environment variables:**
+- `SLACK_CHANNEL_OPS` — Slack channel for Tier 1–3 internal ops alerts (required in production)
+- `TIERED_ALERTS_SHADOW` — Set `true` to suppress Slack dispatch while writing state (recommended for initial deploy)
+
+**State migration:** The existing S3 state JSON at `ALERT_STATE_S3_PATH` gains a `tiers` key on first read. Existing `watch`/`critical` state is preserved unchanged.
+
+**Preserved:** Existing WATCH/CRITICAL alert behavior (Tiers 4–5) is unchanged. The `h2s_alert_dispatcher` asset and `h2s_alert_sensor` sensor are unmodified.
+
 ## [2026-01-27] - Monthly Training Partitions
 ### Added
 - **MonthlyPartitionsDefinition** for h2s_training_data asset group
