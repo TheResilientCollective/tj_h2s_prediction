@@ -329,6 +329,62 @@ Acceptance criteria, per horizon:
 
 Looser criteria are accepted at longer horizons reflecting forecast uncertainty. The script exits non-zero if any horizon misses its targets — this gates merge.
 
+#### Backtest CLI flags
+
+```bash
+cd projects/h2s
+
+# Full backtest — evaluates every hour in modeldata, saves records parquet
+uv run python -m h2s.defs.tiered_alerts.backtest \
+    --data ../../data/modeldata_h2s_nofill.parquet \
+    --output ./output/tier_backtest/
+
+# Re-run reports from existing records parquet (no re-evaluation)
+uv run python -m h2s.defs.tiered_alerts.backtest \
+    --report-only ./output/tier_backtest/tier_backtest_records.parquet \
+    --output ./output/tier_backtest/ \
+    [--html] [--monthly-html] [--months-back 12]
+```
+
+| Flag | Effect |
+|---|---|
+| `--report-only PATH` | Skip re-evaluation; load records parquet directly |
+| `--html` | Write `tier_backtest_report.html` — single-page report with all charts |
+| `--monthly-html` | Write `monthly/index.html` + one page per month (static links) |
+| `--months-back N` | Limit `--monthly-html` to the N most recent months (default 12) |
+| `--emit-stats` | Print quiet-night feature statistics for re-calibrating `tiered_alerts.yaml` |
+
+`--html` and `--monthly-html` can be combined. Both work with `--report-only`.
+
+#### Backtest output files
+
+```
+output/tier_backtest/
+  tier_backtest_records.parquet   # one row per evaluated_at × tier × horizon
+  tier_backtest_report.csv        # monthly × horizon × day/night metrics (--html or text)
+  tier_backtest_report.html       # self-contained single-page report (--html)
+  monthly/
+    index.html                    # month list: T1/T2/T3 mean F1, events, fires, links
+    2026-01.html                  # per-month page: F1 grid + metrics table + prev/next nav
+    2026-02.html
+    ...
+```
+
+#### Report contents
+
+The **single-page report** (`--html`) includes:
+- Overall Tier 3 precision/recall table with pass/fail against acceptance criteria
+- Monthly precision & recall line charts (day vs night, all 4 horizons)
+- F1 score heatmaps for **each of Tier 1, 2, and 3** (month × horizon, day | night panels)
+- Monthly event counts & false alarm rate
+- True-positive lead-time distribution box plots (day vs night)
+- Full monthly breakdown table (all tiers)
+
+The **monthly static site** (`--monthly-html`) is designed for regular review of recent performance:
+- `index.html` lists months newest-first with color-coded mean F1 per tier (green ≥ 0.70, amber ≥ 0.50, red < 0.50)
+- Each monthly page shows a compact 3-tier × 4-horizon F1 grid (day | night) and the full metrics table
+- Pages are self-contained HTML — no server required, no external dependencies
+
 ### 6.2 Tier nesting invariant
 
 A Tier 3 fire in horizon H must always co-occur with Tier 2 and Tier 1 fires in the same horizon H. This is enforced in `tiers.py` and asserted in `backtest.py`. A non-nested fire within a horizon is a hard failure. Cross-horizon non-nesting (e.g., Tier 1 firing in `day_ahead` while quiet in `nowcast`) is normal and expected.
