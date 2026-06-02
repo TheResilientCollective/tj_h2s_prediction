@@ -1,8 +1,7 @@
-"""Tiered alerts job and schedule (same 6h cadence as forecast pipeline)."""
+"""Tiered alerts job and schedule (hourly on the half hour)."""
 
 import dagster as dg
 
-from h2s.constants import SCHEDULE_6HR
 from .assets import (
     tier_1_scores,
     tier_2_scores,
@@ -26,7 +25,7 @@ tiered_alerts_job = dg.define_asset_job(
 
 tiered_alerts_schedule = dg.ScheduleDefinition(
     job=tiered_alerts_job,
-    cron_schedule=SCHEDULE_6HR,
+    cron_schedule="30 * * * *",
     default_status=dg.DefaultScheduleStatus.RUNNING,
-    description="Evaluate tiered forecast alerts every 6 hours (same cadence as h2s forecast)",
+    description="Evaluate tiered forecast alerts hourly at :30",
 )
