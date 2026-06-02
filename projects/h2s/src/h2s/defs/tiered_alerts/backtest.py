@@ -12,11 +12,13 @@ Exits non-zero if per-horizon Tier 3 precision/recall miss design §6.1 targets.
 """
 
 import argparse
+import datetime
 import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import yaml
 
 from h2s.constants import (
     ALERT_SBIWTP_BASELINE_MGD,
@@ -119,67 +121,69 @@ def run_backtest(
     records = []
     quiet_night_rows: list[dict] = []
 
+    _threshold_map = {"tier_1": 5.0, "tier_2": 10.0, "tier_3": 30.0}
+
     for t in eval_times:
         cell_features, _ = compute_horizon_features(df, t)
-
-        # Evaluate all three tiers for all horizons
         tier_results: dict[str, list] = {}
 
-        for tier_key in ("tier_1", "tier_2", "tier_3"):
-            tier_horizon_results = []
-            for horizon in HORIZON_ORDER:
-                rows_by_station = {
-                    site: cell_features.get((horizon, site), {})
-                    for site in STATIONS
-                }
+        # Process horizons first so we can enforce tier nesting (T3 fires only if T2 fired).
+        # Tiers use different score weights; without this ordering Tier 3's extra
+        # temp/dewpoint weights could push it above 0.5 while Tier 2 stays below.
+        for horizon in HORIZON_ORDER:
+            rows_by_station = {
+                site: cell_features.get((horizon, site), {})
+                for site in STATIONS
+            }
+            t1_gates = gate_tier1(rows_by_station)
+            t2_gates, n_t1 = gate_tier2(rows_by_station, t1_gates)
+            t3_gates = gate_tier3(rows_by_station, t2_gates)
 
-                t1_gates = gate_tier1(rows_by_station, ALERT_SBIWTP_BASELINE_MGD)
+            bw_features = (
+                cell_features.get((horizon, "NESTOR - BES"), {}) or
+                cell_features.get((horizon, "IB CIVIC CTR"), {}) or
+                {}
+            )
+            stats = config["quiet_night_stats"]
 
-                if tier_key == "tier_1":
-                    gates = t1_gates
-                    n_stations = sum(t1_gates.values())
-                elif tier_key == "tier_2":
-                    gates, n_stations = gate_tier2(rows_by_station, t1_gates)
-                else:
-                    _, n_t1 = gate_tier2(rows_by_station, t1_gates)
-                    t2_gates, _ = gate_tier2(rows_by_station, t1_gates)
-                    gates = gate_tier3(rows_by_station, t2_gates)
-                    n_stations = n_t1
+            t_start = t + pd.Timedelta(hours=HORIZON_WINDOWS_H[horizon][0])
+            t_end   = t + pd.Timedelta(hours=HORIZON_WINDOWS_H[horizon][1])
 
-                gate_passed = any(gates.values())
-                bw_features = (
-                    cell_features.get((horizon, "NESTOR - BES"), {}) or
-                    cell_features.get((horizon, "IB CIVIC CTR"), {}) or
-                    {}
-                )
+            _nb_raw = (
+                df.loc[
+                    (df["site_name"] == "NESTOR - BES") &
+                    (df["time"] >= t_start) & (df["time"] < t_end),
+                    "H2S",
+                ].max()
+                if "H2S" in df.columns else float("nan")
+            )
+            try:
+                _nb_f = float(_nb_raw)  # type: ignore[arg-type]
+                nb_max: float = 0.0 if np.isnan(_nb_f) else _nb_f
+            except (TypeError, ValueError):
+                nb_max = 0.0
+
+            ib_max  = _site_max_h2s(df, "IB CIVIC CTR", t_start, t_end)
+            sy_max  = _site_max_h2s(df, "SAN YSIDRO",   t_start, t_end)
+            sample  = cell_features.get((horizon, "NESTOR - BES"), {})
+            daytime = bool(sample.get("_daytime_horizon", False))
+
+            parent_fired = True  # Tier 1 has no parent constraint
+            for tier_key, tier_gates in [
+                ("tier_1", t1_gates),
+                ("tier_2", t2_gates),
+                ("tier_3", t3_gates),
+            ]:
+                n_stations = sum(t1_gates.values()) if tier_key == "tier_1" else n_t1
+                ppb = _threshold_map[tier_key]
+
+                gate_passed = any(tier_gates.values())
                 weights = config["tiers"][tier_key]["score_weights"]
-                stats = config["quiet_night_stats"]
-                score, contributing = compute_score(bw_features, weights, stats)
-                fire = gate_passed and score >= 0.5
-
-                t_start = t + pd.Timedelta(hours=HORIZON_WINDOWS_H[horizon][0])
-                t_end   = t + pd.Timedelta(hours=HORIZON_WINDOWS_H[horizon][1])
-
-                # Ground-truth labels from actual observations
-                threshold_map = {"tier_1": 5.0, "tier_2": 10.0, "tier_3": 30.0}
-                ppb = threshold_map[tier_key]
+                score, _ = compute_score(bw_features, weights, stats)
+                # Nesting enforced at fire time: Tier N fires only if Tier N-1 fired
+                fire = gate_passed and score >= 0.5 and parent_fired
 
                 n_exc = _n_stations_above(df, t_start, t_end, ppb)
-                _nb_raw = (
-                    df.loc[
-                        (df["site_name"] == "NESTOR - BES") &
-                        (df["time"] >= t_start) & (df["time"] < t_end),
-                        "H2S",
-                    ].max()
-                    if "H2S" in df.columns else float("nan")
-                )
-                try:
-                    _nb_f = float(_nb_raw)  # type: ignore[arg-type]
-                    nb_max: float = 0.0 if np.isnan(_nb_f) else _nb_f
-                except (TypeError, ValueError):
-                    nb_max = 0.0
-
-                # Lead time: hours from evaluation to first exceedance in window
                 exc_sub: pd.Series = df.loc[
                     (df["H2S"] >= ppb) &
                     (df["time"] >= t_start) & (df["time"] < t_end),
@@ -191,29 +195,24 @@ def run_backtest(
                     first_exc = exc_sub.min()
                     lead_time = float((first_exc - t).total_seconds() / 3600)
 
-                # daytime_horizon
-                sample = cell_features.get((horizon, "NESTOR - BES"), {})
-                daytime = bool(sample.get("_daytime_horizon", False))
-
                 records.append({
-                    "evaluated_at":     t.isoformat(),
-                    "tier":             tier_key,
-                    "horizon":          horizon,
-                    "gate_passed":      gate_passed,
-                    "score":            round(score, 4),
-                    "fired":            fire,
-                    "daytime_horizon":  daytime,
-                    "actual_max_h2s_nb": nb_max,
-                    "actual_max_h2s_ib": _site_max_h2s(df, "IB CIVIC CTR", t_start, t_end),
-                    "actual_max_h2s_sy": _site_max_h2s(df, "SAN YSIDRO", t_start, t_end),
+                    "evaluated_at":         t.isoformat(),
+                    "tier":                 tier_key,
+                    "horizon":              horizon,
+                    "gate_passed":          gate_passed,
+                    "score":                round(score, 4),
+                    "fired":                fire,
+                    "daytime_horizon":      daytime,
+                    "actual_max_h2s_nb":    nb_max,
+                    "actual_max_h2s_ib":    ib_max,
+                    "actual_max_h2s_sy":    sy_max,
                     "n_stations_exceeding": n_exc,
-                    "lead_time_hours":  lead_time,
+                    "lead_time_hours":      lead_time,
                 })
-                tier_horizon_results.append((horizon, fire, gate_passed))
+                tier_results.setdefault(tier_key, []).append((horizon, fire, gate_passed))
+                parent_fired = fire
 
-            tier_results[tier_key] = tier_horizon_results
-
-        # Nesting check per horizon (die loudly on violation)
+        # Nesting is guaranteed by construction above; keep check as a safety assertion
         for horizon in HORIZON_ORDER:
             t3 = next((f for h, f, _ in tier_results.get("tier_3", []) if h == horizon), False)
             t2 = next((f for h, f, _ in tier_results.get("tier_2", []) if h == horizon), False)
@@ -228,8 +227,22 @@ def run_backtest(
             local_t = t.tz_convert(ALERT_LOCAL_TZ)
             if local_t.hour in _NIGHT_HOURS:
                 nb = cell_features.get(("nowcast", "NESTOR - BES"), {})
-                nb_max_val = nb_max  # type: ignore[name-defined]
-                if nb_max_val < 1.0 and nb:
+                nc_start = t
+                nc_end   = t + pd.Timedelta(hours=3)
+                _nc_raw  = (
+                    df.loc[
+                        (df["site_name"] == "NESTOR - BES") &
+                        (df["time"] >= nc_start) & (df["time"] < nc_end),
+                        "H2S",
+                    ].max()
+                    if "H2S" in df.columns else float("nan")
+                )
+                try:
+                    _nc_f = float(_nc_raw)  # type: ignore[arg-type]
+                    nowcast_nb_max: float = 0.0 if np.isnan(_nc_f) else _nc_f
+                except (TypeError, ValueError):
+                    nowcast_nb_max = 0.0
+                if nowcast_nb_max < 1.0 and nb:
                     quiet_night_rows.append(nb)
 
     records_df = pd.DataFrame(records)
@@ -447,6 +460,19 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     records_df.to_parquet(out_dir / "tier_backtest_records.parquet", index=False)
     print(f"\nSaved {len(records_df):,} records → {out_dir / 'tier_backtest_records.parquet'}")
+
+    # Snapshot the weights and gates used for this run so results are reproducible.
+    snapshot = {
+        "run_timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "config_source": str(load_config.__module__),
+        "gates": config.get("gates"),
+        "tiers": config.get("tiers"),
+        "quiet_night_stats": config.get("quiet_night_stats"),
+    }
+    snapshot_path = out_dir / "weights_snapshot.yaml"
+    with open(snapshot_path, "w") as f:
+        yaml.dump(snapshot, f, default_flow_style=False, sort_keys=False)
+    print(f"Saved weights snapshot → {snapshot_path}")
 
     # Overall Tier 3 acceptance check
     print("\n--- Per-horizon Tier 3 results ---")

@@ -4,7 +4,7 @@ import os
 import dagster as dg
 import pandas as pd
 
-from h2s.constants import ALERT_SBIWTP_BASELINE_MGD, ALERT_TIERS, STATIONS
+from h2s.constants import ALERT_TIERS, STATIONS
 
 from .features import compute_horizon_features, load_forecast_df
 from .messages import build_tier_blocks, build_tier_message
@@ -168,7 +168,7 @@ def tier_1_scores(
             site: tiered_alert_features.get((horizon, site), {})
             for site in STATIONS
         }
-        t1_gates = gate_tier1(rows_by_station, ALERT_SBIWTP_BASELINE_MGD)
+        t1_gates = gate_tier1(rows_by_station)
         n_passing = sum(t1_gates.values())
         n_stations_by_horizon[horizon] = n_passing
         gate_by_horizon[horizon] = any(t1_gates.values())
@@ -214,7 +214,7 @@ def tier_2_scores(
             site: tiered_alert_features.get((horizon, site), {})
             for site in STATIONS
         }
-        t1_gates = gate_tier1(rows_by_station, ALERT_SBIWTP_BASELINE_MGD)
+        t1_gates = gate_tier1(rows_by_station)
         t2_gates, n_t1 = gate_tier2(rows_by_station, t1_gates)
         n_stations_by_horizon[horizon] = n_t1
         gate_by_horizon[horizon] = any(t2_gates.values())
@@ -260,7 +260,7 @@ def tier_3_scores(
             site: tiered_alert_features.get((horizon, site), {})
             for site in STATIONS
         }
-        t1_gates = gate_tier1(rows_by_station, ALERT_SBIWTP_BASELINE_MGD)
+        t1_gates = gate_tier1(rows_by_station)
         t2_gates, n_t1 = gate_tier2(rows_by_station, t1_gates)
         t3_gates = gate_tier3(rows_by_station, t2_gates)
         n_stations_by_horizon[horizon] = n_t1

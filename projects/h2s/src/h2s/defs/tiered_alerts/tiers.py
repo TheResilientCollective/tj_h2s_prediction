@@ -79,17 +79,19 @@ def load_config() -> dict:
 # Hard gate functions
 # ---------------------------------------------------------------------------
 
-def _gate_tier1_single(row: dict, baseline_mgd: float) -> bool:
-    flow = row.get("sbiwtp_flow_mgd")
-    anomaly = row.get("sbiwtp_anomaly")
-    if flow is None or anomaly is None or pd.isna(flow) or pd.isna(anomaly):
-        return False
-    return float(flow) < (baseline_mgd - 0.5) and float(anomaly) < 0.0
+def _gate_tier1_single(row: dict) -> bool:
+    # Data-availability check: gate passes when the station has valid met data.
+    # Previously gated on SBIWTP deficit (flow < 23 MGD, anomaly < 0), but in April 2026
+    # SBIWTP flow jumped to 30–34 MGD while H2S events continued, driven purely by
+    # atmospheric conditions (stable_atm d=+1.48, wind d=−1.37 on Apr-May 2026 events).
+    # SBIWTP still contributes to the score function via its weights.
+    wind = row.get("wind_speed_10m")
+    return wind is not None and not pd.isna(wind)
 
 
-def gate_tier1(rows_by_station: dict[str, dict], baseline_mgd: float) -> dict[str, bool]:
+def gate_tier1(rows_by_station: dict[str, dict]) -> dict[str, bool]:
     """Return per-station gate results for Tier 1."""
-    return {s: _gate_tier1_single(row, baseline_mgd) for s, row in rows_by_station.items()}
+    return {s: _gate_tier1_single(row) for s, row in rows_by_station.items()}
 
 
 def gate_tier2(

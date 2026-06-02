@@ -17,8 +17,6 @@ from h2s.defs.tiered_alerts.tiers import (
 
 # --- Fixtures ---
 
-_BASELINE = 23.5  # ALERT_SBIWTP_BASELINE_MGD
-
 def _row(flow=20.0, anomaly=-1.0, wind=2.0, temp=15.0, dew=12.0, stable=0.7):
     return {
         "sbiwtp_flow_mgd": flow,
@@ -55,38 +53,44 @@ def test_horizon_values():
 
 
 # ---------------------------------------------------------------------------
-# Tier 1 gate
+# Tier 1 gate (data-availability check: wind_speed_10m present and not NaN)
 # ---------------------------------------------------------------------------
 
-def test_t1_gate_passes_below_threshold():
-    rows = {"NB": _row(flow=20.0, anomaly=-1.0)}
-    result = gate_tier1(rows, _BASELINE)
+def test_t1_gate_passes_with_wind_data():
+    rows = {"NB": _row(wind=3.0)}
+    result = gate_tier1(rows)
     assert result["NB"] is True
 
 
-def test_t1_gate_fails_at_boundary_flow():
-    # flow == baseline - 0.5 exactly is NOT passing (must be strictly less)
-    rows = {"NB": _row(flow=23.0, anomaly=-1.0)}
-    result = gate_tier1(rows, _BASELINE)
+def test_t1_gate_passes_regardless_of_sbiwtp():
+    # SBIWTP at surplus (30+ MGD, positive anomaly) should no longer block
+    rows = {"NB": _row(flow=33.0, anomaly=0.4, wind=2.5)}
+    result = gate_tier1(rows)
+    assert result["NB"] is True
+
+
+def test_t1_gate_fails_missing_wind():
+    rows = {"NB": {"sbiwtp_flow_mgd": 20.0, "sbiwtp_anomaly": -1.0}}
+    result = gate_tier1(rows)
     assert result["NB"] is False
 
 
-def test_t1_gate_fails_positive_anomaly():
-    rows = {"NB": _row(flow=20.0, anomaly=0.5)}
-    result = gate_tier1(rows, _BASELINE)
+def test_t1_gate_fails_nan_wind():
+    rows = {"NB": _row(wind=float("nan"))}
+    result = gate_tier1(rows)
     assert result["NB"] is False
 
 
-def test_t1_gate_fails_high_flow():
-    rows = {"NB": _row(flow=25.0, anomaly=-1.0)}
-    result = gate_tier1(rows, _BASELINE)
-    assert result["NB"] is False
-
-
-def test_t1_gate_handles_missing_column():
-    rows = {"NB": {"wind_speed_10m": 3.0}}  # no sbiwtp columns
-    result = gate_tier1(rows, _BASELINE)
-    assert result["NB"] is False
+def test_t1_gate_multi_station():
+    rows = {
+        "NB": _row(wind=2.0),
+        "IB": _row(wind=float("nan")),
+        "SY": {},
+    }
+    result = gate_tier1(rows)
+    assert result["NB"] is True
+    assert result["IB"] is False
+    assert result["SY"] is False
 
 
 # ---------------------------------------------------------------------------

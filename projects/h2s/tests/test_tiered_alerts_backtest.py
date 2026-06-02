@@ -131,7 +131,8 @@ def test_backtest_nesting_never_violated():
 @pytest.mark.slow
 def test_backtest_acceptance_criteria():
     """Full backtest against public parquet — may take several minutes."""
-    from h2s.defs.tiered_alerts.backtest import _load_data, _TARGETS, _ensure_sbiwtp_anomaly
+    from h2s.defs.tiered_alerts.backtest import _load_data, _ensure_sbiwtp_anomaly
+    from h2s.defs.tiered_alerts.tiers import TIER3_TARGETS as _TARGETS
     try:
         from h2s.training.feature_builder import ensure_base_features
         df = _load_data(None)
