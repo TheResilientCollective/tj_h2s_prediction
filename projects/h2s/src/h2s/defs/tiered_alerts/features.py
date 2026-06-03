@@ -150,7 +150,21 @@ def compute_horizon_features(
     Returns:
         cell_features: dict keyed by (horizon_key, site_name) → feature dict
         degraded: True if NESTOR-BES data was missing and IB was used
+
+    Each feature dict contains a ``_h2s_active`` flag that is True only when the
+    station has actual H2S observations (not data replicated from another station
+    by ``_ensure_multistation``).  Gate Tier 2 uses this to require ≥2 *real* H2S
+    sensors rather than ≥2 rows that may carry the same single source's data.
     """
+    # Determine which stations genuinely have H2S data *before* replication.
+    h2s_col = next((c for c in ("H2S", "h2s_lag_1h", "h2s_measured") if c in df.columns), None)
+    stations_with_h2s: set[str] = set()
+    if h2s_col:
+        for site_name in STATIONS:
+            site_slice = df[df["site_name"] == site_name]
+            if not site_slice.empty and site_slice[h2s_col].notna().any():
+                stations_with_h2s.add(site_name)
+
     df = _ensure_multistation(df)
     degraded = False
 
@@ -181,6 +195,7 @@ def compute_horizon_features(
             agg = _aggregate_station_window(source)
             agg["_daytime_horizon"] = is_daytime
             agg["_degraded"] = degraded
+            agg["_h2s_active"] = site_name in stations_with_h2s
             cell_features[(horizon, site_name)] = agg
 
     return cell_features, degraded

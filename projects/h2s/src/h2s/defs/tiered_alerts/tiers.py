@@ -98,8 +98,18 @@ def gate_tier2(
     rows_by_station: dict[str, dict],
     tier1_by_station: dict[str, bool],
 ) -> tuple[dict[str, bool], int]:
-    """Return per-station gate results for Tier 2 and count of stations passing Tier 1."""
+    """Return per-station gate results for Tier 2 and count of stations passing Tier 1.
+
+    The ≥2 station requirement checks how many stations are *genuinely reporting
+    H2S observations* (``_h2s_active`` flag set by ``compute_horizon_features``
+    before data replication), not how many rows have met data.  When the H2S
+    network has fewer than 2 active sensors the minimum drops to 1 so the chain
+    can still fire in degraded mode.
+    """
     n_t1 = sum(tier1_by_station.values())
+    # Count stations with real H2S observations (not replicated met-source data).
+    n_h2s_active = sum(1 for row in rows_by_station.values() if row.get("_h2s_active", False))
+    min_stations = min(2, max(1, n_h2s_active))
     results: dict[str, bool] = {}
     for station, row in rows_by_station.items():
         if not tier1_by_station.get(station, False):
@@ -109,7 +119,7 @@ def gate_tier2(
         if wind is None or pd.isna(wind):
             results[station] = False
             continue
-        results[station] = (n_t1 >= 2) and (float(wind) < 4.0)
+        results[station] = (n_t1 >= min_stations) and (float(wind) < 4.0)
     return results, n_t1
 
 

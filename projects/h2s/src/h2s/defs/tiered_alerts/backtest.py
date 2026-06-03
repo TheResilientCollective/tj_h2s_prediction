@@ -144,7 +144,19 @@ def run_backtest(
                 cell_features.get((horizon, "IB CIVIC CTR"), {}) or
                 {}
             )
-            stats = config["quiet_night_stats"]
+
+            # Single-station mode: use summer-calibrated stats to avoid seasonal bias
+            # (single-station periods cluster in Jun–Sep when temps are 2–4 °C above baseline).
+            # _h2s_active is set by compute_horizon_features before data replication,
+            # so it correctly reflects genuine H2S sensor coverage.
+            n_h2s_active = sum(1 for row in rows_by_station.values() if row.get("_h2s_active", False))
+            single_station_mode = (n_h2s_active <= 1)
+            if single_station_mode and "single_station_quiet_night_stats" in config:
+                stats = config["single_station_quiet_night_stats"]
+                score_threshold = config.get("score_thresholds", {}).get("single_station", 0.5)
+            else:
+                stats = config["quiet_night_stats"]
+                score_threshold = config.get("score_thresholds", {}).get("multi_station", 0.5)
 
             t_start = t + pd.Timedelta(hours=HORIZON_WINDOWS_H[horizon][0])
             t_end   = t + pd.Timedelta(hours=HORIZON_WINDOWS_H[horizon][1])
@@ -181,7 +193,7 @@ def run_backtest(
                 weights = config["tiers"][tier_key]["score_weights"]
                 score, _ = compute_score(bw_features, weights, stats)
                 # Nesting enforced at fire time: Tier N fires only if Tier N-1 fired
-                fire = gate_passed and score >= 0.5 and parent_fired
+                fire = gate_passed and score >= score_threshold and parent_fired
 
                 n_exc = _n_stations_above(df, t_start, t_end, ppb)
                 exc_sub: pd.Series = df.loc[
@@ -203,6 +215,7 @@ def run_backtest(
                     "score":                round(score, 4),
                     "fired":                fire,
                     "daytime_horizon":      daytime,
+                    "single_station_mode":  single_station_mode,
                     "actual_max_h2s_nb":    nb_max,
                     "actual_max_h2s_ib":    ib_max,
                     "actual_max_h2s_sy":    sy_max,

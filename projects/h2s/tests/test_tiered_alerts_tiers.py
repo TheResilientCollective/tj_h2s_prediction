@@ -17,7 +17,7 @@ from h2s.defs.tiered_alerts.tiers import (
 
 # --- Fixtures ---
 
-def _row(flow=20.0, anomaly=-1.0, wind=2.0, temp=15.0, dew=12.0, stable=0.7):
+def _row(flow=20.0, anomaly=-1.0, wind=2.0, temp=15.0, dew=12.0, stable=0.7, h2s_active=True):
     return {
         "sbiwtp_flow_mgd": flow,
         "sbiwtp_anomaly": anomaly,
@@ -27,8 +27,10 @@ def _row(flow=20.0, anomaly=-1.0, wind=2.0, temp=15.0, dew=12.0, stable=0.7):
         "stable_atm": stable,
         "stable_atm_fraction": stable,
         "temp_min": temp,
+        "_h2s_active": h2s_active,
     }
 
+# Three stations all with genuine H2S observations
 _THREE_STATIONS = {"NB": _row(), "IB": _row(), "SY": _row()}
 
 
@@ -107,12 +109,26 @@ def test_t2_gate_passes_two_stations():
     assert n == 2
 
 
-def test_t2_gate_fails_only_one_station_passes_t1():
+def test_t2_gate_fails_only_one_station_passes_t1_when_three_active():
+    # 3 active H2S stations → minimum stays 2 → only 1 passing T1 is not enough
     t1 = {"NB": True, "IB": False, "SY": False}
-    rows = _THREE_STATIONS
+    rows = _THREE_STATIONS  # all have _h2s_active=True
     result, n = gate_tier2(rows, t1)
     assert all(not v for v in result.values())
     assert n == 1
+
+
+def test_t2_gate_passes_single_station_degraded_mode():
+    # Only NB has real H2S observations (_h2s_active=True) → minimum drops to 1
+    rows = {
+        "NB": {**_row(wind=2.5), "_h2s_active": True},
+        "IB": {**_row(wind=2.5), "_h2s_active": False},  # replicated met, no real H2S
+        "SY": {**_row(wind=2.5), "_h2s_active": False},  # replicated met, no real H2S
+    }
+    t1 = {"NB": True, "IB": True, "SY": True}  # T1 passes for all (met available)
+    result, n = gate_tier2(rows, t1)
+    assert result["NB"] is True   # single active sensor, minimum=1, wind<4 → passes
+    assert n == 3
 
 
 def test_t2_gate_fails_wind_above_threshold():

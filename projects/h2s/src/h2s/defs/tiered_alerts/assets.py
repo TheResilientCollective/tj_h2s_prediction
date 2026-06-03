@@ -82,12 +82,24 @@ def tiered_alert_features(
 # Tier scoring helpers
 # ---------------------------------------------------------------------------
 
-def _score_cell(tier_key: str, features: dict, config: dict) -> tuple[float, dict]:
+def _score_cell(
+    tier_key: str,
+    features: dict,
+    config: dict,
+    single_station: bool = False,
+) -> tuple[float, dict]:
     """Compute risk score for a single (tier, horizon) aggregate feature dict."""
     weights = config["tiers"][tier_key]["score_weights"]
-    # TODO(daytime_calibration): load daytime-specific weights when available (see design §8.6)
-    stats = config["quiet_night_stats"]
+    if single_station and "single_station_quiet_night_stats" in config:
+        stats = config["single_station_quiet_night_stats"]
+    else:
+        stats = config["quiet_night_stats"]
     return compute_score(features, weights, stats)
+
+
+def _n_h2s_active(rows_by_station: dict[str, dict]) -> int:
+    """Count stations with genuine H2S observations (_h2s_active set before replication)."""
+    return sum(1 for row in rows_by_station.values() if row.get("_h2s_active", False))
 
 
 def _build_tier_results(
@@ -98,6 +110,7 @@ def _build_tier_results(
     n_stations_by_horizon: dict[str, int],
     scores_by_horizon: dict[str, tuple[float, dict]],
     evaluated_at: pd.Timestamp,
+    thresholds_by_horizon: dict[str, float] | None = None,
 ) -> list[TierResult]:
     results = []
     for horizon in HORIZON_ORDER:
@@ -106,6 +119,7 @@ def _build_tier_results(
         gate = gate_by_horizon.get(horizon, False)
         score, contributing = scores_by_horizon.get(horizon, (0.0, {}))
         n_stations = n_stations_by_horizon.get(horizon, 0)
+        threshold = (thresholds_by_horizon or {}).get(horizon, 0.5)
 
         # Get degraded / daytime flags from any cell for this horizon
         sample_cell = next(
@@ -126,7 +140,7 @@ def _build_tier_results(
             contributing_features=contributing,
             daytime_horizon=daytime,
             degraded=degraded,
-            fire=gate and score >= 0.5,
+            fire=gate and score >= threshold,
         ))
     return results
 
@@ -163,6 +177,8 @@ def tier_1_scores(
     n_stations_by_horizon: dict[str, int] = {}
     scores_by_horizon: dict[str, tuple] = {}
 
+    thresholds_by_horizon: dict[str, float] = {}
+    score_thresholds = config.get("score_thresholds", {})
     for horizon in HORIZON_ORDER:
         rows_by_station = {
             site: tiered_alert_features.get((horizon, site), {})
@@ -173,13 +189,18 @@ def tier_1_scores(
         n_stations_by_horizon[horizon] = n_passing
         gate_by_horizon[horizon] = any(t1_gates.values())
 
+        single = _n_h2s_active(rows_by_station) <= 1
+        thresholds_by_horizon[horizon] = score_thresholds.get(
+            "single_station" if single else "multi_station", 0.5
+        )
         bw = _bellwether_features(tiered_alert_features, horizon)
-        score, contrib = _score_cell("tier_1", bw, config) if bw else (0.0, {})
+        score, contrib = _score_cell("tier_1", bw, config, single_station=single) if bw else (0.0, {})
         scores_by_horizon[horizon] = (score, contrib)
 
     results = _build_tier_results(
         "tier_1", label, tiered_alert_features,
         gate_by_horizon, n_stations_by_horizon, scores_by_horizon, evaluated_at,
+        thresholds_by_horizon=thresholds_by_horizon,
     )
     firing = sum(1 for r in results if r.fire)
     context.log.info(f"Tier 1: {firing}/4 horizons firing")
@@ -209,6 +230,8 @@ def tier_2_scores(
     n_stations_by_horizon: dict[str, int] = {}
     scores_by_horizon: dict[str, tuple] = {}
 
+    thresholds_by_horizon: dict[str, float] = {}
+    score_thresholds = config.get("score_thresholds", {})
     for horizon in HORIZON_ORDER:
         rows_by_station = {
             site: tiered_alert_features.get((horizon, site), {})
@@ -219,13 +242,18 @@ def tier_2_scores(
         n_stations_by_horizon[horizon] = n_t1
         gate_by_horizon[horizon] = any(t2_gates.values())
 
+        single = _n_h2s_active(rows_by_station) <= 1
+        thresholds_by_horizon[horizon] = score_thresholds.get(
+            "single_station" if single else "multi_station", 0.5
+        )
         bw = _bellwether_features(tiered_alert_features, horizon)
-        score, contrib = _score_cell("tier_2", bw, config) if bw else (0.0, {})
+        score, contrib = _score_cell("tier_2", bw, config, single_station=single) if bw else (0.0, {})
         scores_by_horizon[horizon] = (score, contrib)
 
     results = _build_tier_results(
         "tier_2", label, tiered_alert_features,
         gate_by_horizon, n_stations_by_horizon, scores_by_horizon, evaluated_at,
+        thresholds_by_horizon=thresholds_by_horizon,
     )
     firing = sum(1 for r in results if r.fire)
     context.log.info(f"Tier 2: {firing}/4 horizons firing")
@@ -255,6 +283,8 @@ def tier_3_scores(
     n_stations_by_horizon: dict[str, int] = {}
     scores_by_horizon: dict[str, tuple] = {}
 
+    thresholds_by_horizon: dict[str, float] = {}
+    score_thresholds = config.get("score_thresholds", {})
     for horizon in HORIZON_ORDER:
         rows_by_station = {
             site: tiered_alert_features.get((horizon, site), {})
@@ -266,13 +296,18 @@ def tier_3_scores(
         n_stations_by_horizon[horizon] = n_t1
         gate_by_horizon[horizon] = any(t3_gates.values())
 
+        single = _n_h2s_active(rows_by_station) <= 1
+        thresholds_by_horizon[horizon] = score_thresholds.get(
+            "single_station" if single else "multi_station", 0.5
+        )
         bw = _bellwether_features(tiered_alert_features, horizon)
-        score, contrib = _score_cell("tier_3", bw, config) if bw else (0.0, {})
+        score, contrib = _score_cell("tier_3", bw, config, single_station=single) if bw else (0.0, {})
         scores_by_horizon[horizon] = (score, contrib)
 
     results = _build_tier_results(
         "tier_3", label, tiered_alert_features,
         gate_by_horizon, n_stations_by_horizon, scores_by_horizon, evaluated_at,
+        thresholds_by_horizon=thresholds_by_horizon,
     )
     firing = sum(1 for r in results if r.fire)
     context.log.info(f"Tier 3: {firing}/4 horizons firing")
