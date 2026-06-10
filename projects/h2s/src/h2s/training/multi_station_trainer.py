@@ -23,6 +23,8 @@ from h2s.constants import (  # noqa: F401 — re-exported for downstream imports
     FLOW_COL,
     H2S_THRESHOLD_EXTREME,
     H2S_THRESHOLD_HIGH,
+    H2S_THRESHOLD_LOW,
+    H2S_THRESHOLD_MED,
     MODEL_FEATURES,
     STATION_PARTITION_MAP,
     STATIONS,
@@ -38,11 +40,25 @@ RANDOM_STATE = 42
 
 # Default ensemble margin per selection metric — used when caller doesn't override.
 _DEFAULT_MARGINS = {
+    "recall_5": ENSEMBLE_RECALL_MARGIN,
+    "recall_10": ENSEMBLE_RECALL_MARGIN,
     "recall_30": ENSEMBLE_RECALL_MARGIN,
     "recall_100": ENSEMBLE_RECALL_MARGIN,
     "r2": ENSEMBLE_R2_MARGIN,
     "auc": ENSEMBLE_AUC_MARGIN,
 }
+
+# Recall thresholds reported by eval_regressor — span the operational
+# categorical boundaries (green<5 / yellow_low 5-10 / yellow_high 10-30 /
+# orange ≥30) plus the calibration-extreme threshold (100). The 5/10 cuts
+# are also relevant for complaint-rate evaluation: monitor logs show
+# complaints rise in the 5-10 ppb band where yellow_low alerts fire.
+_RECALL_THRESHOLDS_PPB = (
+    H2S_THRESHOLD_LOW,        # 5 ppb — green/yellow_low boundary
+    H2S_THRESHOLD_MED,        # 10 ppb — yellow_low/yellow_high boundary
+    H2S_THRESHOLD_HIGH,       # 30 ppb — yellow_high/orange (watch)
+    H2S_THRESHOLD_EXTREME,    # 100 ppb — extreme (critical)
+)
 
 
 class EnsembleRegressor:
@@ -190,26 +206,27 @@ def eval_regressor(model, X_test, y_test):
     """Evaluate a regressor on test set.
 
     Returns absolute-fit metrics (MAE/RMSE/R²) **and** alert-aligned recall
-    at the operational thresholds (30 ppb watch, 100 ppb critical). Recall
-    is computed by cutting both the prediction and the truth at the
-    threshold — matches the `calibration_eval.recall_at_threshold`
-    contract used by the calibration-aligned report.
+    at the four operational categorical thresholds (5 / 10 / 30 / 100 ppb).
+    Recall is computed by cutting both the prediction and the truth at each
+    threshold — matches the `calibration_eval.recall_at_threshold` contract
+    used by the calibration-aligned report.
+
+    Per-threshold keys: ``recall_<N>``, ``precision_<N>``, ``n_positives_<N>``.
     """
     y_pred = np.clip(model.predict(X_test), 0, None)
     y_test_arr = np.asarray(y_test, dtype=float)
-    r30 = recall_at_threshold(y_test_arr, y_pred, H2S_THRESHOLD_HIGH)
-    r100 = recall_at_threshold(y_test_arr, y_pred, H2S_THRESHOLD_EXTREME)
-    return {
+    result: dict[str, float | int] = {
         'MAE': float(mean_absolute_error(y_test_arr, y_pred)),
         'RMSE': float(np.sqrt(mean_squared_error(y_test_arr, y_pred))),
         'R2': float(r2_score(y_test_arr, y_pred)),
-        'recall_30': float(r30['recall']),
-        'precision_30': float(r30['precision']),
-        'n_positives_30': int(r30['n_positives']),
-        'recall_100': float(r100['recall']),
-        'precision_100': float(r100['precision']),
-        'n_positives_100': int(r100['n_positives']),
     }
+    for thr in _RECALL_THRESHOLDS_PPB:
+        r = recall_at_threshold(y_test_arr, y_pred, thr)
+        suffix = int(thr)
+        result[f'recall_{suffix}'] = float(r['recall'])
+        result[f'precision_{suffix}'] = float(r['precision'])
+        result[f'n_positives_{suffix}'] = int(r['n_positives'])
+    return result
 
 
 def eval_classifier(model, X_test, y_test, threshold=0.3):
@@ -259,13 +276,20 @@ def train_and_select(X_train, X_test, y_train, y_test, task: str,
     """
     if task == 'regression':
         metric = selection_metric or 'recall_30'
-        if metric not in {'recall_30', 'recall_100', 'r2'}:
+        valid_regression_metrics = {'recall_5', 'recall_10', 'recall_30', 'recall_100', 'r2'}
+        if metric not in valid_regression_metrics:
             raise ValueError(
                 f"selection_metric={metric!r} unsupported for regression; "
-                "expected 'recall_30', 'recall_100', or 'r2'"
+                f"expected one of {sorted(valid_regression_metrics)}"
             )
         margin = ensemble_margin if ensemble_margin is not None else _DEFAULT_MARGINS[metric]
-        metric_key = {'recall_30': 'recall_30', 'recall_100': 'recall_100', 'r2': 'R2'}[metric]
+        metric_key = {
+            'recall_5': 'recall_5',
+            'recall_10': 'recall_10',
+            'recall_30': 'recall_30',
+            'recall_100': 'recall_100',
+            'r2': 'R2',
+        }[metric]
 
         rf = get_rf_regressor()
         rf.fit(X_train, y_train)

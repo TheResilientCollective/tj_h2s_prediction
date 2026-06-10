@@ -32,6 +32,15 @@ Chronological 70/30 split per `calibration_eval.chronological_split` —
 same boundary used by the
 [PR #26 retrain experiment](../2026-05-20_calm_night_feature_refresh/RESULTS.md).
 
+### Scoring
+
+Each candidate scored at **all four categorical boundaries** — recall at 5 ppb
+(green/yellow_low), 10 ppb (yellow_low/yellow_high), 30 ppb (watch), and
+100 ppb (critical). The 5 / 10 ppb cuts surface complaint-rate behavior:
+monitor logs show complaints rising in the 5-10 ppb band, with 8 ppb known
+as a complaint-trigger level. Recall@30 and recall@100 gate acceptance;
+recall@5 and recall@10 are reported but advisory.
+
 ### Acceptance criteria
 
 For each X < D, X "wins" if all three hold:

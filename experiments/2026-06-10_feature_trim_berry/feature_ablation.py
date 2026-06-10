@@ -40,10 +40,24 @@ import pandas as pd
 from h2s.constants import (
     H2S_THRESHOLD_EXTREME,
     H2S_THRESHOLD_HIGH,
+    H2S_THRESHOLD_LOW,
+    H2S_THRESHOLD_MED,
     MODEL_FEATURES,
     MODEL_FEATURES_EVIDENCE,
     MODEL_FEATURES_LEAN,
     MODEL_FEATURES_MINIMAL,
+)
+
+
+# Score at all four categorical boundaries (green<5 / yellow_low / yellow_high /
+# orange / extreme). 5 ppb and 10 ppb added per complaint-rate analysis:
+# complaints rise in the 5-10 ppb band (yellow_low), with 8 ppb identified
+# as a known complaint-trigger level.
+EVAL_THRESHOLDS = (
+    H2S_THRESHOLD_LOW,        # 5
+    H2S_THRESHOLD_MED,        # 10
+    H2S_THRESHOLD_HIGH,       # 30
+    H2S_THRESHOLD_EXTREME,    # 100
 )
 from h2s.training.calibration_eval import (
     CalibrationReport,
@@ -104,9 +118,7 @@ def _train_and_score(
 
     fit_metrics = eval_regressor(model, X_test, y_test)
     preds = np.clip(model.predict(X_test), 0, None)
-    report = calibration_report(
-        test_df, preds, thresholds=(H2S_THRESHOLD_HIGH, H2S_THRESHOLD_EXTREME)
-    )
+    report = calibration_report(test_df, preds, thresholds=EVAL_THRESHOLDS)
     importance = _importance_for_features(model, cand.features)
     return fit_metrics, report, importance
 
@@ -136,14 +148,12 @@ def _evaluate_acceptance(
 
 
 def _format_overall(block: dict) -> str:
-    spearman = block["spearman"]
-    r30 = block["thr_30"]["recall"]
-    r100 = block["thr_100"]["recall"]
-    return (
-        f"Spearman={spearman:6.3f}  "
-        f"recall@30={r30:.3f}  recall@100={r100:.3f}  "
-        f"N={block['n']}"
-    )
+    parts = [f"Spearman={block['spearman']:6.3f}"]
+    for thr in EVAL_THRESHOLDS:
+        recall = block[f"thr_{int(thr)}"]["recall"]
+        parts.append(f"r@{int(thr)}={recall:.3f}")
+    parts.append(f"N={block['n']}")
+    return "  ".join(parts)
 
 
 def _print_scoreboard(
@@ -212,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
     persistence_report = calibration_report(
         persistence_test_df,
         persistence_pred.to_numpy(),
-        thresholds=(H2S_THRESHOLD_HIGH, H2S_THRESHOLD_EXTREME),
+        thresholds=EVAL_THRESHOLDS,
     )
 
     # --- Train each candidate ---------------------------------------------
@@ -285,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
                 "n_test_evaluated": len(persistence_test_df),
                 "train_time_range": [str(train_df["time"].min()), str(train_df["time"].max())],
                 "test_time_range": [str(test_df["time"].min()), str(test_df["time"].max())],
-                "thresholds_ppb": [H2S_THRESHOLD_HIGH, H2S_THRESHOLD_EXTREME],
+                "thresholds_ppb": [int(t) for t in EVAL_THRESHOLDS],
                 "acceptance_tolerances": {
                     "recall_30_drop": RECALL_30_TOLERANCE,
                     "recall_100_drop": RECALL_100_TOLERANCE,
