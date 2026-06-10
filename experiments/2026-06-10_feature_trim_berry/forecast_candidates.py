@@ -180,6 +180,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: forecast input not found at {args.forecast_input}", file=sys.stderr)
         return 1
 
+    # Capture git state *before* we write any outputs — otherwise the
+    # just-created files appear as untracked changes and make the manifest
+    # report git_dirty=True even when the producing source is clean.
+    git = _git_provenance(repo_root)
+
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Historical training data ----------------------------------------
@@ -272,7 +277,6 @@ def main(argv: list[str] | None = None) -> int:
         })
 
     # --- Manifest ---------------------------------------------------------
-    git = _git_provenance(repo_root)
     # produced_at uses the forecast input's max time as the anchor so the
     # manifest is reproducible (no wall-clock dependency in the file).
     produced_at = forecast_df["time"].max().isoformat()

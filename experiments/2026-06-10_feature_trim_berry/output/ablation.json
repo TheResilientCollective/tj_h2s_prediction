@@ -1,0 +1,1062 @@
+{
+  "config": {
+    "station": "NESTOR - BES",
+    "parquet": "/Users/valentin/development/dev_resilient/tj_h2s_prediction/data/modeldata_h2s_nofill.parquet",
+    "train_fraction": 0.7,
+    "n_train": 8303,
+    "n_test": 3559,
+    "n_test_evaluated": 3558,
+    "train_time_range": [
+      "2024-10-09 14:00:00+00:00",
+      "2025-10-18 15:00:00+00:00"
+    ],
+    "test_time_range": [
+      "2025-10-18 16:00:00+00:00",
+      "2026-04-01 07:00:00+00:00"
+    ],
+    "thresholds_ppb": [
+      5,
+      10,
+      30,
+      100
+    ],
+    "acceptance_tolerances": {
+      "recall_30_drop": 0.02,
+      "recall_100_drop": 0.05,
+      "spearman_drop": 0.02
+    }
+  },
+  "persistence_baseline": {
+    "overall": {
+      "n": 3558,
+      "spearman": 0.8221857143627102,
+      "thr_5": {
+        "threshold": 5.0,
+        "n_positives": 887,
+        "n_predicted_positive": 886,
+        "recall": 0.7023675310033822,
+        "precision": 0.7031602708803611
+      },
+      "thr_10": {
+        "threshold": 10.0,
+        "n_positives": 512,
+        "n_predicted_positive": 511,
+        "recall": 0.650390625,
+        "precision": 0.6516634050880626
+      },
+      "thr_30": {
+        "threshold": 30.0,
+        "n_positives": 223,
+        "n_predicted_positive": 222,
+        "recall": 0.5739910313901345,
+        "precision": 0.5765765765765766
+      },
+      "thr_100": {
+        "threshold": 100.0,
+        "n_positives": 77,
+        "n_predicted_positive": 77,
+        "recall": 0.38961038961038963,
+        "precision": 0.38961038961038963
+      }
+    },
+    "per_site": {
+      "NESTOR - BES": {
+        "n": 3558,
+        "spearman": 0.8221857143627102,
+        "thr_5": {
+          "threshold": 5.0,
+          "n_positives": 887,
+          "n_predicted_positive": 886,
+          "recall": 0.7023675310033822,
+          "precision": 0.7031602708803611
+        },
+        "thr_10": {
+          "threshold": 10.0,
+          "n_positives": 512,
+          "n_predicted_positive": 511,
+          "recall": 0.650390625,
+          "precision": 0.6516634050880626
+        },
+        "thr_30": {
+          "threshold": 30.0,
+          "n_positives": 223,
+          "n_predicted_positive": 222,
+          "recall": 0.5739910313901345,
+          "precision": 0.5765765765765766
+        },
+        "thr_100": {
+          "threshold": 100.0,
+          "n_positives": 77,
+          "n_predicted_positive": 77,
+          "recall": 0.38961038961038963,
+          "precision": 0.38961038961038963
+        }
+      }
+    },
+    "per_regime": {
+      "calm_stable_atm_1": {
+        "n": 1161,
+        "spearman": 0.7543432316925875,
+        "thr_5": {
+          "threshold": 5.0,
+          "n_positives": 449,
+          "n_predicted_positive": 430,
+          "recall": 0.7082405345211581,
+          "precision": 0.7395348837209302
+        },
+        "thr_10": {
+          "threshold": 10.0,
+          "n_positives": 285,
+          "n_predicted_positive": 271,
+          "recall": 0.6631578947368421,
+          "precision": 0.6974169741697417
+        },
+        "thr_30": {
+          "threshold": 30.0,
+          "n_positives": 147,
+          "n_predicted_positive": 138,
+          "recall": 0.5986394557823129,
+          "precision": 0.6376811594202898
+        },
+        "thr_100": {
+          "threshold": 100.0,
+          "n_positives": 54,
+          "n_predicted_positive": 49,
+          "recall": 0.3888888888888889,
+          "precision": 0.42857142857142855
+        }
+      },
+      "windy_stable_atm_0": {
+        "n": 2397,
+        "spearman": 0.8461575453585569,
+        "thr_5": {
+          "threshold": 5.0,
+          "n_positives": 438,
+          "n_predicted_positive": 456,
+          "recall": 0.6963470319634704,
+          "precision": 0.668859649122807
+        },
+        "thr_10": {
+          "threshold": 10.0,
+          "n_positives": 227,
+          "n_predicted_positive": 240,
+          "recall": 0.6343612334801763,
+          "precision": 0.6
+        },
+        "thr_30": {
+          "threshold": 30.0,
+          "n_positives": 76,
+          "n_predicted_positive": 84,
+          "recall": 0.5263157894736842,
+          "precision": 0.47619047619047616
+        },
+        "thr_100": {
+          "threshold": 100.0,
+          "n_positives": 23,
+          "n_predicted_positive": 28,
+          "recall": 0.391304347826087,
+          "precision": 0.32142857142857145
+        }
+      }
+    }
+  },
+  "candidates": [
+    {
+      "code": "D",
+      "name": "Baseline (44 feat)",
+      "n_features": 44,
+      "features": [
+        "temperature_2m",
+        "wind_speed_10m",
+        "wind_direction_sin",
+        "wind_direction_cos",
+        "wind_gusts_10m",
+        "precipitation",
+        "relative_humidity_2m",
+        "surface_pressure",
+        "cloud_cover",
+        "dewpoint_2m",
+        "wind_speed_10m_avg_2h",
+        "wind_speed_10m_avg_3h",
+        "wind_speed_10m_avg_4h",
+        "wind_gusts_10m_max_2h",
+        "wind_gusts_10m_max_3h",
+        "wind_gusts_10m_max_4h",
+        "tide_height",
+        "tidal_state_encoded",
+        "hour_sin",
+        "hour_cos",
+        "month_sin",
+        "month_cos",
+        "is_night",
+        "source_regime",
+        "flow_log",
+        "flow_low",
+        "flow_high",
+        "wind_temp_interaction",
+        "humidity_temp_interaction",
+        "stable_atm",
+        "wind_x_stable_atm",
+        "h2s_lag_1h",
+        "h2s_lag_3h",
+        "h2s_lag_6h",
+        "h2s_rolling_6h",
+        "h2s_rolling_24h",
+        "flow_lag_6h",
+        "flow_rolling_24h",
+        "sbiwtp_flow_mgd",
+        "sbiwtp_anomaly",
+        "sbiwtp_deficit",
+        "sbiwtp_flow_x_temp",
+        "sbiwtp_hourly_mgd",
+        "sbiwtp_sli"
+      ],
+      "fit_metrics": {
+        "MAE": 7.048220655629025,
+        "RMSE": 20.5141153084997,
+        "R2": 0.4787584583094676,
+        "recall_5": 0.8613303269447576,
+        "precision_5": 0.6452702702702703,
+        "n_positives_5": 887,
+        "recall_10": 0.869140625,
+        "precision_10": 0.5886243386243386,
+        "n_positives_10": 512,
+        "recall_30": 0.8026905829596412,
+        "precision_30": 0.5375375375375375,
+        "n_positives_30": 223,
+        "recall_100": 0.6363636363636364,
+        "precision_100": 0.5,
+        "n_positives_100": 77
+      },
+      "calibration_report": {
+        "overall": {
+          "n": 3559,
+          "spearman": 0.7816369865018837,
+          "thr_5": {
+            "threshold": 5.0,
+            "n_positives": 887,
+            "n_predicted_positive": 1184,
+            "recall": 0.8613303269447576,
+            "precision": 0.6452702702702703
+          },
+          "thr_10": {
+            "threshold": 10.0,
+            "n_positives": 512,
+            "n_predicted_positive": 756,
+            "recall": 0.869140625,
+            "precision": 0.5886243386243386
+          },
+          "thr_30": {
+            "threshold": 30.0,
+            "n_positives": 223,
+            "n_predicted_positive": 333,
+            "recall": 0.8026905829596412,
+            "precision": 0.5375375375375375
+          },
+          "thr_100": {
+            "threshold": 100.0,
+            "n_positives": 77,
+            "n_predicted_positive": 98,
+            "recall": 0.6363636363636364,
+            "precision": 0.5
+          }
+        },
+        "per_site": {
+          "NESTOR - BES": {
+            "n": 3559,
+            "spearman": 0.7816369865018837,
+            "thr_5": {
+              "threshold": 5.0,
+              "n_positives": 887,
+              "n_predicted_positive": 1184,
+              "recall": 0.8613303269447576,
+              "precision": 0.6452702702702703
+            },
+            "thr_10": {
+              "threshold": 10.0,
+              "n_positives": 512,
+              "n_predicted_positive": 756,
+              "recall": 0.869140625,
+              "precision": 0.5886243386243386
+            },
+            "thr_30": {
+              "threshold": 30.0,
+              "n_positives": 223,
+              "n_predicted_positive": 333,
+              "recall": 0.8026905829596412,
+              "precision": 0.5375375375375375
+            },
+            "thr_100": {
+              "threshold": 100.0,
+              "n_positives": 77,
+              "n_predicted_positive": 98,
+              "recall": 0.6363636363636364,
+              "precision": 0.5
+            }
+          }
+        },
+        "per_regime": {
+          "calm_stable_atm_1": {
+            "n": 1161,
+            "spearman": 0.7922051812648022,
+            "thr_5": {
+              "threshold": 5.0,
+              "n_positives": 449,
+              "n_predicted_positive": 578,
+              "recall": 0.9153674832962138,
+              "precision": 0.7110726643598616
+            },
+            "thr_10": {
+              "threshold": 10.0,
+              "n_positives": 285,
+              "n_predicted_positive": 426,
+              "recall": 0.9263157894736842,
+              "precision": 0.6197183098591549
+            },
+            "thr_30": {
+              "threshold": 30.0,
+              "n_positives": 147,
+              "n_predicted_positive": 221,
+              "recall": 0.8571428571428571,
+              "precision": 0.5701357466063348
+            },
+            "thr_100": {
+              "threshold": 100.0,
+              "n_positives": 54,
+              "n_predicted_positive": 78,
+              "recall": 0.7222222222222222,
+              "precision": 0.5
+            }
+          },
+          "windy_stable_atm_0": {
+            "n": 2398,
+            "spearman": 0.7462043267611137,
+            "thr_5": {
+              "threshold": 5.0,
+              "n_positives": 438,
+              "n_predicted_positive": 606,
+              "recall": 0.8059360730593608,
+              "precision": 0.5825082508250825
+            },
+            "thr_10": {
+              "threshold": 10.0,
+              "n_positives": 227,
+              "n_predicted_positive": 330,
+              "recall": 0.7973568281938326,
+              "precision": 0.5484848484848485
+            },
+            "thr_30": {
+              "threshold": 30.0,
+              "n_positives": 76,
+              "n_predicted_positive": 112,
+              "recall": 0.6973684210526315,
+              "precision": 0.4732142857142857
+            },
+            "thr_100": {
+              "threshold": 100.0,
+              "n_positives": 23,
+              "n_predicted_positive": 20,
+              "recall": 0.43478260869565216,
+              "precision": 0.5
+            }
+          }
+        }
+      },
+      "feature_importance": {
+        "temperature_2m": 0.0228,
+        "wind_speed_10m": 0.0141,
+        "wind_direction_sin": 0.008,
+        "wind_direction_cos": 0.0113,
+        "wind_gusts_10m": 0.0092,
+        "precipitation": 0.0034,
+        "relative_humidity_2m": 0.0082,
+        "surface_pressure": 0.0055,
+        "cloud_cover": 0.0086,
+        "dewpoint_2m": 0.0453,
+        "wind_speed_10m_avg_2h": 0.0082,
+        "wind_speed_10m_avg_3h": 0.005,
+        "wind_speed_10m_avg_4h": 0.0075,
+        "wind_gusts_10m_max_2h": 0.006,
+        "wind_gusts_10m_max_3h": 0.0052,
+        "wind_gusts_10m_max_4h": 0.0171,
+        "tide_height": 0.0108,
+        "tidal_state_encoded": 0.0149,
+        "hour_sin": 0.0936,
+        "hour_cos": 0.0236,
+        "month_sin": 0.0038,
+        "month_cos": 0.0123,
+        "is_night": 0.0216,
+        "source_regime": 0.0689,
+        "flow_log": 0.0167,
+        "flow_low": 0.0019,
+        "flow_high": 0.0,
+        "wind_temp_interaction": 0.0073,
+        "humidity_temp_interaction": 0.0141,
+        "stable_atm": 0.2729,
+        "wind_x_stable_atm": 0.0308,
+        "h2s_lag_1h": 0.0333,
+        "h2s_lag_3h": 0.0182,
+        "h2s_lag_6h": 0.0128,
+        "h2s_rolling_6h": 0.0524,
+        "h2s_rolling_24h": 0.0193,
+        "flow_lag_6h": 0.0126,
+        "flow_rolling_24h": 0.0046,
+        "sbiwtp_flow_mgd": 0.0123,
+        "sbiwtp_anomaly": 0.0055,
+        "sbiwtp_deficit": 0.0015,
+        "sbiwtp_flow_x_temp": 0.0125,
+        "sbiwtp_hourly_mgd": 0.0089,
+        "sbiwtp_sli": 0.0277
+      },
+      "acceptance": {
+        "note": "baseline (reference)"
+      },
+      "passed": true
+    },
+    {
+      "code": "C",
+      "name": "Evidence-only (33 feat)",
+      "n_features": 33,
+      "features": [
+        "temperature_2m",
+        "wind_speed_10m",
+        "wind_direction_sin",
+        "wind_direction_cos",
+        "wind_gusts_10m",
+        "precipitation",
+        "relative_humidity_2m",
+        "surface_pressure",
+        "cloud_cover",
+        "dewpoint_2m",
+        "wind_speed_10m_avg_2h",
+        "wind_speed_10m_avg_3h",
+        "wind_gusts_10m_max_2h",
+        "wind_gusts_10m_max_3h",
+        "tide_height",
+        "tidal_state_encoded",
+        "hour_sin",
+        "hour_cos",
+        "month_sin",
+        "month_cos",
+        "is_night",
+        "source_regime",
+        "wind_temp_interaction",
+        "humidity_temp_interaction",
+        "stable_atm",
+        "wind_x_stable_atm",
+        "h2s_lag_1h",
+        "h2s_lag_3h",
+        "h2s_lag_6h",
+        "h2s_rolling_6h",
+        "h2s_rolling_24h",
+        "flow_lag_6h",
+        "flow_rolling_24h"
+      ],
+      "fit_metrics": {
+        "MAE": 6.594249628686947,
+        "RMSE": 18.974831498063352,
+        "R2": 0.5540467925845185,
+        "recall_5": 0.8556933483652762,
+        "precision_5": 0.6560069144338807,
+        "n_positives_5": 887,
+        "recall_10": 0.861328125,
+        "precision_10": 0.5856573705179283,
+        "n_positives_10": 512,
+        "recall_30": 0.7937219730941704,
+        "precision_30": 0.5379939209726444,
+        "n_positives_30": 223,
+        "recall_100": 0.6753246753246753,
+        "precision_100": 0.5714285714285714,
+        "n_positives_100": 77
+      },
+      "calibration_report": {
+        "overall": {
+          "n": 3559,
+          "spearman": 0.8168128250257394,
+          "thr_5": {
+            "threshold": 5.0,
+            "n_positives": 887,
+            "n_predicted_positive": 1157,
+            "recall": 0.8556933483652762,
+            "precision": 0.6560069144338807
+          },
+          "thr_10": {
+            "threshold": 10.0,
+            "n_positives": 512,
+            "n_predicted_positive": 753,
+            "recall": 0.861328125,
+            "precision": 0.5856573705179283
+          },
+          "thr_30": {
+            "threshold": 30.0,
+            "n_positives": 223,
+            "n_predicted_positive": 329,
+            "recall": 0.7937219730941704,
+            "precision": 0.5379939209726444
+          },
+          "thr_100": {
+            "threshold": 100.0,
+            "n_positives": 77,
+            "n_predicted_positive": 91,
+            "recall": 0.6753246753246753,
+            "precision": 0.5714285714285714
+          }
+        },
+        "per_site": {
+          "NESTOR - BES": {
+            "n": 3559,
+            "spearman": 0.8168128250257394,
+            "thr_5": {
+              "threshold": 5.0,
+              "n_positives": 887,
+              "n_predicted_positive": 1157,
+              "recall": 0.8556933483652762,
+              "precision": 0.6560069144338807
+            },
+            "thr_10": {
+              "threshold": 10.0,
+              "n_positives": 512,
+              "n_predicted_positive": 753,
+              "recall": 0.861328125,
+              "precision": 0.5856573705179283
+            },
+            "thr_30": {
+              "threshold": 30.0,
+              "n_positives": 223,
+              "n_predicted_positive": 329,
+              "recall": 0.7937219730941704,
+              "precision": 0.5379939209726444
+            },
+            "thr_100": {
+              "threshold": 100.0,
+              "n_positives": 77,
+              "n_predicted_positive": 91,
+              "recall": 0.6753246753246753,
+              "precision": 0.5714285714285714
+            }
+          }
+        },
+        "per_regime": {
+          "calm_stable_atm_1": {
+            "n": 1161,
+            "spearman": 0.8023875270130919,
+            "thr_5": {
+              "threshold": 5.0,
+              "n_positives": 449,
+              "n_predicted_positive": 570,
+              "recall": 0.8997772828507795,
+              "precision": 0.7087719298245614
+            },
+            "thr_10": {
+              "threshold": 10.0,
+              "n_positives": 285,
+              "n_predicted_positive": 420,
+              "recall": 0.9122807017543859,
+              "precision": 0.6190476190476191
+            },
+            "thr_30": {
+              "threshold": 30.0,
+              "n_positives": 147,
+              "n_predicted_positive": 218,
+              "recall": 0.8571428571428571,
+              "precision": 0.5779816513761468
+            },
+            "thr_100": {
+              "threshold": 100.0,
+              "n_positives": 54,
+              "n_predicted_positive": 70,
+              "recall": 0.7592592592592593,
+              "precision": 0.5857142857142857
+            }
+          },
+          "windy_stable_atm_0": {
+            "n": 2398,
+            "spearman": 0.8057816633448361,
+            "thr_5": {
+              "threshold": 5.0,
+              "n_positives": 438,
+              "n_predicted_positive": 587,
+              "recall": 0.8105022831050228,
+              "precision": 0.6047700170357752
+            },
+            "thr_10": {
+              "threshold": 10.0,
+              "n_positives": 227,
+              "n_predicted_positive": 333,
+              "recall": 0.7973568281938326,
+              "precision": 0.5435435435435435
+            },
+            "thr_30": {
+              "threshold": 30.0,
+              "n_positives": 76,
+              "n_predicted_positive": 111,
+              "recall": 0.6710526315789473,
+              "precision": 0.4594594594594595
+            },
+            "thr_100": {
+              "threshold": 100.0,
+              "n_positives": 23,
+              "n_predicted_positive": 21,
+              "recall": 0.4782608695652174,
+              "precision": 0.5238095238095238
+            }
+          }
+        }
+      },
+      "feature_importance": {
+        "temperature_2m": 0.0317,
+        "wind_speed_10m": 0.0298,
+        "wind_direction_sin": 0.018,
+        "wind_direction_cos": 0.0161,
+        "wind_gusts_10m": 0.0169,
+        "precipitation": 0.002,
+        "relative_humidity_2m": 0.016,
+        "surface_pressure": 0.0121,
+        "cloud_cover": 0.0084,
+        "dewpoint_2m": 0.0544,
+        "wind_speed_10m_avg_2h": 0.0133,
+        "wind_speed_10m_avg_3h": 0.0114,
+        "wind_gusts_10m_max_2h": 0.011,
+        "wind_gusts_10m_max_3h": 0.0204,
+        "tide_height": 0.0166,
+        "tidal_state_encoded": 0.0108,
+        "hour_sin": 0.1263,
+        "hour_cos": 0.0321,
+        "month_sin": 0.0038,
+        "month_cos": 0.0145,
+        "is_night": 0.0288,
+        "source_regime": 0.1599,
+        "wind_temp_interaction": 0.0131,
+        "humidity_temp_interaction": 0.043,
+        "stable_atm": 0.0039,
+        "wind_x_stable_atm": 0.033,
+        "h2s_lag_1h": 0.0335,
+        "h2s_lag_3h": 0.0369,
+        "h2s_lag_6h": 0.0211,
+        "h2s_rolling_6h": 0.1132,
+        "h2s_rolling_24h": 0.017,
+        "flow_lag_6h": 0.019,
+        "flow_rolling_24h": 0.0118
+      },
+      "acceptance": {
+        "recall_30_drop": 0.009,
+        "recall_30_drop_allowed": 0.02,
+        "recall_30_pass": true,
+        "recall_100_drop": -0.039,
+        "recall_100_drop_allowed": 0.05,
+        "recall_100_pass": true,
+        "spearman_drop": -0.0352,
+        "spearman_drop_allowed": 0.02,
+        "spearman_pass": true
+      },
+      "passed": true
+    },
+    {
+      "code": "B",
+      "name": "Lean (19 feat)",
+      "n_features": 19,
+      "features": [
+        "temperature_2m",
+        "wind_speed_10m",
+        "wind_direction_sin",
+        "wind_direction_cos",
+        "relative_humidity_2m",
+        "tide_height",
+        "tidal_state_encoded",
+        "month_sin",
+        "month_cos",
+        "is_night",
+        "source_regime",
+        "stable_atm",
+        "h2s_lag_1h",
+        "h2s_lag_3h",
+        "h2s_lag_6h",
+        "h2s_rolling_6h",
+        "h2s_rolling_24h",
+        "flow_lag_6h",
+        "flow_rolling_24h"
+      ],
+      "fit_metrics": {
+        "MAE": 6.30835373427768,
+        "RMSE": 18.596965642468017,
+        "R2": 0.5716314153126859,
+        "recall_5": 0.830890642615558,
+        "precision_5": 0.67,
+        "n_positives_5": 887,
+        "recall_10": 0.80859375,
+        "precision_10": 0.6160714285714286,
+        "n_positives_10": 512,
+        "recall_30": 0.7354260089686099,
+        "precision_30": 0.592057761732852,
+        "n_positives_30": 223,
+        "recall_100": 0.5714285714285714,
+        "precision_100": 0.6197183098591549,
+        "n_positives_100": 77
+      },
+      "calibration_report": {
+        "overall": {
+          "n": 3559,
+          "spearman": 0.8048437006716096,
+          "thr_5": {
+            "threshold": 5.0,
+            "n_positives": 887,
+            "n_predicted_positive": 1100,
+            "recall": 0.830890642615558,
+            "precision": 0.67
+          },
+          "thr_10": {
+            "threshold": 10.0,
+            "n_positives": 512,
+            "n_predicted_positive": 672,
+            "recall": 0.80859375,
+            "precision": 0.6160714285714286
+          },
+          "thr_30": {
+            "threshold": 30.0,
+            "n_positives": 223,
+            "n_predicted_positive": 277,
+            "recall": 0.7354260089686099,
+            "precision": 0.592057761732852
+          },
+          "thr_100": {
+            "threshold": 100.0,
+            "n_positives": 77,
+            "n_predicted_positive": 71,
+            "recall": 0.5714285714285714,
+            "precision": 0.6197183098591549
+          }
+        },
+        "per_site": {
+          "NESTOR - BES": {
+            "n": 3559,
+            "spearman": 0.8048437006716096,
+            "thr_5": {
+              "threshold": 5.0,
+              "n_positives": 887,
+              "n_predicted_positive": 1100,
+              "recall": 0.830890642615558,
+              "precision": 0.67
+            },
+            "thr_10": {
+              "threshold": 10.0,
+              "n_positives": 512,
+              "n_predicted_positive": 672,
+              "recall": 0.80859375,
+              "precision": 0.6160714285714286
+            },
+            "thr_30": {
+              "threshold": 30.0,
+              "n_positives": 223,
+              "n_predicted_positive": 277,
+              "recall": 0.7354260089686099,
+              "precision": 0.592057761732852
+            },
+            "thr_100": {
+              "threshold": 100.0,
+              "n_positives": 77,
+              "n_predicted_positive": 71,
+              "recall": 0.5714285714285714,
+              "precision": 0.6197183098591549
+            }
+          }
+        },
+        "per_regime": {
+          "calm_stable_atm_1": {
+            "n": 1161,
+            "spearman": 0.8078121698064957,
+            "thr_5": {
+              "threshold": 5.0,
+              "n_positives": 449,
+              "n_predicted_positive": 567,
+              "recall": 0.9064587973273942,
+              "precision": 0.7178130511463845
+            },
+            "thr_10": {
+              "threshold": 10.0,
+              "n_positives": 285,
+              "n_predicted_positive": 397,
+              "recall": 0.8982456140350877,
+              "precision": 0.6448362720403022
+            },
+            "thr_30": {
+              "threshold": 30.0,
+              "n_positives": 147,
+              "n_predicted_positive": 191,
+              "recall": 0.8367346938775511,
+              "precision": 0.643979057591623
+            },
+            "thr_100": {
+              "threshold": 100.0,
+              "n_positives": 54,
+              "n_predicted_positive": 59,
+              "recall": 0.6666666666666666,
+              "precision": 0.6101694915254238
+            }
+          },
+          "windy_stable_atm_0": {
+            "n": 2398,
+            "spearman": 0.7840197304178611,
+            "thr_5": {
+              "threshold": 5.0,
+              "n_positives": 438,
+              "n_predicted_positive": 533,
+              "recall": 0.7534246575342466,
+              "precision": 0.6191369606003753
+            },
+            "thr_10": {
+              "threshold": 10.0,
+              "n_positives": 227,
+              "n_predicted_positive": 275,
+              "recall": 0.6960352422907489,
+              "precision": 0.5745454545454546
+            },
+            "thr_30": {
+              "threshold": 30.0,
+              "n_positives": 76,
+              "n_predicted_positive": 86,
+              "recall": 0.5394736842105263,
+              "precision": 0.47674418604651164
+            },
+            "thr_100": {
+              "threshold": 100.0,
+              "n_positives": 23,
+              "n_predicted_positive": 12,
+              "recall": 0.34782608695652173,
+              "precision": 0.6666666666666666
+            }
+          }
+        }
+      },
+      "feature_importance": {
+        "temperature_2m": 0.0497,
+        "wind_speed_10m": 0.03,
+        "wind_direction_sin": 0.0317,
+        "wind_direction_cos": 0.0258,
+        "relative_humidity_2m": 0.024,
+        "tide_height": 0.0385,
+        "tidal_state_encoded": 0.0402,
+        "month_sin": 0.0073,
+        "month_cos": 0.0157,
+        "is_night": 0.0363,
+        "source_regime": 0.1915,
+        "stable_atm": 0.0754,
+        "h2s_lag_1h": 0.0744,
+        "h2s_lag_3h": 0.0681,
+        "h2s_lag_6h": 0.0576,
+        "h2s_rolling_6h": 0.1419,
+        "h2s_rolling_24h": 0.0438,
+        "flow_lag_6h": 0.0261,
+        "flow_rolling_24h": 0.0221
+      },
+      "acceptance": {
+        "recall_30_drop": 0.0673,
+        "recall_30_drop_allowed": 0.02,
+        "recall_30_pass": false,
+        "recall_100_drop": 0.0649,
+        "recall_100_drop_allowed": 0.05,
+        "recall_100_pass": false,
+        "spearman_drop": -0.0232,
+        "spearman_drop_allowed": 0.02,
+        "spearman_pass": true
+      },
+      "passed": false
+    },
+    {
+      "code": "A",
+      "name": "Minimal (11 feat)",
+      "n_features": 11,
+      "features": [
+        "temperature_2m",
+        "stable_atm",
+        "is_night",
+        "source_regime",
+        "wind_speed_10m",
+        "wind_direction_sin",
+        "wind_direction_cos",
+        "h2s_lag_1h",
+        "h2s_lag_3h",
+        "h2s_rolling_6h",
+        "h2s_rolling_24h"
+      ],
+      "fit_metrics": {
+        "MAE": 6.161685891816433,
+        "RMSE": 19.581156423584314,
+        "R2": 0.5250913175902053,
+        "recall_5": 0.7857948139797069,
+        "precision_5": 0.6928429423459245,
+        "n_positives_5": 887,
+        "recall_10": 0.755859375,
+        "precision_10": 0.6323529411764706,
+        "n_positives_10": 512,
+        "recall_30": 0.672645739910314,
+        "precision_30": 0.6147540983606558,
+        "n_positives_30": 223,
+        "recall_100": 0.5194805194805194,
+        "precision_100": 0.5714285714285714,
+        "n_positives_100": 77
+      },
+      "calibration_report": {
+        "overall": {
+          "n": 3559,
+          "spearman": 0.7865642524565742,
+          "thr_5": {
+            "threshold": 5.0,
+            "n_positives": 887,
+            "n_predicted_positive": 1006,
+            "recall": 0.7857948139797069,
+            "precision": 0.6928429423459245
+          },
+          "thr_10": {
+            "threshold": 10.0,
+            "n_positives": 512,
+            "n_predicted_positive": 612,
+            "recall": 0.755859375,
+            "precision": 0.6323529411764706
+          },
+          "thr_30": {
+            "threshold": 30.0,
+            "n_positives": 223,
+            "n_predicted_positive": 244,
+            "recall": 0.672645739910314,
+            "precision": 0.6147540983606558
+          },
+          "thr_100": {
+            "threshold": 100.0,
+            "n_positives": 77,
+            "n_predicted_positive": 70,
+            "recall": 0.5194805194805194,
+            "precision": 0.5714285714285714
+          }
+        },
+        "per_site": {
+          "NESTOR - BES": {
+            "n": 3559,
+            "spearman": 0.7865642524565742,
+            "thr_5": {
+              "threshold": 5.0,
+              "n_positives": 887,
+              "n_predicted_positive": 1006,
+              "recall": 0.7857948139797069,
+              "precision": 0.6928429423459245
+            },
+            "thr_10": {
+              "threshold": 10.0,
+              "n_positives": 512,
+              "n_predicted_positive": 612,
+              "recall": 0.755859375,
+              "precision": 0.6323529411764706
+            },
+            "thr_30": {
+              "threshold": 30.0,
+              "n_positives": 223,
+              "n_predicted_positive": 244,
+              "recall": 0.672645739910314,
+              "precision": 0.6147540983606558
+            },
+            "thr_100": {
+              "threshold": 100.0,
+              "n_positives": 77,
+              "n_predicted_positive": 70,
+              "recall": 0.5194805194805194,
+              "precision": 0.5714285714285714
+            }
+          }
+        },
+        "per_regime": {
+          "calm_stable_atm_1": {
+            "n": 1161,
+            "spearman": 0.7954367842687105,
+            "thr_5": {
+              "threshold": 5.0,
+              "n_positives": 449,
+              "n_predicted_positive": 542,
+              "recall": 0.8730512249443207,
+              "precision": 0.7232472324723247
+            },
+            "thr_10": {
+              "threshold": 10.0,
+              "n_positives": 285,
+              "n_predicted_positive": 397,
+              "recall": 0.8842105263157894,
+              "precision": 0.6347607052896725
+            },
+            "thr_30": {
+              "threshold": 30.0,
+              "n_positives": 147,
+              "n_predicted_positive": 186,
+              "recall": 0.8163265306122449,
+              "precision": 0.6451612903225806
+            },
+            "thr_100": {
+              "threshold": 100.0,
+              "n_positives": 54,
+              "n_predicted_positive": 60,
+              "recall": 0.6481481481481481,
+              "precision": 0.5833333333333334
+            }
+          },
+          "windy_stable_atm_0": {
+            "n": 2398,
+            "spearman": 0.75682747299639,
+            "thr_5": {
+              "threshold": 5.0,
+              "n_positives": 438,
+              "n_predicted_positive": 464,
+              "recall": 0.6963470319634704,
+              "precision": 0.6573275862068966
+            },
+            "thr_10": {
+              "threshold": 10.0,
+              "n_positives": 227,
+              "n_predicted_positive": 215,
+              "recall": 0.5947136563876652,
+              "precision": 0.627906976744186
+            },
+            "thr_30": {
+              "threshold": 30.0,
+              "n_positives": 76,
+              "n_predicted_positive": 58,
+              "recall": 0.39473684210526316,
+              "precision": 0.5172413793103449
+            },
+            "thr_100": {
+              "threshold": 100.0,
+              "n_positives": 23,
+              "n_predicted_positive": 10,
+              "recall": 0.21739130434782608,
+              "precision": 0.5
+            }
+          }
+        }
+      },
+      "feature_importance": {
+        "temperature_2m": 0.0507,
+        "stable_atm": 0.1394,
+        "is_night": 0.0932,
+        "source_regime": 0.1665,
+        "wind_speed_10m": 0.0446,
+        "wind_direction_sin": 0.0579,
+        "wind_direction_cos": 0.0435,
+        "h2s_lag_1h": 0.1234,
+        "h2s_lag_3h": 0.0765,
+        "h2s_rolling_6h": 0.1421,
+        "h2s_rolling_24h": 0.0622
+      },
+      "acceptance": {
+        "recall_30_drop": 0.13,
+        "recall_30_drop_allowed": 0.02,
+        "recall_30_pass": false,
+        "recall_100_drop": 0.1169,
+        "recall_100_drop_allowed": 0.05,
+        "recall_100_pass": false,
+        "spearman_drop": -0.0049,
+        "spearman_drop_allowed": 0.02,
+        "spearman_pass": true
+      },
+      "passed": false
+    }
+  ],
+  "decision": {
+    "winner": "C"
+  }
+}

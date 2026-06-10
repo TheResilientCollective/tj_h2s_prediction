@@ -1,0 +1,238 @@
+{
+  "schema_version": "1.0",
+  "run": {
+    "produced_at": "2026-04-11T20:15:00+00:00",
+    "git_sha": "e302f2c7473e7bb2d4d2c88f1a01edb8c0b889ed",
+    "git_branch": "feature/ablation-berry-trim",
+    "git_dirty": true,
+    "station": "NESTOR - BES"
+  },
+  "inputs": {
+    "training_parquet": {
+      "path": "data/modeldata_h2s_nofill.parquet",
+      "rows_filtered": 11862,
+      "time_range": [
+        "2024-10-09 14:00:00+00:00",
+        "2026-04-01 07:00:00+00:00"
+      ]
+    },
+    "forecast_input": {
+      "path": "data/modeldata_forecast_15min.csv",
+      "rows_filtered": 192,
+      "time_range": [
+        "2026-04-09 20:30:00+00:00",
+        "2026-04-11 20:15:00+00:00"
+      ],
+      "cadence_minutes": 15
+    }
+  },
+  "split": {
+    "method": "chronological",
+    "train_fraction": 0.7,
+    "train_n": 8303,
+    "test_n": 3559,
+    "test_time_range": [
+      "2025-10-18 16:00:00+00:00",
+      "2026-04-01 07:00:00+00:00"
+    ]
+  },
+  "categorical_thresholds_ppb": {
+    "yellow_low_min": 5,
+    "yellow_high_min": 10,
+    "orange_min": 30,
+    "critical_min": 100
+  },
+  "eval_thresholds_ppb": [
+    5,
+    10,
+    30,
+    100
+  ],
+  "candidates": [
+    {
+      "code": "C",
+      "name": "Evidence-only",
+      "n_features": 33,
+      "features": [
+        "temperature_2m",
+        "wind_speed_10m",
+        "wind_direction_sin",
+        "wind_direction_cos",
+        "wind_gusts_10m",
+        "precipitation",
+        "relative_humidity_2m",
+        "surface_pressure",
+        "cloud_cover",
+        "dewpoint_2m",
+        "wind_speed_10m_avg_2h",
+        "wind_speed_10m_avg_3h",
+        "wind_gusts_10m_max_2h",
+        "wind_gusts_10m_max_3h",
+        "tide_height",
+        "tidal_state_encoded",
+        "hour_sin",
+        "hour_cos",
+        "month_sin",
+        "month_cos",
+        "is_night",
+        "source_regime",
+        "wind_temp_interaction",
+        "humidity_temp_interaction",
+        "stable_atm",
+        "wind_x_stable_atm",
+        "h2s_lag_1h",
+        "h2s_lag_3h",
+        "h2s_lag_6h",
+        "h2s_rolling_6h",
+        "h2s_rolling_24h",
+        "flow_lag_6h",
+        "flow_rolling_24h"
+      ],
+      "hyperparameters": {
+        "objective": "reg:squarederror",
+        "base_score": null,
+        "booster": null,
+        "colsample_bylevel": null,
+        "colsample_bynode": null,
+        "colsample_bytree": 0.8,
+        "device": null,
+        "eval_metric": null,
+        "gamma": null,
+        "grow_policy": null,
+        "interaction_constraints": null,
+        "learning_rate": 0.05,
+        "max_bin": null,
+        "max_cat_threshold": null,
+        "max_cat_to_onehot": null,
+        "max_delta_step": null,
+        "max_depth": 6,
+        "max_leaves": null,
+        "min_child_weight": 5,
+        "monotone_constraints": null,
+        "multi_strategy": null,
+        "n_jobs": -1,
+        "num_parallel_tree": null,
+        "random_state": 42,
+        "reg_alpha": 0.1,
+        "reg_lambda": 1.0,
+        "sampling_method": null,
+        "scale_pos_weight": null,
+        "subsample": 0.8,
+        "tree_method": null,
+        "validate_parameters": null,
+        "verbosity": null
+      },
+      "holdout_metrics": {
+        "mae": 6.5942,
+        "rmse": 18.9748,
+        "r2": 0.554,
+        "recall_5": 0.8557,
+        "recall_10": 0.8613,
+        "recall_30": 0.7937,
+        "recall_100": 0.6753,
+        "n_positives_5": 887,
+        "n_positives_10": 512,
+        "n_positives_30": 223,
+        "n_positives_100": 77,
+        "n_test": 3559
+      },
+      "forecast_output": "forecast_evidence.csv",
+      "forecast_summary": {
+        "n_predictions": 192,
+        "max_predicted_ppb": 34.68513488769531,
+        "mean_predicted_ppb": 3.4576241970062256,
+        "category_counts": {
+          "green": 161,
+          "yellow_high": 19,
+          "yellow_low": 9,
+          "orange": 3
+        }
+      }
+    },
+    {
+      "code": "B",
+      "name": "Lean",
+      "n_features": 19,
+      "features": [
+        "temperature_2m",
+        "wind_speed_10m",
+        "wind_direction_sin",
+        "wind_direction_cos",
+        "relative_humidity_2m",
+        "tide_height",
+        "tidal_state_encoded",
+        "month_sin",
+        "month_cos",
+        "is_night",
+        "source_regime",
+        "stable_atm",
+        "h2s_lag_1h",
+        "h2s_lag_3h",
+        "h2s_lag_6h",
+        "h2s_rolling_6h",
+        "h2s_rolling_24h",
+        "flow_lag_6h",
+        "flow_rolling_24h"
+      ],
+      "hyperparameters": {
+        "objective": "reg:squarederror",
+        "base_score": null,
+        "booster": null,
+        "colsample_bylevel": null,
+        "colsample_bynode": null,
+        "colsample_bytree": 0.8,
+        "device": null,
+        "eval_metric": null,
+        "gamma": null,
+        "grow_policy": null,
+        "interaction_constraints": null,
+        "learning_rate": 0.05,
+        "max_bin": null,
+        "max_cat_threshold": null,
+        "max_cat_to_onehot": null,
+        "max_delta_step": null,
+        "max_depth": 6,
+        "max_leaves": null,
+        "min_child_weight": 5,
+        "monotone_constraints": null,
+        "multi_strategy": null,
+        "n_jobs": -1,
+        "num_parallel_tree": null,
+        "random_state": 42,
+        "reg_alpha": 0.1,
+        "reg_lambda": 1.0,
+        "sampling_method": null,
+        "scale_pos_weight": null,
+        "subsample": 0.8,
+        "tree_method": null,
+        "validate_parameters": null,
+        "verbosity": null
+      },
+      "holdout_metrics": {
+        "mae": 6.3084,
+        "rmse": 18.597,
+        "r2": 0.5716,
+        "recall_5": 0.8309,
+        "recall_10": 0.8086,
+        "recall_30": 0.7354,
+        "recall_100": 0.5714,
+        "n_positives_5": 887,
+        "n_positives_10": 512,
+        "n_positives_30": 223,
+        "n_positives_100": 77,
+        "n_test": 3559
+      },
+      "forecast_output": "forecast_lean.csv",
+      "forecast_summary": {
+        "n_predictions": 192,
+        "max_predicted_ppb": 16.83839225769043,
+        "mean_predicted_ppb": 2.1132097244262695,
+        "category_counts": {
+          "green": 175,
+          "yellow_high": 9,
+          "yellow_low": 8
+        }
+      }
+    }
+  ]
+}
