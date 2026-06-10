@@ -21,16 +21,28 @@ except ImportError:
 
 from h2s.constants import (  # noqa: F401 — re-exported for downstream imports
     FLOW_COL,
+    H2S_THRESHOLD_EXTREME,
+    H2S_THRESHOLD_HIGH,
     MODEL_FEATURES,
     STATION_PARTITION_MAP,
     STATIONS,
 )
+from h2s.training.calibration_eval import recall_at_threshold
 from h2s.training.feature_builder import ensure_base_features
 
 ENSEMBLE_AUC_MARGIN = 0.01
 ENSEMBLE_R2_MARGIN = 0.02
+ENSEMBLE_RECALL_MARGIN = 0.02  # 2 pp on recall — tight enough that obvious wins dominate
 TRAIN_FRACTION = 0.8
 RANDOM_STATE = 42
+
+# Default ensemble margin per selection metric — used when caller doesn't override.
+_DEFAULT_MARGINS = {
+    "recall_30": ENSEMBLE_RECALL_MARGIN,
+    "recall_100": ENSEMBLE_RECALL_MARGIN,
+    "r2": ENSEMBLE_R2_MARGIN,
+    "auc": ENSEMBLE_AUC_MARGIN,
+}
 
 
 class EnsembleRegressor:
@@ -175,11 +187,28 @@ def get_xgb_classifier(scale_pos=1.0):
 # ---- Evaluation helpers ----
 
 def eval_regressor(model, X_test, y_test):
+    """Evaluate a regressor on test set.
+
+    Returns absolute-fit metrics (MAE/RMSE/R²) **and** alert-aligned recall
+    at the operational thresholds (30 ppb watch, 100 ppb critical). Recall
+    is computed by cutting both the prediction and the truth at the
+    threshold — matches the `calibration_eval.recall_at_threshold`
+    contract used by the calibration-aligned report.
+    """
     y_pred = np.clip(model.predict(X_test), 0, None)
+    y_test_arr = np.asarray(y_test, dtype=float)
+    r30 = recall_at_threshold(y_test_arr, y_pred, H2S_THRESHOLD_HIGH)
+    r100 = recall_at_threshold(y_test_arr, y_pred, H2S_THRESHOLD_EXTREME)
     return {
-        'MAE': float(mean_absolute_error(y_test, y_pred)),
-        'RMSE': float(np.sqrt(mean_squared_error(y_test, y_pred))),
-        'R2': float(r2_score(y_test, y_pred)),
+        'MAE': float(mean_absolute_error(y_test_arr, y_pred)),
+        'RMSE': float(np.sqrt(mean_squared_error(y_test_arr, y_pred))),
+        'R2': float(r2_score(y_test_arr, y_pred)),
+        'recall_30': float(r30['recall']),
+        'precision_30': float(r30['precision']),
+        'n_positives_30': int(r30['n_positives']),
+        'recall_100': float(r100['recall']),
+        'precision_100': float(r100['precision']),
+        'n_positives_100': int(r100['n_positives']),
     }
 
 
@@ -206,20 +235,38 @@ def get_feature_importance(model, top_n=10):
 
 
 def train_and_select(X_train, X_test, y_train, y_test, task: str,
-                     ensemble_margin: float = None):
+                     ensemble_margin: float | None = None,
+                     selection_metric: str | None = None):
     """Train RF + XGBoost for one task, auto-select or ensemble.
 
     Args:
-        task: 'regression', 'clf_5ppb', or 'clf_10ppb'
-        ensemble_margin: Override default AUC/R² margins for ensembling
+        task: 'regression', 'clf_5ppb', or 'clf_10ppb'.
+        ensemble_margin: Override default margin for ensembling. Interpreted
+            in the units of the chosen ``selection_metric``.
+        selection_metric: How to pick between RF and XGB on test set.
+            Regression default: ``'recall_30'`` — recall at 30 ppb (operational
+                watch threshold). Aligned with the calibration finding that
+                R² rewards bulk fit on heavy-tailed series but hides large
+                gaps in extreme recall.
+            Classifier default: ``'auc'`` — backward-compat rank metric.
+            Other regression options: ``'recall_100'``, ``'r2'``.
 
     Returns:
-        (best_model, choice_str, metrics_dict)
+        (best_model, choice_str, metrics_dict).
+        ``metrics_dict`` always includes both RF and XGB eval dicts plus
+        ``selection_metric``, ``selection_value_rf``, ``selection_value_xgb``,
+        and ``feature_importance``.
     """
-    auc_margin = ensemble_margin or ENSEMBLE_AUC_MARGIN
-    r2_margin = (ensemble_margin * 2) if ensemble_margin else ENSEMBLE_R2_MARGIN
-
     if task == 'regression':
+        metric = selection_metric or 'recall_30'
+        if metric not in {'recall_30', 'recall_100', 'r2'}:
+            raise ValueError(
+                f"selection_metric={metric!r} unsupported for regression; "
+                "expected 'recall_30', 'recall_100', or 'r2'"
+            )
+        margin = ensemble_margin if ensemble_margin is not None else _DEFAULT_MARGINS[metric]
+        metric_key = {'recall_30': 'recall_30', 'recall_100': 'recall_100', 'r2': 'R2'}[metric]
+
         rf = get_rf_regressor()
         rf.fit(X_train, y_train)
         m_rf = eval_regressor(rf, X_test, y_test)
@@ -229,26 +276,46 @@ def train_and_select(X_train, X_test, y_train, y_test, task: str,
             xgb.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
             m_xgb = eval_regressor(xgb, X_test, y_test)
 
-            r2_rf, r2_xgb = m_rf['R2'], m_xgb['R2']
-            diff = abs(r2_rf - r2_xgb)
-            if diff < r2_margin:
-                total = max(r2_rf + r2_xgb, 0.01)
-                w_rf = max(r2_rf, 0) / total
+            s_rf, s_xgb = m_rf[metric_key], m_xgb[metric_key]
+            diff = abs(s_rf - s_xgb)
+            if diff < margin:
+                # Ensemble within margin — weight by metric value, floor at 0.
+                # For R² this preserves the legacy weighting; for recall it
+                # yields a sensible 0/1-bounded blend.
+                total = max(s_rf + s_xgb, 0.01)
+                w_rf = max(s_rf, 0.0) / total
                 model = EnsembleRegressor(rf, xgb, weight_a=w_rf)
                 choice = 'Ensemble'
-            elif r2_rf > r2_xgb:
+            elif s_rf > s_xgb:
                 model, choice = rf, 'RandomForest'
             else:
                 model, choice = xgb, 'XGBoost'
         else:
             model, choice, m_xgb = rf, 'RandomForest', None
+            s_rf, s_xgb = m_rf[metric_key], None
 
         return model, choice, {
             'RF': m_rf, 'XGB': m_xgb, 'selected': choice,
+            'selection_metric': metric,
+            'selection_value_rf': float(s_rf),
+            'selection_value_xgb': float(s_xgb) if s_xgb is not None else None,
             'feature_importance': get_feature_importance(model),
         }
 
     else:  # classifier
+        # NOTE: classification selection stays on AUC by default. The
+        # clf_5ppb / clf_10ppb thresholds aren't tied to the 30/100 ppb
+        # alert boundaries, so a recall@30 selector here wouldn't be
+        # well-defined. Aligning classifier selection with operational
+        # alert thresholds is a separate piece of work.
+        metric = selection_metric or 'auc'
+        if metric != 'auc':
+            raise ValueError(
+                f"selection_metric={metric!r} unsupported for {task!r}; "
+                "expected 'auc' (only AUC is supported for binary classifiers today)"
+            )
+        margin = ensemble_margin if ensemble_margin is not None else _DEFAULT_MARGINS['auc']
+
         pos_rate = float(y_train.mean())
         scale_pos = (1 - pos_rate) / max(pos_rate, 0.01)
 
@@ -263,7 +330,7 @@ def train_and_select(X_train, X_test, y_train, y_test, task: str,
 
             auc_rf, auc_xgb = m_rf['AUC'], m_xgb['AUC']
             diff = abs(auc_rf - auc_xgb)
-            if diff < auc_margin:
+            if diff < margin:
                 total = auc_rf + auc_xgb
                 w_rf = auc_rf / total
                 model = EnsembleClassifier(rf, xgb, weight_a=w_rf)
@@ -274,8 +341,12 @@ def train_and_select(X_train, X_test, y_train, y_test, task: str,
                 model, choice = xgb, 'XGBoost'
         else:
             model, choice, m_xgb = rf, 'RandomForest', None
+            auc_rf, auc_xgb = m_rf['AUC'], None
 
         return model, choice, {
             'RF': m_rf, 'XGB': m_xgb, 'selected': choice,
+            'selection_metric': metric,
+            'selection_value_rf': float(auc_rf),
+            'selection_value_xgb': float(auc_xgb) if auc_xgb is not None else None,
             'feature_importance': get_feature_importance(model),
         }
