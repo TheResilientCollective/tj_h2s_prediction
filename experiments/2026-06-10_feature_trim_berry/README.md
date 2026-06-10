@@ -89,6 +89,42 @@ Sanity check: the baseline (D) numbers should reproduce PR #26's retrain — Spe
 
 ## Files
 
-- `feature_ablation.py` — entry point; trains all four candidates, scores via `calibration_report`, prints the scoreboard, persists JSON
-- `RESULTS.md` — populated table of numbers + recommendations
-- `output/` (gitignored) — `ablation.json` payload with per-candidate features, fit metrics, calibration report, feature importance, acceptance verdict
+### Scripts
+
+- `feature_ablation.py` — trains all four candidates, scores via `calibration_report`, prints the scoreboard, persists `ablation.json`
+- `forecast_candidates.py` — trains the Evidence and Lean candidates, evaluates each on the same held-out 30 %, then applies each to the latest 15-min forecast input to produce a preview forecast. Writes per-candidate CSV + a self-describing `run_manifest.json`. Intended for dashboards that need to display the forecast alongside model provenance.
+
+### Outputs (`output/`, tracked in git)
+
+The output directory is **committed** so every code change carries a snapshot of what it produces. When the model code shifts, re-run and commit again; the git diff shows what moved.
+
+- `ablation.json` — full per-candidate evaluation payload from `feature_ablation.py` (features list, fit metrics, calibration report, feature importance, acceptance verdict)
+- `forecast_evidence.csv` — Evidence-only (33 feat) preview forecast: `time, predicted_ppb, predicted_category` per 15-min timestep
+- `forecast_lean.csv` — Lean (19 feat) preview forecast, same schema
+- `run_manifest.json` — self-describing snapshot ([schema](#run-manifest-schema)): git SHA + branch + dirty flag, input/output paths and time ranges, training/test split metadata, XGBoost hyperparameters, per-candidate feature lists and holdout metrics, forecast summary (max/mean ppb, category counts)
+
+### Run manifest schema
+
+The manifest is the contract with downstream consumers (e.g. a forecast dashboard). It answers "what produced this snapshot?" without requiring the consumer to read the source. Top-level shape:
+
+```
+{
+  schema_version: "1.0",
+  run: { produced_at, git_sha, git_branch, git_dirty, station },
+  inputs: { training_parquet, forecast_input },
+  split: { method, train_fraction, train_n, test_n, test_time_range },
+  categorical_thresholds_ppb: { yellow_low_min, yellow_high_min, orange_min, critical_min },
+  eval_thresholds_ppb: [5, 10, 30, 100],
+  candidates: [
+    {
+      code, name, n_features, features: [...],
+      hyperparameters: { ...XGBoost params... },
+      holdout_metrics: { mae, rmse, r2, recall_5/10/30/100, n_positives_5/10/30/100, n_test },
+      forecast_output: "forecast_<slug>.csv",
+      forecast_summary: { n_predictions, max_predicted_ppb, mean_predicted_ppb, category_counts }
+    }, ...
+  ]
+}
+```
+
+The `git_dirty` flag tells the consumer whether the producing code was committed when the snapshot was taken (`false` = exactly the state at `git_sha`; `true` = the producer had uncommitted edits and the snapshot may not be reproducible from `git_sha` alone).
