@@ -149,11 +149,11 @@ s3://test/
 │   │   ├── deployment_metadata.json
 │   │   ├── xgboost_base/, xgboost_smote/, random_forest/   # variants
 │   │   └── stations/{station_key}/
-│   │       ├── {clf_5ppb,clf_10ppb,regression}.pkl       # Evidence (33 feat, production)
-│   │       ├── {clf_5ppb,clf_10ppb,regression}_lean.pkl  # Lean (19 feat, parallel)
-│   │       ├── features.json / features_lean.json       # per-variant schemas
-│   │       ├── deployment_metadata.json                  # variants key lists both
-│   │       └── training_report.json                      # metrics for both variants
+│   │       ├── {clf_5ppb,clf_10ppb,regression}_evidence.pkl  # Evidence (33 feat, production)
+│   │       ├── {clf_5ppb,clf_10ppb,regression}_lean.pkl      # Lean (19 feat, parallel)
+│   │       ├── features_evidence.json / features_lean.json   # per-variant schemas
+│   │       ├── deployment_metadata.json                       # variants key lists both
+│   │       └── training_report.json                           # metrics for both variants
 │   ├── hourly/YYYY-MM-DD_HH/                      # hive-partitioned predictions
 │   ├── daily_summary/                             # daily station summaries
 │   ├── validation/YYYY-MM-DD/                     # metrics + viz

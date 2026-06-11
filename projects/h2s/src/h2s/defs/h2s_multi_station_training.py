@@ -1,10 +1,14 @@
 """Multi-Station H2S Model Training Pipeline.
 
 Replaces the single-model monthly training pipeline with per-station,
-per-task auto-selected models (RF vs XGBoost vs Ensemble).
+per-task auto-selected models (RF vs XGBoost vs Ensemble), trained for
+each of the two feature variants (Evidence, Lean) per cycle.
 
-Produces 9 pickle files: 3 stations × 3 tasks (regression, >5ppb, >10ppb).
-Uploaded to S3 at: tijuana/forecast/models/stations/{station_key}/{task}.pkl
+Produces 18 pickle files per cycle: 3 stations × 3 tasks × 2 variants
+(regression, >5ppb, >10ppb × evidence, lean). Each file carries an
+explicit variant suffix so a future variant slots in without renames.
+Uploaded to S3 at:
+  tijuana/forecast/models/stations/{station_key}/{task}_{variant}.pkl
 """
 
 import io
@@ -30,17 +34,18 @@ from h2s.training.multi_station_trainer import (
     train_and_select,
 )
 
-# Per-station training trains two parallel variants per cycle:
-#   - "evidence" (33 features, production default)
-#   - "lean"     (19 features, deployed alongside as a "not overdetermined"
-#                 demonstration — reviewers can load either model from S3)
-# Lean model pickles carry a `_lean` suffix in the deployment dict and on
-# the S3 path; metrics and features.json are keyed by variant in the report.
+# Per-station training trains parallel variants per cycle, each tagged with
+# an explicit suffix on every artifact name so a future third variant slots
+# in by adding one entry here (no renames):
+#   - "evidence" (33 features, current production default — suffix `_evidence`)
+#   - "lean"     (19 features, parallel "not overdetermined" demonstration — suffix `_lean`)
+# Files in the deployment dict, S3 keys, and `features_<variant>.json` schemas
+# all carry the variant suffix. Consumers (daily pipeline, predictor) pick
+# the variant explicitly by suffix — there is no unsuffixed default.
 _VARIANTS: dict[str, list[str]] = {
     "evidence": MODEL_FEATURES,
     "lean": MODEL_FEATURES_LEAN,
 }
-_LEAN_SUFFIX = "_lean"
 
 STATION_PARTITIONS = dg.StaticPartitionsDefinition(
     partition_keys=list(STATION_PARTITION_MAP.keys())  # san_ysidro, nestor_bes, ib_civic_ctr
@@ -175,15 +180,16 @@ def per_station_trained_models(
     context: dg.AssetExecutionContext,
     multi_station_training_data: pd.DataFrame,
 ) -> dict:
-    """Train Evidence and Lean variant models for the current station partition.
+    """Train every variant in _VARIANTS for the current station partition.
 
-    Returns a flat dict with both variants:
-      regression, clf_5ppb, clf_10ppb               ← Evidence (33 feat, production)
-      regression_lean, clf_5ppb_lean, clf_10ppb_lean ← Lean    (19 feat, parallel)
+    Returns a flat dict, one entry per (task, variant). Both variants today:
+      regression_evidence, clf_5ppb_evidence, clf_10ppb_evidence ← 33 feat, production
+      regression_lean,     clf_5ppb_lean,     clf_10ppb_lean     ← 19 feat, parallel
 
-    Lean is deployed alongside Evidence so reviewers can load either model
-    from S3 and reproduce the comparison; see RESULTS.md for the
-    not-overdetermined argument.
+    Both variants are deployed in parallel so reviewers can load either
+    model from S3 and reproduce the comparison; see RESULTS.md for the
+    not-overdetermined argument. Adding a future variant is one entry in
+    `_VARIANTS` — no renames; all consumers select variant by suffix.
     """
     partition = context.partition_key  # e.g. 'san_ysidro'
     site_name = STATION_PARTITION_MAP[partition]
@@ -207,7 +213,7 @@ def per_station_trained_models(
     models: dict = {}
     choices: dict[str, dict[str, str]] = {}
     for variant, features in _VARIANTS.items():
-        suffix = "" if variant == "evidence" else _LEAN_SUFFIX
+        suffix = f"_{variant}"
         variant_results = _train_one_variant(
             context, sdf, features, split, ensemble_margin, variant
         )
@@ -293,7 +299,7 @@ def station_training_report(
 
     tasks_metrics: dict[str, dict] = {}
     for variant, features in _VARIANTS.items():
-        suffix = "" if variant == "evidence" else _LEAN_SUFFIX
+        suffix = f"_{variant}"
         Xte = sdf[features].values[split:]
         variant_metrics: dict[str, dict] = {}
         for task_base, yte in [('regression', yte_c), ('clf_5ppb', yte_5), ('clf_10ppb', yte_10)]:
@@ -425,7 +431,7 @@ def station_model_deployment(
     # the variant's column order).
     feature_files: dict[str, str] = {}
     for variant, features in _VARIANTS.items():
-        suffix = "" if variant == "evidence" else _LEAN_SUFFIX
+        suffix = f"_{variant}"
         feat_path = f"{base_path}/features{suffix}.json"
         s3.putFile(
             json.dumps(features, indent=2).encode('utf-8'),
@@ -440,7 +446,7 @@ def station_model_deployment(
     # downstream consumers can pick either path without guessing filenames.
     variants_meta: dict[str, dict] = {}
     for variant, features in _VARIANTS.items():
-        suffix = "" if variant == "evidence" else _LEAN_SUFFIX
+        suffix = f"_{variant}"
         variants_meta[variant] = {
             'features_path': feature_files[variant],
             'n_features': len(features),
