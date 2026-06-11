@@ -32,27 +32,35 @@ from h2s.training.multi_station_trainer import (
 
 
 class TestEvalRegressorAlertMetrics:
-    def test_dict_contains_alert_recall_keys(self):
-        # Perfect predictor → recall@30 = 1.0 if positives exist
-        X = pd.DataFrame({"a": [1.0, 2.0, 3.0, 4.0]})
-        y = pd.Series([1.0, 50.0, 150.0, 2.0])
+    def test_dict_contains_all_four_threshold_keys(self):
+        """eval_regressor reports at 5/10/30/100 — categorical boundaries.
+
+        5 and 10 added per request: complaint rate rises in the 5-10 ppb band
+        (yellow_low), and 8 ppb specifically is a known complaint-trigger
+        level. Recall@5 and recall@10 give visibility there.
+        """
+        X = pd.DataFrame({"a": [1.0, 2.0, 3.0, 4.0, 5.0]})
+        # y = [1, 8, 15, 50, 150] — has a positive at every cut: >5 (4), >10 (3), >30 (2), >100 (1)
+        y = pd.Series([1.0, 8.0, 15.0, 50.0, 150.0])
 
         class _IdentityRegressor:
             def predict(self, X):  # noqa: ARG002
-                return np.array([1.0, 50.0, 150.0, 2.0])
+                return np.array([1.0, 8.0, 15.0, 50.0, 150.0])
 
         out = eval_regressor(_IdentityRegressor(), X, y)
         # Legacy keys still present
         assert {"MAE", "RMSE", "R2"} <= set(out.keys())
-        # New alert-aligned keys
-        assert {
-            "recall_30", "precision_30", "n_positives_30",
-            "recall_100", "precision_100", "n_positives_100",
-        } <= set(out.keys())
-        assert out["recall_30"] == pytest.approx(1.0)
-        assert out["recall_100"] == pytest.approx(1.0)
-        assert out["n_positives_30"] == 2  # 50 and 150
-        assert out["n_positives_100"] == 1  # only 150
+        # All four threshold metric trios present
+        for thr in (5, 10, 30, 100):
+            assert f"recall_{thr}" in out
+            assert f"precision_{thr}" in out
+            assert f"n_positives_{thr}" in out
+            assert out[f"recall_{thr}"] == pytest.approx(1.0)
+        # Positive counts match the y distribution
+        assert out["n_positives_5"] == 4    # 8, 15, 50, 150
+        assert out["n_positives_10"] == 3   # 15, 50, 150
+        assert out["n_positives_30"] == 2   # 50, 150
+        assert out["n_positives_100"] == 1  # 150
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +169,38 @@ class TestRegressionSelector:
         assert metrics["RF"]["recall_100"] == pytest.approx(1.0)
         assert metrics["XGB"]["recall_100"] == pytest.approx(0.5)
         assert choice == "RandomForest"
+
+    def test_recall_5_selector(self, monkeypatch):
+        """recall_5 added per complaint-rate analysis (5-10 ppb band)."""
+        # 5 positives at the 5 ppb cut (anything > 5). RF catches 4; XGB catches 2.
+        X_train = pd.DataFrame({"a": np.linspace(0, 1, 20)})
+        X_test = pd.DataFrame({"a": np.linspace(0, 1, 10)})
+        y_train = pd.Series(np.concatenate([np.full(15, 1.0), np.full(5, 8.0)]))
+        y_test = pd.Series([1.0]*5 + [8.0]*5)  # 5 positives@5
+
+        rf_preds = np.array([0]*5 + [6, 6, 6, 6, 1], dtype=float)   # 4 of 5 caught
+        xgb_preds = np.array([0]*5 + [6, 6, 1, 1, 1], dtype=float)  # 2 of 5 caught
+        _patch_trainer(monkeypatch, rf_preds, xgb_preds)
+
+        _, choice, metrics = train_and_select(
+            X_train, X_test, y_train, y_test, task="regression",
+            selection_metric="recall_5",
+        )
+        assert metrics["selection_metric"] == "recall_5"
+        assert metrics["RF"]["recall_5"] == pytest.approx(0.8)
+        assert metrics["XGB"]["recall_5"] == pytest.approx(0.4)
+        assert choice == "RandomForest"
+
+    def test_recall_10_selector_accepted(self, monkeypatch):
+        """recall_10 is a valid selection_metric (yellow_low/yellow_high boundary)."""
+        identical = np.array([0.0]*7 + [15.0]*3)
+        _patch_trainer(monkeypatch, identical.copy(), identical.copy())
+        X_train, X_test, y_train, y_test = _build_dataset()
+        _, _, metrics = train_and_select(
+            X_train, X_test, y_train, y_test, task="regression",
+            selection_metric="recall_10",
+        )
+        assert metrics["selection_metric"] == "recall_10"
 
     def test_ensemble_when_recall_within_margin(self, monkeypatch):
         # Both models catch the same positives → recall_30 ties → ensemble.

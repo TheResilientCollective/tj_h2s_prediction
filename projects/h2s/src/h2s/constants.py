@@ -273,6 +273,68 @@ MODEL_FEATURES = CORE_FEATURES + SBIWTP_FEATURES
 BASE_FEATURES = MODEL_FEATURES
 
 # ==============================================================================
+# Candidate feature sets — feature-trim ablation (experiment 2026-06-10)
+# ==============================================================================
+# These are NOT used in production. They are defined here so the audit reasoning
+# lives in version control. The ablation script in
+# experiments/2026-06-10_feature_trim_berry/feature_ablation.py loads each and
+# trains a Berry XGBoost regressor on it. If a winner emerges, the deployed
+# default is changed in a follow-up PR.
+#
+# Provenance for each drop is in
+# experiments/2026-06-10_feature_trim_berry/RESULTS.md (and ultimately in
+# tj_calibration/tijuana-dispersion-experiments/docs/calibration_status.md).
+
+# Evidence-only (33 features) — drops what calibration explicitly invalidated
+# or what's measurably tree-redundant. Closest to a safe production trim.
+# Drops vs MODEL_FEATURES: 6 SBIWTP + 3 flow derivatives + 2 wind 4h rolling = 11
+MODEL_FEATURES_EVIDENCE = [
+    f for f in MODEL_FEATURES if f not in {
+        # SBIWTP — recall@100=0.00 across calibration's 140-config event-trigger sweep
+        'sbiwtp_flow_mgd', 'sbiwtp_anomaly', 'sbiwtp_deficit',
+        'sbiwtp_flow_x_temp', 'sbiwtp_hourly_mgd', 'sbiwtp_sli',
+        # Flow derivatives — calibration: "all flow/SBIWTP terms < 0.11 Spearman"
+        'flow_log', 'flow_low', 'flow_high',
+        # Wind 4h rolling — tree-redundant with raw wind + 2h/3h aggregates
+        'wind_speed_10m_avg_4h', 'wind_gusts_10m_max_4h',
+    }
+]
+
+# Lean (19 features) — Evidence-only minus derived interactions, redundant wind
+# rolling, lower-importance weather, and hour_sin/cos (is_night carries hour-of-day).
+MODEL_FEATURES_LEAN = [
+    f for f in MODEL_FEATURES_EVIDENCE if f not in {
+        # Interactions — tree learns these implicitly
+        'wind_temp_interaction', 'humidity_temp_interaction', 'wind_x_stable_atm',
+        # Remaining wind rolling — tree-redundant with raw wind
+        'wind_speed_10m_avg_2h', 'wind_speed_10m_avg_3h',
+        'wind_gusts_10m_max_2h', 'wind_gusts_10m_max_3h',
+        # Lower-importance weather (training reports show < 0.04 importance)
+        'dewpoint_2m', 'surface_pressure', 'cloud_cover', 'precipitation',
+        'wind_gusts_10m',
+        # hour_sin/cos — redundant with is_night for the regime-split use case
+        'hour_sin', 'hour_cos',
+    }
+]
+
+# Minimal (11 features) — calibration's load-bearing core only. Encodes
+# hour-of-day exactly once (via is_night). The aggressive lower-bound test:
+# can the model survive on just what calibration empirically validated?
+MODEL_FEATURES_MINIMAL = [
+    'temperature_2m',          # finding #1 — top exogenous Spearman ≈ 0.33
+    'stable_atm',              # finding #2 — 88% recall on >100 ppb hours
+    'is_night',                # regime backbone; absorbs hour-of-day signal
+    'source_regime',           # is_night × wind direction quadrant
+    'wind_speed_10m',          # raw wind for stable_atm + ranking
+    'wind_direction_sin',      # cyclic wind direction
+    'wind_direction_cos',
+    'h2s_lag_1h',              # finding #4 — autoregressive ceiling ≈ 0.70 Spearman
+    'h2s_lag_3h',
+    'h2s_rolling_6h',          # consistently top-3 XGB importance in training reports
+    'h2s_rolling_24h',
+]
+
+# ==============================================================================
 # Dispersion Modeling S3 Paths
 # ==============================================================================
 
