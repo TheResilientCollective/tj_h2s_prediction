@@ -18,7 +18,6 @@ from h2s.defs.h2s_pipeline import (
 
 from h2s.defs.h2s_validation_pipeline import (
     daily_station_validation_report,
-    mh_validation_report,
 )
 
 from h2s.defs.accuracy_reporting_pipeline import (
@@ -50,7 +49,6 @@ __all__ = [
     "predictions_export",
     # Validation
     "daily_station_validation_report",
-    "mh_validation_report",
     # Accuracy reporting
     "daily_accuracy_scorecard",
     "rolling_accuracy_scorecards",
