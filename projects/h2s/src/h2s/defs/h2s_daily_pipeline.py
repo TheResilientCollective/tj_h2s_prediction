@@ -203,14 +203,22 @@ def _engineer_forecast_features(fc_site: pd.DataFrame, last_state: dict) -> pd.D
     description="Load all 9 per-station models (3 stations × 3 tasks) from S3",
 )
 def multi_station_model_artifacts(context: dg.AssetExecutionContext) -> dict:
-    """Load regression + >5ppb + >10ppb models for all stations from S3.
+    """Load Evidence-variant regression + >5ppb + >10ppb models per station from S3.
 
-    Returns nested dict: {station_name: {task: model}}
+    Returns nested dict: {station_name: {task: model}} where `task` is the
+    bare task name (regression / clf_5ppb / clf_10ppb). The daily pipeline
+    routes through the Evidence variant; Lean is deployed alongside but is
+    available for explicit opt-in (see `_VARIANT` below).
+
     Falls back gracefully if models for a station are not yet deployed.
     """
     s3 = context.resources.s3
     artifacts = {}
     tasks = ['regression', 'clf_5ppb', 'clf_10ppb']
+    # The variant the daily pipeline routes through. Changing this to
+    # 'lean' (or a future variant) is the only edit needed to switch
+    # production routing — no path-string sprawl.
+    _VARIANT = 'evidence'
 
     for site_name, info in STATIONS.items():
         station_key = info['key']
@@ -218,23 +226,23 @@ def multi_station_model_artifacts(context: dg.AssetExecutionContext) -> dict:
         station_models = {}
 
         for task in tasks:
-            s3_path = f"{base_path}/{task}.pkl"
+            s3_path = f"{base_path}/{task}_{_VARIANT}.pkl"
             try:
                 model_bytes = s3.getFile(path=s3_path, bucket=s3.S3_BUCKET)
                 model = pickle.loads(model_bytes)
                 station_models[task] = model
-                context.log.info(f"  ✓ {site_name} / {task}")
+                context.log.info(f"  ✓ {site_name} / {task}_{_VARIANT}")
             except Exception as e:
-                context.log.warning(f"  ✗ {site_name} / {task}: {e}")
+                context.log.warning(f"  ✗ {site_name} / {task}_{_VARIANT}: {e}")
 
         # Load stored feature list (ensures inference matches training shape)
-        feat_path = f"{base_path}/features.json"
+        feat_path = f"{base_path}/features_{_VARIANT}.json"
         try:
             feat_bytes = s3.getFile(path=feat_path, bucket=s3.S3_BUCKET)
             station_models['_feature_cols'] = json.loads(feat_bytes.decode('utf-8'))
-            context.log.info(f"  ✓ {site_name} / features.json ({len(station_models['_feature_cols'])} features)")
+            context.log.info(f"  ✓ {site_name} / features_{_VARIANT}.json ({len(station_models['_feature_cols'])} features)")
         except Exception:
-            context.log.info(f"  ⚠ {site_name} / features.json not found, will use MODEL_FEATURES default")
+            context.log.info(f"  ⚠ {site_name} / features_{_VARIANT}.json not found, will use MODEL_FEATURES default")
 
         if station_models:
             artifacts[site_name] = station_models

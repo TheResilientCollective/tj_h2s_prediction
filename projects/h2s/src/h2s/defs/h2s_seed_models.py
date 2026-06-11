@@ -10,9 +10,12 @@ Phase 1 — Hourly pipeline (NESTOR - BES 3-class classifier):
     nestor_preprocessing_info.json       <- feature metadata
     deployment_metadata.json
 
-Phase 2 — Daily per-station models (regression + >5ppb + >10ppb per station):
+Phase 2 — Daily per-station models (regression + >5ppb + >10ppb per station).
+  Seeds the Evidence variant (33 feat); subsequent multi_station_training_job
+  runs add the Lean variant alongside.
   tijuana/forecast/models/stations/
-    {STATION}/regression.pkl, clf_5ppb.pkl, clf_10ppb.pkl
+    {STATION}/{regression,clf_5ppb,clf_10ppb}_evidence.pkl
+    {STATION}/features_evidence.json
 """
 
 import json
@@ -163,23 +166,25 @@ def _train_and_seed_phase2(s3, bucket, context, raw_df, uploaded, dry_run):
 
         context.log.info(f"Training {site_name}: {len(sdf)} rows (train:{split}, test:{len(sdf)-split})")
 
+        # Seed only the Evidence variant — daily pipeline reads `_evidence`
+        # paths. The subsequent multi_station_training_job adds Lean.
         for task, y_col in [('regression', 'H2S'), ('clf_5ppb', 'exceed_5'), ('clf_10ppb', 'exceed_10')]:
             y = sdf[y_col].values
             model, choice, _ = train_and_select(X[:split], X[split:], y[:split], y[split:], task)
-            s3_path = f"{base_path}/{task}.pkl"
+            s3_path = f"{base_path}/{task}_evidence.pkl"
             if dry_run:
-                context.log.info(f"[DRY RUN] {site_name}/{task} ({choice}) -> s3://{bucket}/{s3_path}")
+                context.log.info(f"[DRY RUN] {site_name}/{task}_evidence ({choice}) -> s3://{bucket}/{s3_path}")
             else:
                 s3.putFile(pickle.dumps(model), s3_path, bucket=bucket)
-                context.log.info(f"  {task} ({choice}) -> s3://{bucket}/{s3_path}")
-            station_uploaded[task] = s3_path
+                context.log.info(f"  {task}_evidence ({choice}) -> s3://{bucket}/{s3_path}")
+            station_uploaded[f"{task}_evidence"] = s3_path
             uploaded.append(s3_path)
 
         # Store feature list (ensures inference matches training shape)
-        feat_path = f"{base_path}/features.json"
+        feat_path = f"{base_path}/features_evidence.json"
         if not dry_run:
             s3.putFile(json.dumps(MODEL_FEATURES, indent=2).encode("utf-8"), feat_path, bucket=bucket, content_type="application/json")
-            context.log.info(f"  features.json ({len(MODEL_FEATURES)} features) -> s3://{bucket}/{feat_path}")
+            context.log.info(f"  features_evidence.json ({len(MODEL_FEATURES)} features) -> s3://{bucket}/{feat_path}")
         uploaded.append(feat_path)
 
         station_meta = {
@@ -356,12 +361,13 @@ def seed_models(context: dg.AssetExecutionContext) -> dict:
 
             for task, file_prefix in TASK_FILE_MAP.items():
                 local_file = station_models_dir / f"{file_prefix}_{station_key}.pkl"
-                s3_path = f"{base_path}/{task}.pkl"
+                # Seed only the Evidence variant — see Phase 2 docstring.
+                s3_path = f"{base_path}/{task}_evidence.pkl"
                 if _upload(local_file, s3_path):
-                    station_uploaded[task] = s3_path
+                    station_uploaded[f"{task}_evidence"] = s3_path
 
             # Store feature list (matches validated local models)
-            feat_path = f"{base_path}/features.json"
+            feat_path = f"{base_path}/features_evidence.json"
             if not dry_run:
                 s3.putFile(json.dumps(MODEL_FEATURES, indent=2).encode("utf-8"), feat_path, bucket=bucket, content_type="application/json")
             uploaded.append(feat_path)

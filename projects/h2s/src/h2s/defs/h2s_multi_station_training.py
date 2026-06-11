@@ -1,10 +1,14 @@
 """Multi-Station H2S Model Training Pipeline.
 
 Replaces the single-model monthly training pipeline with per-station,
-per-task auto-selected models (RF vs XGBoost vs Ensemble).
+per-task auto-selected models (RF vs XGBoost vs Ensemble), trained for
+each of the two feature variants (Evidence, Lean) per cycle.
 
-Produces 9 pickle files: 3 stations × 3 tasks (regression, >5ppb, >10ppb).
-Uploaded to S3 at: tijuana/forecast/models/stations/{station_key}/{task}.pkl
+Produces 18 pickle files per cycle: 3 stations × 3 tasks × 2 variants
+(regression, >5ppb, >10ppb × evidence, lean). Each file carries an
+explicit variant suffix so a future variant slots in without renames.
+Uploaded to S3 at:
+  tijuana/forecast/models/stations/{station_key}/{task}_{variant}.pkl
 """
 
 import io
@@ -18,6 +22,7 @@ import pandas as pd
 
 from h2s.constants import (
     MODEL_FEATURES,
+    MODEL_FEATURES_LEAN,
     STATION_MODELS_S3_BASE,
     STATION_PARTITION_MAP,
     STATIONS,
@@ -28,6 +33,19 @@ from h2s.training.multi_station_trainer import (
     prepare_multi_station_features,
     train_and_select,
 )
+
+# Per-station training trains parallel variants per cycle, each tagged with
+# an explicit suffix on every artifact name so a future third variant slots
+# in by adding one entry here (no renames):
+#   - "evidence" (33 features, current production default — suffix `_evidence`)
+#   - "lean"     (19 features, parallel "not overdetermined" demonstration — suffix `_lean`)
+# Files in the deployment dict, S3 keys, and `features_<variant>.json` schemas
+# all carry the variant suffix. Consumers (daily pipeline, predictor) pick
+# the variant explicitly by suffix — there is no unsuffixed default.
+_VARIANTS: dict[str, list[str]] = {
+    "evidence": MODEL_FEATURES,
+    "lean": MODEL_FEATURES_LEAN,
+}
 
 STATION_PARTITIONS = dg.StaticPartitionsDefinition(
     partition_keys=list(STATION_PARTITION_MAP.keys())  # san_ysidro, nestor_bes, ib_civic_ctr
@@ -104,12 +122,51 @@ def multi_station_training_data(context: dg.AssetExecutionContext) -> pd.DataFra
 # Asset 2: Train per-station models (partitioned by station)
 # ==============================================================================
 
+def _train_one_variant(
+    context: dg.AssetExecutionContext,
+    sdf: pd.DataFrame,
+    features: list[str],
+    split: int,
+    ensemble_margin: float,
+    variant_label: str,
+) -> dict[str, tuple]:
+    """Train regression + clf_5ppb + clf_10ppb for one feature set.
+
+    Returns dict[task → (model, choice_str)] for the current station.
+    The full metrics dict is recomputed downstream by station_training_report
+    using the per-variant feature slice (so importance keys are correct).
+    """
+    X = sdf[features].values
+    y_cont = sdf['H2S'].values
+    y_5 = sdf['exceed_5'].values
+    y_10 = sdf['exceed_10'].values
+
+    Xtr, Xte = X[:split], X[split:]
+    ytr_c, yte_c = y_cont[:split], y_cont[split:]
+    ytr_5, yte_5 = y_5[:split], y_5[split:]
+    ytr_10, yte_10 = y_10[:split], y_10[split:]
+
+    result: dict[str, tuple] = {}
+    for task, ytr_, yte_ in [
+        ('regression', ytr_c, yte_c),
+        ('clf_5ppb',   ytr_5, yte_5),
+        ('clf_10ppb',  ytr_10, yte_10),
+    ]:
+        context.log.info(f"  [{variant_label}] Training {task}...")
+        model, choice, _ = train_and_select(
+            Xtr, Xte, ytr_, yte_, task, ensemble_margin=ensemble_margin
+        )
+        context.log.info(f"    [{variant_label}] {task} → {choice}")
+        result[task] = (model, choice)
+    return result
+
+
 @dg.asset(
     key_prefix="h2s",
     group_name="h2s_multi_station_training",
     partitions_def=STATION_PARTITIONS,
     kinds={"python", "ml"},
-    description="Auto-trained models for one station: regression + >5ppb + >10ppb classifiers",
+    description="Auto-trained Evidence (33 feat) + Lean (19 feat) models per station",
     ins={"multi_station_training_data": dg.AssetIn(key=_KEY("multi_station_training_data"))},
     config_schema={
         "ensemble_margin": dg.Field(
@@ -123,9 +180,16 @@ def per_station_trained_models(
     context: dg.AssetExecutionContext,
     multi_station_training_data: pd.DataFrame,
 ) -> dict:
-    """Train regression + classifier models for the current station partition.
+    """Train every variant in _VARIANTS for the current station partition.
 
-    Returns dict of {task_name: model_object} for the current station.
+    Returns a flat dict, one entry per (task, variant). Both variants today:
+      regression_evidence, clf_5ppb_evidence, clf_10ppb_evidence ← 33 feat, production
+      regression_lean,     clf_5ppb_lean,     clf_10ppb_lean     ← 19 feat, parallel
+
+    Both variants are deployed in parallel so reviewers can load either
+    model from S3 and reproduce the comparison; see RESULTS.md for the
+    not-overdetermined argument. Adding a future variant is one entry in
+    `_VARIANTS` — no renames; all consumers select variant by suffix.
     """
     partition = context.partition_key  # e.g. 'san_ysidro'
     site_name = STATION_PARTITION_MAP[partition]
@@ -140,36 +204,22 @@ def per_station_trained_models(
     if len(sdf) < 100:
         raise ValueError(f"Insufficient data for {site_name}: {len(sdf)} rows")
 
-    X = sdf[MODEL_FEATURES].values
-    y_cont = sdf['H2S'].values
+    split = int(len(sdf) * TRAIN_FRACTION)
     y_5 = sdf['exceed_5'].values
     y_10 = sdf['exceed_10'].values
-
-    split = int(len(sdf) * TRAIN_FRACTION)
-    Xtr, Xte = X[:split], X[split:]
-    ytr_c, yte_c = y_cont[:split], y_cont[split:]
-    ytr_5, yte_5 = y_5[:split], y_5[split:]
-    ytr_10, yte_10 = y_10[:split], y_10[split:]
-
     context.log.info(f"  Records: {len(sdf):,} (train: {split:,}, test: {len(sdf)-split:,})")
     context.log.info(f"  Exceedance: >5={y_5.mean()*100:.1f}%, >10={y_10.mean()*100:.1f}%")
 
-    models = {}
-    task_defs = [
-        ('regression', Xtr, Xte, ytr_c, yte_c),
-        ('clf_5ppb',   Xtr, Xte, ytr_5, yte_5),
-        ('clf_10ppb',  Xtr, Xte, ytr_10, yte_10),
-    ]
-    report_tasks = {}
-
-    for task, Xtr_, Xte_, ytr_, yte_ in task_defs:
-        context.log.info(f"  Training {task}...")
-        model, choice, metrics = train_and_select(
-            Xtr_, Xte_, ytr_, yte_, task, ensemble_margin=ensemble_margin
+    models: dict = {}
+    choices: dict[str, dict[str, str]] = {}
+    for variant, features in _VARIANTS.items():
+        suffix = f"_{variant}"
+        variant_results = _train_one_variant(
+            context, sdf, features, split, ensemble_margin, variant
         )
-        models[task] = model
-        report_tasks[task] = {k: v for k, v in metrics.items() if k != 'feature_importance'}
-        context.log.info(f"    Selected: {choice}")
+        choices[variant] = {task: choice for task, (_, choice) in variant_results.items()}
+        for task, (model, _) in variant_results.items():
+            models[f"{task}{suffix}"] = model
 
     context.add_output_metadata({
         "station": site_name,
@@ -177,7 +227,8 @@ def per_station_trained_models(
         "n_train": int(split),
         "n_test": int(len(sdf) - split),
         "tasks": list(models.keys()),
-        "algorithm_choices": {t: report_tasks[t].get('selected', '?') for t in report_tasks},
+        "variants": list(_VARIANTS.keys()),
+        "algorithm_choices": choices,
     })
     return models
 
@@ -186,13 +237,28 @@ def per_station_trained_models(
 # Asset 3: Station training report (partitioned by station)
 # ==============================================================================
 
+def _importance_for_features(model, feature_names: list[str], top_n: int = 10) -> dict:
+    """Feature importance keyed by the variant's actual feature list.
+
+    `multi_station_trainer.get_feature_importance` hardcodes MODEL_FEATURES,
+    which would mis-label Lean models' importances. We re-do it here against
+    the variant's own column order.
+    """
+    imp = getattr(model, "feature_importances_", None)
+    if imp is None:
+        return {}
+    imp = np.asarray(imp)
+    idx = np.argsort(imp)[::-1][:top_n]
+    return {feature_names[i]: round(float(imp[i]), 4) for i in idx if i < len(feature_names)}
+
+
 @dg.asset(
     key_prefix="h2s",
     group_name="h2s_multi_station_training",
     partitions_def=STATION_PARTITIONS,
     required_resource_keys={"s3"},
     kinds={"json", "s3"},
-    description="JSON training metrics report for one station, uploaded to S3",
+    description="JSON training metrics report for both Evidence + Lean variants per station",
     ins={
         "multi_station_training_data": dg.AssetIn(key=_KEY("multi_station_training_data")),
         "per_station_trained_models": dg.AssetIn(key=_KEY("per_station_trained_models")),
@@ -206,8 +272,16 @@ def station_training_report(
     multi_station_training_data: pd.DataFrame,
     per_station_trained_models: dict,
 ) -> dict:
-    """Generate and upload training metrics report for the current station."""
-    from h2s.training.multi_station_trainer import eval_regressor, eval_classifier, get_feature_importance
+    """Generate and upload training metrics report for both variants.
+
+    Report shape:
+      tasks: {
+        evidence: { regression: {...}, clf_5ppb: {...}, clf_10ppb: {...} },
+        lean:     { regression: {...}, clf_5ppb: {...}, clf_10ppb: {...} },
+      }
+      features: { evidence: [...33 cols...], lean: [...19 cols...] }
+    """
+    from h2s.training.multi_station_trainer import eval_regressor, eval_classifier
 
     partition = context.partition_key
     site_name = STATION_PARTITION_MAP[partition]
@@ -219,23 +293,26 @@ def station_training_report(
     ].sort_values('time').reset_index(drop=True)
 
     split = int(len(sdf) * TRAIN_FRACTION)
-    X = sdf[MODEL_FEATURES].values
-    Xte = X[split:]
     yte_c = sdf['H2S'].values[split:]
     yte_5 = sdf['exceed_5'].values[split:]
     yte_10 = sdf['exceed_10'].values[split:]
 
-    tasks_metrics = {}
-    for task, yte in [('regression', yte_c), ('clf_5ppb', yte_5), ('clf_10ppb', yte_10)]:
-        model = per_station_trained_models[task]
-        if task == 'regression':
-            m = eval_regressor(model, Xte, yte)
-        else:
-            m = eval_classifier(model, Xte, yte)
-        tasks_metrics[task] = {
-            **m,
-            'feature_importance': get_feature_importance(model),
-        }
+    tasks_metrics: dict[str, dict] = {}
+    for variant, features in _VARIANTS.items():
+        suffix = f"_{variant}"
+        Xte = sdf[features].values[split:]
+        variant_metrics: dict[str, dict] = {}
+        for task_base, yte in [('regression', yte_c), ('clf_5ppb', yte_5), ('clf_10ppb', yte_10)]:
+            model = per_station_trained_models[f"{task_base}{suffix}"]
+            if task_base == 'regression':
+                m = eval_regressor(model, Xte, yte)
+            else:
+                m = eval_classifier(model, Xte, yte)
+            variant_metrics[task_base] = {
+                **m,
+                'feature_importance': _importance_for_features(model, features),
+            }
+        tasks_metrics[variant] = variant_metrics
 
     report = {
         'generated_at': datetime.now(timezone.utc).isoformat(),
@@ -244,7 +321,7 @@ def station_training_report(
         'n_records': len(sdf),
         'n_train': split,
         'n_test': len(sdf) - split,
-        'features': MODEL_FEATURES,
+        'features': {variant: features for variant, features in _VARIANTS.items()},
         'ensemble_margin': ensemble_margin,
         'tasks': tasks_metrics,
         'training_snapshot': {
@@ -268,9 +345,12 @@ def station_training_report(
 
     context.add_output_metadata({
         "station": site_name,
-        "regression_r2": tasks_metrics['regression'].get('R2'),
-        "clf5_auc": tasks_metrics['clf_5ppb'].get('AUC'),
-        "clf10_auc": tasks_metrics['clf_10ppb'].get('AUC'),
+        "evidence_regression_r2": tasks_metrics['evidence']['regression'].get('R2'),
+        "evidence_clf5_auc": tasks_metrics['evidence']['clf_5ppb'].get('AUC'),
+        "evidence_clf10_auc": tasks_metrics['evidence']['clf_10ppb'].get('AUC'),
+        "lean_regression_r2": tasks_metrics['lean']['regression'].get('R2'),
+        "lean_clf5_auc": tasks_metrics['lean']['clf_5ppb'].get('AUC'),
+        "lean_clf10_auc": tasks_metrics['lean']['clf_10ppb'].get('AUC'),
     })
     return report
 
@@ -312,6 +392,12 @@ def station_model_deployment(
     `{"status": "dry_run", ...}`).
 
     Models are written to: tijuana/forecast/models/stations/{station_key}/{task}.pkl
+
+    Both Evidence (33-feat, the production default — no suffix) and Lean
+    (19-feat, suffix `_lean`) variants are uploaded each cycle. Schema files
+    `features.json` and `features_lean.json` describe each variant's column
+    order so a consumer can load `regression{_lean}.pkl` + `features{_lean}.json`
+    and produce inferences end-to-end.
     """
     partition = context.partition_key
     site_name = STATION_PARTITION_MAP[partition]
@@ -329,31 +415,49 @@ def station_model_deployment(
         return {"status": "dry_run", "station": site_name}
 
     context.log.info(f"Deploying models for {site_name} to S3: {base_path}")
-    uploaded = {}
+
+    # Upload each variant's pickles (Evidence's filenames are unsuffixed,
+    # Lean's carry `_lean`). The dict already contains both sets keyed
+    # appropriately by per_station_trained_models.
+    uploaded: dict[str, str] = {}
     for task, model in per_station_trained_models.items():
         s3_path = f"{base_path}/{task}.pkl"
-        model_bytes = pickle.dumps(model)
-        s3.putFile(model_bytes, s3_path, bucket=s3.S3_BUCKET, content_type='application/octet-stream')
+        s3.putFile(pickle.dumps(model), s3_path, bucket=s3.S3_BUCKET,
+                   content_type='application/octet-stream')
         context.log.info(f"  ✓ Uploaded {task} → {s3_path}")
         uploaded[task] = s3_path
 
-    # Write feature list (used by inference to match training shape)
-    feat_path = f"{base_path}/features.json"
-    s3.putFile(
-        json.dumps(MODEL_FEATURES, indent=2).encode('utf-8'),
-        feat_path,
-        bucket=s3.S3_BUCKET,
-        content_type='application/json',
-    )
-    context.log.info(f"  ✓ Uploaded features.json ({len(MODEL_FEATURES)} features)")
+    # Write per-variant feature schema files (used by inference to match
+    # the variant's column order).
+    feature_files: dict[str, str] = {}
+    for variant, features in _VARIANTS.items():
+        suffix = f"_{variant}"
+        feat_path = f"{base_path}/features{suffix}.json"
+        s3.putFile(
+            json.dumps(features, indent=2).encode('utf-8'),
+            feat_path,
+            bucket=s3.S3_BUCKET,
+            content_type='application/json',
+        )
+        context.log.info(f"  ✓ Uploaded features{suffix}.json ({len(features)} features)")
+        feature_files[variant] = feat_path
 
-    # Write deployment metadata
+    # Deployment metadata describes both variants under `variants` keys so
+    # downstream consumers can pick either path without guessing filenames.
+    variants_meta: dict[str, dict] = {}
+    for variant, features in _VARIANTS.items():
+        suffix = f"_{variant}"
+        variants_meta[variant] = {
+            'features_path': feature_files[variant],
+            'n_features': len(features),
+            'models': {task: uploaded[f"{task}{suffix}"] for task in ('regression', 'clf_5ppb', 'clf_10ppb')},
+        }
+
     meta = {
         'deployed_at': datetime.now(timezone.utc).isoformat(),
         'station': site_name,
         'partition': partition,
-        'models': uploaded,
-        'features': MODEL_FEATURES,
+        'variants': variants_meta,
     }
     meta_path = f"{base_path}/deployment_metadata.json"
     s3.putFile(
@@ -367,9 +471,10 @@ def station_model_deployment(
         "status": "deployed",
         "station": site_name,
         "models_uploaded": list(uploaded.keys()),
+        "variants": list(_VARIANTS.keys()),
         "s3_base_path": base_path,
     })
-    return {"status": "deployed", "station": site_name, "models": uploaded}
+    return {"status": "deployed", "station": site_name, "models": uploaded, "variants": list(_VARIANTS.keys())}
 
 
 # ==============================================================================
