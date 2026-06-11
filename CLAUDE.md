@@ -54,7 +54,7 @@ tj_h2s_prediction/
 │   │   │   ├── gaussian.py      # Forward Gaussian plume model
 │   │   │   └── hysplit_controls.py  # HYSPLIT CONTROL file generation
 │   │   ├── training/
-│   │   │   ├── feature_builder.py       # ensure_base_features() for 43-feature set
+│   │   │   ├── feature_builder.py       # ensure_base_features() — 33-feature production set
 │   │   │   ├── model_trainer.py         # train_and_select() for XGBoost/RF
 │   │   │   ├── multi_station_trainer.py # Per-station training logic
 │   │   │   ├── multihorizon_trainer.py  # MH training + EnsembleRegressor/Classifier
@@ -393,7 +393,7 @@ s3://test/
 ├── tijuana/forecast/
 │   ├── models/
 │   │   ├── nestor_xgboost_weighted_model.json  # hourly pipeline model
-│   │   ├── nestor_preprocessing_info.json       # 43-feature preprocessing metadata
+│   │   ├── nestor_preprocessing_info.json       # 33-feature preprocessing metadata (PR #28)
 │   │   ├── deployment_metadata.json
 │   │   ├── xgboost_base/model.json              # variants
 │   │   ├── xgboost_smote/model.json

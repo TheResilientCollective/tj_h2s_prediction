@@ -53,13 +53,13 @@ to monitoring staff and agency decision-makers respectively.
 
 Evaluated on the calibration-aligned harness (Spearman + recall at the four categorical thresholds):
 
-| Model | Spearman | recall@5 | recall@10 | recall@30 | recall@100 |
-|---|---|---|---|---|---|
-| persistence floor (`h2s_lag_1h → ppb`) | 0.822 | 0.702 | 0.650 | 0.574 | 0.390 |
-| current XGB regression (44 feat) | 0.782 | 0.861 | 0.869 | 0.803 | 0.636 |
-| **proposed trim (33 feat, [PR #27](https://github.com/TheResilientCollective/tj_h2s_prediction/pull/27))** | **0.817** | 0.856 | 0.861 | 0.794 | **0.675** |
+| Model | Features | Spearman | recall@5 | recall@10 | recall@30 | recall@100 |
+|---|---|---|---|---|---|---|
+| persistence floor (`h2s_lag_1h → ppb`) | — | 0.822 | 0.702 | 0.650 | 0.574 | 0.390 |
+| **current XGB regression** (Evidence) | **33** | **0.817** | 0.856 | 0.861 | 0.794 | **0.675** |
+| legacy XGB regression | 44 | 0.782 | 0.861 | 0.869 | 0.803 | 0.636 |
 
-The trimmed model beats the deployed 44-feature baseline on Spearman and recall@100 without losing complaint-rate (r@5, r@10) or watch (r@30) skill. See [experiments/2026-06-10_feature_trim_berry/RESULTS.md](experiments/2026-06-10_feature_trim_berry/RESULTS.md).
+The 33-feature default landed in PR #28; the 44-feature legacy set is retained in code as `MODEL_FEATURES_LEGACY` for backward compat with deployed models that still carry the old preprocessing schema. The trim beats legacy on Spearman and recall@100 with no material loss at complaint-rate (r@5, r@10) or watch (r@30). See [experiments/2026-06-10_feature_trim_berry/RESULTS.md](experiments/2026-06-10_feature_trim_berry/RESULTS.md).
 
 ### Threshold tuning (hourly classifier)
 
@@ -111,7 +111,7 @@ Several recent experiments folded findings from the calibration arc (sibling rep
 | Experiment | What it answers |
 |---|---|
 | [`experiments/2026-05-20_calm_night_feature_refresh/`](experiments/2026-05-20_calm_night_feature_refresh/) | Built the calibration-aligned eval harness (Spearman + recall at thresholds + regime stratification); fixed `train_and_select`'s R²-based selector that was hiding a 32 pp recall@100 gap on Berry. Shipped in [PR #26](https://github.com/TheResilientCollective/tj_h2s_prediction/pull/26). |
-| [`experiments/2026-06-10_feature_trim_berry/`](experiments/2026-06-10_feature_trim_berry/) | Ablated four feature sets (44 / 33 / 19 / 11). Evidence-only at 33 features wins decisively. Awaiting Phase 2 promotion in [PR #27](https://github.com/TheResilientCollective/tj_h2s_prediction/pull/27). |
+| [`experiments/2026-06-10_feature_trim_berry/`](experiments/2026-06-10_feature_trim_berry/) | Ablated four feature sets (44 / 33 / 19 / 11). Evidence-only at 33 features wins decisively (shipped in [PR #27](https://github.com/TheResilientCollective/tj_h2s_prediction/pull/27); promoted to `MODEL_FEATURES` default in PR #28). |
 
 The calibration-aligned harness lives in [projects/h2s/src/h2s/training/calibration_eval.py](projects/h2s/src/h2s/training/calibration_eval.py) and is used for all forward-looking model evaluation. Headline metrics on this heavy-tailed series:
 

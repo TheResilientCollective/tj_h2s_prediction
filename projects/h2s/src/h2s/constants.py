@@ -242,8 +242,46 @@ def classify_risk(prob_5: float, prob_10: float, h2s_pred: float, prob_30: float
 # Model Feature Lists
 # ==============================================================================
 
-# Core features (38) — available without SBIWTP feed
+# Production feature set (33) — promoted from MODEL_FEATURES_EVIDENCE per the
+# 2026-06-10 Berry ablation experiment (PR #27). The 11 features previously
+# in the 44-feature set were dropped because they either (a) calibration
+# explicitly dismissed them (recall@100 = 0.00 across 140 event-trigger configs
+# for SBIWTP; all flow magnitude terms < 0.11 Spearman) or (b) were measurably
+# tree-redundant with raw inputs (4 h wind rolling aggregates).
+#
+# Provenance: experiments/2026-06-10_feature_trim_berry/RESULTS.md and
+# tj_calibration/tijuana-dispersion-experiments/docs/calibration_status.md.
 CORE_FEATURES = [
+    'temperature_2m', 'wind_speed_10m', 'wind_direction_sin', 'wind_direction_cos',
+    'wind_gusts_10m', 'precipitation', 'relative_humidity_2m', 'surface_pressure',
+    'cloud_cover', 'dewpoint_2m',
+    'wind_speed_10m_avg_2h', 'wind_speed_10m_avg_3h',
+    'wind_gusts_10m_max_2h', 'wind_gusts_10m_max_3h',
+    'tide_height', 'tidal_state_encoded',
+    'hour_sin', 'hour_cos', 'month_sin', 'month_cos',
+    'is_night', 'source_regime',
+    'wind_temp_interaction', 'humidity_temp_interaction',
+    'stable_atm', 'wind_x_stable_atm',
+    'h2s_lag_1h', 'h2s_lag_3h', 'h2s_lag_6h',
+    'h2s_rolling_6h', 'h2s_rolling_24h',
+    'flow_lag_6h', 'flow_rolling_24h',
+]
+
+# SBIWTP effluent features — kept for backward compat with legacy deployed
+# models (their preprocessing_info.json still references these columns) and
+# for the multihorizon trainer's own backfill logic
+# (see multihorizon_trainer.py:475). NOT part of MODEL_FEATURES going forward.
+SBIWTP_FEATURES = [
+    'sbiwtp_flow_mgd', 'sbiwtp_anomaly', 'sbiwtp_deficit',
+    'sbiwtp_flow_x_temp', 'sbiwtp_hourly_mgd', 'sbiwtp_sli',
+]
+
+# Production 33-feature set used by per-station and per-horizon models.
+MODEL_FEATURES = CORE_FEATURES
+
+# 44-feature set retained for reference and legacy-model preprocessing only.
+# Do not use for new training — see PR #27 for the empirical case against it.
+MODEL_FEATURES_LEGACY = [
     'temperature_2m', 'wind_speed_10m', 'wind_direction_sin', 'wind_direction_cos',
     'wind_gusts_10m', 'precipitation', 'relative_humidity_2m', 'surface_pressure',
     'cloud_cover', 'dewpoint_2m',
@@ -258,16 +296,8 @@ CORE_FEATURES = [
     'h2s_lag_1h', 'h2s_lag_3h', 'h2s_lag_6h',
     'h2s_rolling_6h', 'h2s_rolling_24h',
     'flow_lag_6h', 'flow_rolling_24h',
+    *SBIWTP_FEATURES,
 ]
-
-# SBIWTP effluent features (available when USIBWC feed is connected)
-SBIWTP_FEATURES = [
-    'sbiwtp_flow_mgd', 'sbiwtp_anomaly', 'sbiwtp_deficit',
-    'sbiwtp_flow_x_temp', 'sbiwtp_hourly_mgd', 'sbiwtp_sli',
-]
-
-# Full 44-feature set used by per-station models
-MODEL_FEATURES = CORE_FEATURES + SBIWTP_FEATURES
 
 # Alias for multihorizon compatibility
 BASE_FEATURES = MODEL_FEATURES
@@ -275,33 +305,24 @@ BASE_FEATURES = MODEL_FEATURES
 # ==============================================================================
 # Candidate feature sets — feature-trim ablation (experiment 2026-06-10)
 # ==============================================================================
-# These are NOT used in production. They are defined here so the audit reasoning
-# lives in version control. The ablation script in
-# experiments/2026-06-10_feature_trim_berry/feature_ablation.py loads each and
-# trains a Berry XGBoost regressor on it. If a winner emerges, the deployed
-# default is changed in a follow-up PR.
+# These are preserved from the original ablation. EVIDENCE was promoted to
+# MODEL_FEATURES (above) on the strength of the experiment; LEAN and MINIMAL
+# remain documented here so the ablation script can reproduce the comparison,
+# and so future trims have a clear precedent to extend.
 #
 # Provenance for each drop is in
 # experiments/2026-06-10_feature_trim_berry/RESULTS.md (and ultimately in
 # tj_calibration/tijuana-dispersion-experiments/docs/calibration_status.md).
 
-# Evidence-only (33 features) — drops what calibration explicitly invalidated
-# or what's measurably tree-redundant. Closest to a safe production trim.
-# Drops vs MODEL_FEATURES: 6 SBIWTP + 3 flow derivatives + 2 wind 4h rolling = 11
-MODEL_FEATURES_EVIDENCE = [
-    f for f in MODEL_FEATURES if f not in {
-        # SBIWTP — recall@100=0.00 across calibration's 140-config event-trigger sweep
-        'sbiwtp_flow_mgd', 'sbiwtp_anomaly', 'sbiwtp_deficit',
-        'sbiwtp_flow_x_temp', 'sbiwtp_hourly_mgd', 'sbiwtp_sli',
-        # Flow derivatives — calibration: "all flow/SBIWTP terms < 0.11 Spearman"
-        'flow_log', 'flow_low', 'flow_high',
-        # Wind 4h rolling — tree-redundant with raw wind + 2h/3h aggregates
-        'wind_speed_10m_avg_4h', 'wind_gusts_10m_max_4h',
-    }
-]
+# Evidence-only (33 features) — IS MODEL_FEATURES post-promotion (PR #28).
+# Kept as an alias so the ablation script and future cross-references stay
+# stable.
+MODEL_FEATURES_EVIDENCE = list(MODEL_FEATURES)
 
-# Lean (19 features) — Evidence-only minus derived interactions, redundant wind
-# rolling, lower-importance weather, and hour_sin/cos (is_night carries hour-of-day).
+# Lean (19 features) — Evidence-only minus derived interactions, redundant
+# wind rolling, lower-importance weather, and hour_sin/cos
+# (is_night carries hour-of-day signal). Did NOT pass the ablation gate —
+# preserved for reference and future ablations.
 MODEL_FEATURES_LEAN = [
     f for f in MODEL_FEATURES_EVIDENCE if f not in {
         # Interactions — tree learns these implicitly

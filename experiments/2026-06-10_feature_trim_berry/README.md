@@ -1,7 +1,7 @@
 # feature_trim_berry
 
 **Date:** 2026-06-10
-**Status:** done — winner identified, awaiting Phase 2 promotion decision
+**Status:** Phase 1 done; Phase 2 promotion shipped in PR #28
 **Author:** session-handoff
 
 ## Question
@@ -83,8 +83,8 @@ Sanity check: the baseline (D) numbers should reproduce PR #26's retrain — Spe
 
 ## Phase boundaries
 
-- **Phase 1 (this experiment): ablate + recommend.** Done. `MODEL_FEATURES` and deployed model behavior are unchanged by this PR.
-- **Phase 2 (follow-up PR): promote `MODEL_FEATURES_EVIDENCE` to be the production default.** Requires editing [constants.py](../../projects/h2s/src/h2s/constants.py), trimming the unused branches in [feature_builder.ensure_base_features](../../projects/h2s/src/h2s/training/feature_builder.py), and a full `multi_station_training_job` → `station_deployment_job` cycle. See [RESULTS.md](RESULTS.md) for the exact recipe.
+- **Phase 1 (this experiment): ablate + recommend.** Done. Shipped in [PR #27](https://github.com/TheResilientCollective/tj_h2s_prediction/pull/27).
+- **Phase 2 (PR #28): promote `MODEL_FEATURES_EVIDENCE` to the production default.** Done. `MODEL_FEATURES` is now 33 features; the old 44-feature list is preserved as `MODEL_FEATURES_LEGACY` for deployed-model backward compatibility. `feature_builder.ensure_base_features` was left alone (its idempotent branches still compute flow_log/SBIWTP defaults, which legacy preprocessing paths still read). The `multi_station_training_job` → `station_deployment_job` cycle was not part of PR #28 — that's a separate operational step.
 - **Phase 3 (later): generalize.** Run the same ablation on IB-Civic-Ctr and San-Ysidro (current test slice has too few positives@100 there for reliable evidence); run it on the 3-class classifier path that the production hourly pipeline uses.
 
 ## Files

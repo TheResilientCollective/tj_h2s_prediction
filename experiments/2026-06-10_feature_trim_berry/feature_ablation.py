@@ -42,10 +42,21 @@ from h2s.constants import (
     H2S_THRESHOLD_HIGH,
     H2S_THRESHOLD_LOW,
     H2S_THRESHOLD_MED,
-    MODEL_FEATURES,
     MODEL_FEATURES_EVIDENCE,
     MODEL_FEATURES_LEAN,
+    MODEL_FEATURES_LEGACY,
     MODEL_FEATURES_MINIMAL,
+)
+from h2s.training.calibration_eval import (
+    CalibrationReport,
+    calibration_report,
+    chronological_split,
+    persistence_prediction,
+)
+from h2s.training.multi_station_trainer import (
+    eval_regressor,
+    get_xgb_regressor,
+    prepare_multi_station_features,
 )
 
 
@@ -58,17 +69,6 @@ EVAL_THRESHOLDS = (
     H2S_THRESHOLD_MED,        # 10
     H2S_THRESHOLD_HIGH,       # 30
     H2S_THRESHOLD_EXTREME,    # 100
-)
-from h2s.training.calibration_eval import (
-    CalibrationReport,
-    calibration_report,
-    chronological_split,
-    persistence_prediction,
-)
-from h2s.training.multi_station_trainer import (
-    eval_regressor,
-    get_xgb_regressor,
-    prepare_multi_station_features,
 )
 
 
@@ -86,7 +86,11 @@ class Candidate:
 
 
 CANDIDATES: list[Candidate] = [
-    Candidate("D", "Baseline (44 feat)", list(MODEL_FEATURES)),
+    # Baseline is the pre-Phase-2 44-feature set (MODEL_FEATURES_LEGACY).
+    # After PR #28 promoted Evidence to production, MODEL_FEATURES itself
+    # is the 33-feature set — so we explicitly pin D to LEGACY here to
+    # preserve the historical comparison the ablation was designed around.
+    Candidate("D", "Baseline (44 feat)", list(MODEL_FEATURES_LEGACY)),
     Candidate("C", "Evidence-only (33 feat)", list(MODEL_FEATURES_EVIDENCE)),
     Candidate("B", "Lean (19 feat)", list(MODEL_FEATURES_LEAN)),
     Candidate("A", "Minimal (11 feat)", list(MODEL_FEATURES_MINIMAL)),
@@ -197,6 +201,13 @@ def main(argv: list[str] | None = None) -> int:
     # --- Data prep ---------------------------------------------------------
     df_raw = pd.read_parquet(args.parquet)
     df = prepare_multi_station_features(df_raw, station=args.station)
+    # `prepare_multi_station_features` drops rows missing any current
+    # MODEL_FEATURES column. After Phase 2 promoted MODEL_FEATURES to the
+    # 33-feature set, that filter no longer enforces non-null SBIWTP / flow
+    # derivatives — which means the ablation would silently train on a larger
+    # row set than the original 2026-06-10 run. Re-impose the legacy filter
+    # so re-runs reproduce the published numbers in RESULTS.md.
+    df = df.dropna(subset=MODEL_FEATURES_LEGACY).reset_index(drop=True)
     print(f"Loaded {len(df)} rows for site={args.station!r}, "
           f"time {df['time'].min()} → {df['time'].max()}")
 

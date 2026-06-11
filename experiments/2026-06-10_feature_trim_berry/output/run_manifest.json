@@ -2,15 +2,15 @@
   "schema_version": "1.0",
   "run": {
     "produced_at": "2026-04-11T20:15:00+00:00",
-    "git_sha": "e302f2c7473e7bb2d4d2c88f1a01edb8c0b889ed",
-    "git_branch": "feature/ablation-berry-trim",
-    "git_dirty": true,
+    "git_sha": "e97afa9f08880ddc0a95ee3545089c3d33133cc1",
+    "git_branch": "feature/promote-evidence-features",
+    "git_dirty": false,
     "station": "NESTOR - BES"
   },
   "inputs": {
     "training_parquet": {
       "path": "data/modeldata_h2s_nofill.parquet",
-      "rows_filtered": 11862,
+      "rows_filtered": 11958,
       "time_range": [
         "2024-10-09 14:00:00+00:00",
         "2026-04-01 07:00:00+00:00"
@@ -29,10 +29,10 @@
   "split": {
     "method": "chronological",
     "train_fraction": 0.7,
-    "train_n": 8303,
-    "test_n": 3559,
+    "train_n": 8370,
+    "test_n": 3588,
     "test_time_range": [
-      "2025-10-18 16:00:00+00:00",
+      "2025-10-17 11:00:00+00:00",
       "2026-04-01 07:00:00+00:00"
     ]
   },
@@ -123,29 +123,29 @@
         "verbosity": null
       },
       "holdout_metrics": {
-        "mae": 6.5942,
-        "rmse": 18.9748,
-        "r2": 0.554,
-        "recall_5": 0.8557,
-        "recall_10": 0.8613,
-        "recall_30": 0.7937,
-        "recall_100": 0.6753,
-        "n_positives_5": 887,
+        "mae": 6.5045,
+        "rmse": 18.7777,
+        "r2": 0.5599,
+        "recall_5": 0.8538,
+        "recall_10": 0.8418,
+        "recall_30": 0.7758,
+        "recall_100": 0.6104,
+        "n_positives_5": 889,
         "n_positives_10": 512,
         "n_positives_30": 223,
         "n_positives_100": 77,
-        "n_test": 3559
+        "n_test": 3588
       },
       "forecast_output": "forecast_evidence.csv",
       "forecast_summary": {
         "n_predictions": 192,
-        "max_predicted_ppb": 34.68513488769531,
-        "mean_predicted_ppb": 3.4576241970062256,
+        "max_predicted_ppb": 40.74220657348633,
+        "mean_predicted_ppb": 3.6954782009124756,
         "category_counts": {
           "green": 161,
-          "yellow_high": 19,
-          "yellow_low": 9,
-          "orange": 3
+          "yellow_high": 13,
+          "yellow_low": 12,
+          "orange": 6
         }
       }
     },
@@ -209,28 +209,28 @@
         "verbosity": null
       },
       "holdout_metrics": {
-        "mae": 6.3084,
-        "rmse": 18.597,
-        "r2": 0.5716,
-        "recall_5": 0.8309,
-        "recall_10": 0.8086,
-        "recall_30": 0.7354,
-        "recall_100": 0.5714,
-        "n_positives_5": 887,
+        "mae": 6.2357,
+        "rmse": 18.5377,
+        "r2": 0.5711,
+        "recall_5": 0.8256,
+        "recall_10": 0.8145,
+        "recall_30": 0.7265,
+        "recall_100": 0.5195,
+        "n_positives_5": 889,
         "n_positives_10": 512,
         "n_positives_30": 223,
         "n_positives_100": 77,
-        "n_test": 3559
+        "n_test": 3588
       },
       "forecast_output": "forecast_lean.csv",
       "forecast_summary": {
         "n_predictions": 192,
-        "max_predicted_ppb": 16.83839225769043,
-        "mean_predicted_ppb": 2.1132097244262695,
+        "max_predicted_ppb": 11.391928672790527,
+        "mean_predicted_ppb": 1.6871471405029297,
         "category_counts": {
-          "green": 175,
-          "yellow_high": 9,
-          "yellow_low": 8
+          "green": 177,
+          "yellow_low": 14,
+          "yellow_high": 1
         }
       }
     }
