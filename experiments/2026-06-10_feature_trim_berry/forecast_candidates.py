@@ -89,13 +89,16 @@ CANDIDATES: list[Candidate] = [
 
 
 def _git_provenance(repo_root: Path) -> dict:
-    """Capture git SHA, branch, and dirty state for the manifest.
+    """Capture git SHA, branch, and source-clean state for the manifest.
 
-    `git_dirty` reflects whether *tracked* files have uncommitted modifications
-    relative to HEAD. Untracked files (caches, ad-hoc downloads, the script's
-    own newly-written outputs) don't count — they don't change the
-    reproducibility contract that "running git checkout <sha> produces the
-    same code".
+    `git_dirty` reflects whether *source* files (anything outside an
+    `output/` directory in any experiment) have uncommitted modifications
+    relative to HEAD. The output/ directories themselves contain the
+    very files this script is about to overwrite, so they don't count —
+    they're the artifact, not the source. Untracked files don't count either.
+
+    The reproducibility contract: `git_dirty=False` means "checking out
+    `git_sha` reproduces the producing source exactly".
     """
     def _run(cmd: list[str]) -> str:
         return subprocess.check_output(cmd, cwd=repo_root, text=True).strip()
@@ -103,11 +106,12 @@ def _git_provenance(repo_root: Path) -> dict:
     try:
         sha = _run(["git", "rev-parse", "HEAD"])
         branch = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
-        # exit code 0 = clean (no tracked diff vs HEAD), 1 = dirty
-        dirty_proc = subprocess.run(
-            ["git", "diff", "--quiet", "HEAD"], cwd=repo_root, check=False,
-        )
-        return {"git_sha": sha, "git_branch": branch, "git_dirty": dirty_proc.returncode != 0}
+        # Tracked diff vs HEAD, excluding experiment outputs (the artifact)
+        diff = _run([
+            "git", "diff", "--name-only", "HEAD", "--",
+            ".", ":(exclude)experiments/*/output/*",
+        ])
+        return {"git_sha": sha, "git_branch": branch, "git_dirty": bool(diff)}
     except (subprocess.CalledProcessError, FileNotFoundError):
         return {"git_sha": None, "git_branch": None, "git_dirty": None}
 
