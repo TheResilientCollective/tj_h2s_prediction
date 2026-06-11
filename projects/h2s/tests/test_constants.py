@@ -17,6 +17,7 @@ from h2s.constants import (
     MODEL_FEATURES,
     MODEL_FEATURES_EVIDENCE,
     MODEL_FEATURES_LEAN,
+    MODEL_FEATURES_LEGACY,
     MODEL_FEATURES_MINIMAL,
 )
 
@@ -33,13 +34,24 @@ _LOAD_BEARING = {
 
 
 class TestCounts:
-    """The plan specified each count explicitly — pin them so future edits surface."""
+    """The Phase 2 promotion (PR #28) set MODEL_FEATURES = MODEL_FEATURES_EVIDENCE.
+    Pin the counts so a future edit can't silently move them.
+    """
 
-    def test_baseline_is_44(self):
-        assert len(MODEL_FEATURES) == 44
+    def test_production_is_33(self):
+        assert len(MODEL_FEATURES) == 33
 
     def test_evidence_is_33(self):
+        # Equal to MODEL_FEATURES post-promotion; the EVIDENCE alias stays
+        # for the ablation script and historical reference
         assert len(MODEL_FEATURES_EVIDENCE) == 33
+        assert MODEL_FEATURES_EVIDENCE == MODEL_FEATURES
+
+    def test_legacy_is_44(self):
+        # The pre-promotion baseline, retained for backward compat with
+        # deployed models whose preprocessing_info.json references the
+        # 11 dropped features
+        assert len(MODEL_FEATURES_LEGACY) == 44
 
     def test_lean_is_19(self):
         assert len(MODEL_FEATURES_LEAN) == 19
@@ -49,20 +61,24 @@ class TestCounts:
 
 
 class TestSubsetRelations:
-    """Each candidate must be a subset of MODEL_FEATURES (no typos, no new features)."""
+    """Each candidate must be a subset of MODEL_FEATURES_LEGACY (no typos, no new features)."""
 
-    def test_evidence_subset_of_baseline(self):
-        assert set(MODEL_FEATURES_EVIDENCE) <= set(MODEL_FEATURES)
+    def test_production_subset_of_legacy(self):
+        # The promotion drops 11 features from legacy — production must be
+        # a strict subset of what was deployed before
+        assert set(MODEL_FEATURES) < set(MODEL_FEATURES_LEGACY)
+        assert len(set(MODEL_FEATURES_LEGACY) - set(MODEL_FEATURES)) == 11
 
-    def test_lean_subset_of_evidence(self):
-        # Lean is a strict refinement of Evidence — anything dropped from Evidence
-        # stays dropped in Lean
-        assert set(MODEL_FEATURES_LEAN) <= set(MODEL_FEATURES_EVIDENCE)
+    def test_lean_subset_of_production(self):
+        # Lean is a strict refinement of the production set — anything
+        # dropped from production stays dropped in Lean
+        assert set(MODEL_FEATURES_LEAN) <= set(MODEL_FEATURES)
 
-    def test_minimal_subset_of_baseline(self):
+    def test_minimal_subset_of_legacy(self):
         # Minimal isn't required to be a subset of Lean (it's a re-curated
-        # calibration-only set), but every feature must exist in the master list
-        assert set(MODEL_FEATURES_MINIMAL) <= set(MODEL_FEATURES)
+        # calibration-only set), but every feature must exist somewhere
+        # in the legacy list
+        assert set(MODEL_FEATURES_MINIMAL) <= set(MODEL_FEATURES_LEGACY)
 
 
 class TestLoadBearingFeaturesPreserved:
@@ -107,6 +123,15 @@ class TestCalibrationDismissalsDropped:
         # Flow derivatives — all calibration flow terms < 0.11 Spearman
         "flow_log", "flow_low", "flow_high",
     }
+
+    def test_production_drops_all_calibration_dismissals(self):
+        # The Phase 2 promotion: production MODEL_FEATURES must not contain
+        # any feature calibration explicitly dismissed
+        kept = self._CALIBRATION_DISMISSED & set(MODEL_FEATURES)
+        assert not kept, (
+            f"MODEL_FEATURES (production) should drop calibration-dismissed "
+            f"features: {kept}"
+        )
 
     def test_evidence_drops_all_calibration_dismissals(self):
         kept = self._CALIBRATION_DISMISSED & set(MODEL_FEATURES_EVIDENCE)
