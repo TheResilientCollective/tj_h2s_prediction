@@ -125,12 +125,17 @@ cd projects/h2s
 
 # 1. Train per-station models (partitioned: san_ysidro, nestor_bes, ib_civic_ctr)
 #    Runs multi_station_training_data → per_station_trained_models → station_training_report
-uv run dg launch --job multi_station_training_job
+uv run dg launch --job multi_station_training_job --partition <station>
+# Repeat for each of nestor_bes / san_ysidro / ib_civic_ctr.
 
 # 2. Review training metrics in Dagster UI (station_training_report asset metadata)
 
-# 3. Deploy approved models to S3 (this IS the approval — running this job means you approve)
-uv run dg launch --job station_deployment_job
+# 3. Deploy to S3 (this IS the approval — running this job means you approve)
+uv run dg launch --job station_deployment_job --partition <station>
+# Repeat per partition. Default uploads to S3; pass approve_deployment=False
+# in the run config for a dry run that validates without writing to S3:
+#   uv run dg launch --job station_deployment_job --partition nestor_bes \
+#     --config-json '{"ops":{"h2s__station_model_deployment":{"config":{"approve_deployment":false}}}}'
 
 # 4. Run daily analysis — it will re-load fresh models from S3
 uv run dg launch --job daily_analysis_job

@@ -290,8 +290,12 @@ def station_training_report(
     config_schema={
         "approve_deployment": dg.Field(
             bool,
-            default_value=False,
-            description="Set to True to approve and upload models to S3",
+            default_value=True,
+            description=(
+                "Default True: running station_deployment_job IS the approval — "
+                "models are uploaded to S3. Set to False for a dry run that "
+                "loads + validates the trained models without writing to S3."
+            ),
         ),
     },
 )
@@ -299,9 +303,14 @@ def station_model_deployment(
     context: dg.AssetExecutionContext,
     per_station_trained_models: dict,
 ) -> dict:
-    """Upload trained station models to S3 when deployment is approved.
+    """Upload trained station models to S3 (default) or dry-run.
 
-    Set approve_deployment=True in asset config to upload.
+    By default, running station_deployment_job uploads the trained models to
+    S3 — the act of launching the job IS the approval. Pass
+    `approve_deployment=False` in the asset config to do a dry run that
+    validates the upstream models without writing to S3 (returns
+    `{"status": "dry_run", ...}`).
+
     Models are written to: tijuana/forecast/models/stations/{station_key}/{task}.pkl
     """
     partition = context.partition_key
@@ -314,10 +323,10 @@ def station_model_deployment(
 
     if not approved:
         context.log.warning(
-            f"Deployment NOT approved for {site_name}. "
-            f"Set approve_deployment=True to upload models."
+            f"Dry-run for {site_name} (approve_deployment=False). "
+            f"Skipping S3 upload."
         )
-        return {"status": "pending_approval", "station": site_name}
+        return {"status": "dry_run", "station": site_name}
 
     context.log.info(f"Deploying models for {site_name} to S3: {base_path}")
     uploaded = {}
@@ -381,15 +390,11 @@ multi_station_training_job = dg.define_asset_job(
 
 station_deployment_job = dg.define_asset_job(
     name="station_deployment_job",
-    description="Deploy approved station models to S3 (set approve_deployment=True)",
+    description=(
+        "Deploy station models to S3 — running this job IS the approval. "
+        "Pass approve_deployment=False in run config for a dry run."
+    ),
     selection=dg.AssetSelection.assets(station_model_deployment),
     partitions_def=STATION_PARTITIONS,
-    config={
-        "ops": {
-            "h2s__station_model_deployment": {
-                "config": {"approve_deployment": True}
-            }
-        }
-    },
     tags={"environment": "production", "pipeline": "h2s_deployment"},
 )
