@@ -390,9 +390,16 @@ s3://test/
 │   │   ├── xgboost_smote/model.json
 │   │   ├── random_forest/model.joblib
 │   │   ├── stations/{station_key}/              # IB_CIVIC_CTR, NESTOR__BES, SAN_YSIDRO
-│   │   │   ├── clf_5ppb.pkl
+│   │   │   ├── clf_5ppb.pkl                     # Evidence variant — 33 feat, production
 │   │   │   ├── clf_10ppb.pkl
-│   │   │   └── regression.pkl
+│   │   │   ├── regression.pkl
+│   │   │   ├── clf_5ppb_lean.pkl                # Lean variant — 19 feat, deployed in parallel
+│   │   │   ├── clf_10ppb_lean.pkl
+│   │   │   ├── regression_lean.pkl
+│   │   │   ├── features.json                    # Evidence column schema
+│   │   │   ├── features_lean.json               # Lean column schema
+│   │   │   ├── deployment_metadata.json         # `variants` key lists both
+│   │   │   └── training_report.json             # metrics for both variants
 │   └── output/YYYY-MM-DD_HH/                   # Timestamped hourly predictions
 ├── tijuana/dispersion/
 │   ├── lagrangian/

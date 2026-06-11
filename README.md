@@ -56,10 +56,11 @@ Evaluated on the calibration-aligned harness (Spearman + recall at the four cate
 | Model | Features | Spearman | recall@5 | recall@10 | recall@30 | recall@100 |
 |---|---|---|---|---|---|---|
 | persistence floor (`h2s_lag_1h → ppb`) | — | 0.822 | 0.702 | 0.650 | 0.574 | 0.390 |
-| **current XGB regression** (Evidence) | **33** | **0.817** | 0.856 | 0.861 | 0.794 | **0.675** |
+| **current XGB regression** (Evidence — production) | **33** | **0.817** | 0.856 | 0.861 | 0.794 | **0.675** |
+| **Lean** (deployed in parallel) | **19** | 0.805 | 0.831 | 0.809 | 0.735 | 0.571 |
 | legacy XGB regression | 44 | 0.782 | 0.861 | 0.869 | 0.803 | 0.636 |
 
-The 33-feature default landed in PR #28; the 44-feature legacy set is retained in code as `MODEL_FEATURES_LEGACY` for backward compat with deployed models that still carry the old preprocessing schema. The trim beats legacy on Spearman and recall@100 with no material loss at complaint-rate (r@5, r@10) or watch (r@30). See [experiments/2026-06-10_feature_trim_berry/RESULTS.md](experiments/2026-06-10_feature_trim_berry/RESULTS.md).
+The 33-feature Evidence model is the production default; the 19-feature Lean model is **deployed in parallel** (S3 path suffix `_lean`, see below) as a not-overdetermined argument that reviewers can verify by loading either model and reproducing the comparison. Lean drops below the acceptance gate at recall@30/100 — that's why Evidence ships — but Lean is operationally close enough that the system clearly isn't dependent on the 14 features Lean strips out. The 44-feature legacy set is retained in code as `MODEL_FEATURES_LEGACY` for backward compat with previously-deployed models. See [experiments/2026-06-10_feature_trim_berry/RESULTS.md](experiments/2026-06-10_feature_trim_berry/RESULTS.md).
 
 ### Threshold tuning (hourly classifier)
 
@@ -147,7 +148,12 @@ s3://test/
 │   │   ├── nestor_preprocessing_info.json
 │   │   ├── deployment_metadata.json
 │   │   ├── xgboost_base/, xgboost_smote/, random_forest/   # variants
-│   │   └── stations/{station_key}/{clf_5ppb,clf_10ppb,regression}.pkl
+│   │   └── stations/{station_key}/
+│   │       ├── {clf_5ppb,clf_10ppb,regression}.pkl       # Evidence (33 feat, production)
+│   │       ├── {clf_5ppb,clf_10ppb,regression}_lean.pkl  # Lean (19 feat, parallel)
+│   │       ├── features.json / features_lean.json       # per-variant schemas
+│   │       ├── deployment_metadata.json                  # variants key lists both
+│   │       └── training_report.json                      # metrics for both variants
 │   ├── hourly/YYYY-MM-DD_HH/                      # hive-partitioned predictions
 │   ├── daily_summary/                             # daily station summaries
 │   ├── validation/YYYY-MM-DD/                     # metrics + viz
