@@ -24,12 +24,7 @@ tj_h2s_prediction/
 │   ├── predict_h2s.py           # Main prediction script
 │   ├── batch_predict.py         # Batch processing
 │   └── generate_visualizations.py
-├── multihorizon/                 # Local MH training/forecast scripts
-│   ├── train_multihorizon.py
-│   ├── forecast_multihorizon.py
-│   └── horizon_features.json
 ├── data/
-│   ├── models_mh/               # Trained MH model pkl files (local)
 │   ├── models_v2/               # Trained per-station models (local)
 │   └── startmodels/             # Seed models for initial S3 upload
 ├── projects/h2s/                 # Dagster orchestration project
@@ -41,8 +36,6 @@ tj_h2s_prediction/
 │   │   │   ├── h2s_daily_pipeline.py    # Daily analysis: source attribution + station forecasts
 │   │   │   ├── h2s_dispersion_pipeline.py  # Dispersion modeling: Lagrangian + Gaussian + HYSPLIT
 │   │   │   ├── h2s_multi_station_training.py  # Per-station model training (partitioned)
-│   │   │   ├── h2s_multihorizon_training.py   # MH model training (partitioned, STOPPED)
-│   │   │   ├── h2s_multihorizon_pipeline.py   # MH forecast pipeline (STOPPED)
 │   │   │   ├── h2s_training_pipeline.py       # Legacy single-model training pipeline
 │   │   │   ├── h2s_seed_models.py             # Seed models job for initial S3 upload
 │   │   │   └── h2s_schedules.py               # All schedules and job definitions
@@ -57,7 +50,6 @@ tj_h2s_prediction/
 │   │   │   ├── feature_builder.py       # ensure_base_features() — 33-feature production set
 │   │   │   ├── model_trainer.py         # train_and_select() for XGBoost/RF
 │   │   │   ├── multi_station_trainer.py # Per-station training logic
-│   │   │   ├── multihorizon_trainer.py  # MH training + EnsembleRegressor/Classifier
 │   │   │   ├── relabeling.py            # H2S threshold relabeling
 │   │   │   └── validation.py            # Model validation utilities
 │   │   ├── resources/
@@ -374,12 +366,6 @@ multi_station_model_artifacts → source_attribution → daily_station_forecasts
                                                                               → daily_summary_json
 ```
 
-**`mh_forecast_job`** (every 6h, currently STOPPED) — 72h multi-horizon forecast
-```
-mh_model_artifacts → mh_observation_state → mh_forecasts → mh_dashboard_viz
-                                                          → mh_summary_export → mh_slack_alerts
-```
-
 **`dispersion_inversion_job`** (weekly Monday 02:30 UTC, STOPPED by default) — backward source attribution
 ```
 lagrangian_source_attribution → emission_rate_inversion → hysplit_controls_generation (backward CONTROL bundle)
@@ -407,9 +393,7 @@ s3://test/
 │   │   │   ├── clf_5ppb.pkl
 │   │   │   ├── clf_10ppb.pkl
 │   │   │   └── regression.pkl
-│   │   └── multihorizon/{horizon}/{station_key}/{task}.pkl  # 36 MH models
-│   ├── output/YYYY-MM-DD_HH/                   # Timestamped hourly predictions
-│   └── multihorizon/{date}/forecast_mh.csv     # MH forecast output
+│   └── output/YYYY-MM-DD_HH/                   # Timestamped hourly predictions
 ├── tijuana/dispersion/
 │   ├── lagrangian/
 │   │   ├── ensemble.json                        # Source attribution ensemble (16 candidate sources)
@@ -448,10 +432,6 @@ s3://test/
 **Why tempfile for XGBoost model loading?**
 - XGBoost requires file path (not BytesIO)
 - `S3Resource.getFile()` returns raw bytes — write to tempfile, load, delete
-
-**Why `EnsembleRegressor`/`EnsembleClassifier` in `multihorizon_trainer.py`?**
-- Pickle deserialization requires the class to be importable from a stable module path
-- Defined in `h2s.training.multihorizon_trainer` — do not move or rename
 
 **Why FORECAST_DATA_PATH for Gaussian forward forecast?**
 - `gaussian_forward_forecast` uses forecast meteorology (model_forecast.parquet), not observations

@@ -26,11 +26,6 @@ VALIDATION_PATH = 'tijuana/forecast/validation'
 STATION_MODELS_S3_BASE = 'tijuana/forecast/models/stations'
 TRAINING_SNAPSHOTS_PATH = 'tijuana/forecast/training_snapshots'
 
-# Multi-horizon forecast paths
-MH_MODELS_S3_BASE = 'tijuana/forecast/models/multihorizon'
-MH_STAGING_S3_BASE = 'tijuana/forecast/models/multihorizon/_staging'
-MH_OUTPUT_PATH = 'tijuana/forecast/multihorizon'
-
 # Pre-featurized data paths
 OBS_DATA_PATH = 'latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet'
 FORECAST_DATA_PATH = 'latest/tijuana/forecast_data/model_forecast.parquet'
@@ -43,7 +38,6 @@ H2S_CLASS_TO_INT = {'green': 0, 'orange': 1, 'yellow': 2}
 # Validation pipeline identifiers
 PIPELINE_HOURLY = "hourly"
 PIPELINE_DAILY_STATION = "daily_station"
-PIPELINE_MULTIHORIZON = "multihorizon"
 VALIDATION_SCHEMA_VERSION = 2
 
 # 4-tier risk → 3-class mapping for validation
@@ -268,15 +262,14 @@ CORE_FEATURES = [
 ]
 
 # SBIWTP effluent features — kept for backward compat with legacy deployed
-# models (their preprocessing_info.json still references these columns) and
-# for the multihorizon trainer's own backfill logic
-# (see multihorizon_trainer.py:475). NOT part of MODEL_FEATURES going forward.
+# models (their preprocessing_info.json still references these columns).
+# NOT part of MODEL_FEATURES going forward.
 SBIWTP_FEATURES = [
     'sbiwtp_flow_mgd', 'sbiwtp_anomaly', 'sbiwtp_deficit',
     'sbiwtp_flow_x_temp', 'sbiwtp_hourly_mgd', 'sbiwtp_sli',
 ]
 
-# Production 33-feature set used by per-station and per-horizon models.
+# Production 33-feature set used by per-station models.
 MODEL_FEATURES = CORE_FEATURES
 
 # 44-feature set retained for reference and legacy-model preprocessing only.
@@ -299,7 +292,6 @@ MODEL_FEATURES_LEGACY = [
     *SBIWTP_FEATURES,
 ]
 
-# Alias for multihorizon compatibility
 BASE_FEATURES = MODEL_FEATURES
 
 # ==============================================================================

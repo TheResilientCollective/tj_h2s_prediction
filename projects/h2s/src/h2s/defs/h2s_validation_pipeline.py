@@ -27,11 +27,9 @@ from h2s.constants import (
     H2S_CLASS_NAMES,
     H2S_CLASS_TO_INT,
     HOURLY_PREDICTIONS_PATH,
-    MH_OUTPUT_PATH,
     OBS_DATA_PATH,
     PIPELINE_DAILY_STATION,
     PIPELINE_HOURLY,
-    PIPELINE_MULTIHORIZON,
     RISK_TO_3CLASS,
     STATIONS,
     VALIDATION_PATH,
@@ -301,111 +299,4 @@ def daily_station_validation_report(context: AssetExecutionContext) -> dict[str,
     _write_validation_metrics(s3, date_str, PIPELINE_DAILY_STATION, payload)
 
     context.log.info(f"Wrote daily_station validation for {date_str}: {len(sites)} stations")
-    return payload
-
-
-# ---------------------------------------------------------------------------
-# Asset 3: Multi-horizon forecast validation
-# ---------------------------------------------------------------------------
-
-@dg.asset(
-    key_prefix="h2s",
-    partitions_def=forecast_daily_partitions,
-    group_name="h2s_validation",
-    required_resource_keys={"s3"},
-    kinds={"python", "s3"},
-    description="Validate multi-horizon forecasts against observations, per horizon band",
-)
-def mh_validation_report(context: AssetExecutionContext) -> dict[str, Any]:
-    s3 = context.resources.s3
-    date_str = context.partition_key
-
-    # --- Load MH predictions ---
-    mh_csv_path = f"{MH_OUTPUT_PATH}/{date_str}/forecast_mh.csv"
-    try:
-        csv_url = s3.publicUrl(path=mh_csv_path)
-        preds_df = pd.read_csv(csv_url)
-    except Exception:
-        raise dg.Failure(
-            f"No MH forecast CSV at {mh_csv_path}. Has mh_forecast_job run for {date_str}?"
-        )
-
-    preds_df["time"] = pd.to_datetime(preds_df["time"], utc=True).dt.round("h")
-    context.log.info(f"Loaded {len(preds_df)} MH predictions for {date_str}")
-
-    if len(preds_df) == 0:
-        raise dg.Failure(f"MH forecast CSV is empty for {date_str}")
-
-    # Map risk → 3-class
-    preds_df["predicted_category"] = preds_df["risk"].map(RISK_TO_3CLASS)
-
-    # Normalise station names
-    preds_df["site_key"] = preds_df["station"].map(_STATION_NAME_TO_KEY)
-
-    # --- Load observations ---
-    obs_df = _load_observations(s3, date_str)
-    context.log.info(f"Loaded {len(obs_df)} observations for {date_str}")
-
-    if len(obs_df) == 0:
-        context.log.warning(
-            f"No observation data for {date_str}. Sensors may be offline — skipping MH validation."
-        )
-        payload = _build_full_payload(date_str, PIPELINE_MULTIHORIZON, {})
-        payload["skipped"] = True
-        payload["skip_reason"] = "no_observations"
-        return payload
-
-    # --- Overall (all horizons combined) per-station ---
-    # Deduplicate: for overlapping horizon predictions at the same time, keep shorter horizon
-    deduped = preds_df.sort_values("hours_ahead").drop_duplicates(
-        subset=["time", "site_key"], keep="first"
-    )
-
-    sites: dict[str, dict[str, Any]] = {}
-    for site_name, info in STATIONS.items():
-        key = info["key"]
-        site_preds = deduped[deduped["site_key"] == key].copy()
-        site_obs = obs_df[obs_df["site_key"] == key].copy()
-
-        if len(site_preds) == 0:
-            continue
-
-        sites[key] = _build_site_metrics(site_preds, site_obs)
-
-    # --- Per-horizon breakdown ---
-    horizons = sorted(preds_df["horizon"].unique())
-    horizon_metrics: dict[str, Any] = {}
-
-    for hz in horizons:
-        hz_preds = preds_df[preds_df["horizon"] == hz]
-        # Deduplicate within this horizon
-        hz_deduped = hz_preds.sort_values("hours_ahead").drop_duplicates(
-            subset=["time", "site_key"], keep="first"
-        )
-
-        hz_sites: dict[str, dict[str, Any]] = {}
-        for site_name, info in STATIONS.items():
-            key = info["key"]
-            sp = hz_deduped[hz_deduped["site_key"] == key].copy()
-            so = obs_df[obs_df["site_key"] == key].copy()
-            if len(sp) == 0:
-                continue
-            hz_sites[key] = _build_site_metrics(sp, so)
-
-        horizon_metrics[hz] = {"sites": hz_sites}
-        context.log.info(
-            f"  horizon {hz}: {sum(m['n_matched_observations'] for m in hz_sites.values())} matched obs"
-        )
-
-    if not sites:
-        context.log.warning(f"No stations had MH predictions for {date_str} — skipping.")
-        payload = _build_full_payload(date_str, PIPELINE_MULTIHORIZON, {})
-        payload["skipped"] = True
-        payload["skip_reason"] = "no_station_predictions"
-        return payload
-
-    payload = _build_full_payload(date_str, PIPELINE_MULTIHORIZON, sites, horizon_metrics)
-    _write_validation_metrics(s3, date_str, PIPELINE_MULTIHORIZON, payload)
-
-    context.log.info(f"Wrote MH validation for {date_str}: {len(sites)} stations, {len(horizons)} horizons")
     return payload

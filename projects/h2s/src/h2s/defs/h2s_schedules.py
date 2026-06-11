@@ -67,14 +67,6 @@ from h2s.defs.h2s_daily_pipeline import (
     daily_analysis_job,
 )
 
-from h2s.defs.h2s_multihorizon_training import (
-    mh_training_job,
-    STATION_PARTITIONS as MH_STATION_PARTITIONS,
-)
-
-from h2s.defs.h2s_multihorizon_pipeline import (
-    mh_forecast_job,
-)
 from h2s.constants import SCHEDULE_6HR
 from h2s.defs.h2s_dispersion_pipeline import (
     lagrangian_source_attribution,
@@ -97,7 +89,6 @@ from h2s.defs.h2s_calibration_pipeline import (
 
 from h2s.defs.h2s_validation_pipeline import (
     daily_station_validation_report,
-    mh_validation_report,
     forecast_daily_partitions as validation_daily_partitions,
 )
 
@@ -381,47 +372,6 @@ def daily_analysis_schedule(context: dg.ScheduleEvaluationContext):
     """Trigger daily H2S analysis pipeline."""
     return dg.RunRequest(
         run_key=f"daily_analysis_{context.scheduled_execution_time.strftime('%Y-%m-%d')}",
-    )
-
-
-# ============================================================================
-# SCHEDULE 7: Multi-Horizon Training (3 AM on 1st of month)
-# ============================================================================
-
-@dg.schedule(
-    job=mh_training_job,
-    cron_schedule="0 3 1 * *",
-    description="Monthly multi-horizon training — all 3 stations on 1st of month at 3 AM UTC",
-    default_status=dg.DefaultScheduleStatus.STOPPED,
-    tags={"environment": "production", "schedule_type": "mh_training"},
-)
-def mh_training_schedule(context: dg.ScheduleEvaluationContext):
-    """Train multi-horizon models for all stations (one RunRequest per station)."""
-    return [
-        dg.RunRequest(
-            partition_key=partition_key,
-            run_key=f"mh_training_{context.scheduled_execution_time.strftime('%Y-%m')}_{partition_key}",
-            tags={"training_month": context.scheduled_execution_time.strftime('%Y-%m')},
-        )
-        for partition_key in MH_STATION_PARTITIONS.get_partition_keys()
-    ]
-
-
-# ============================================================================
-# SCHEDULE 8: Multi-Horizon Forecast (14:00 UTC daily)
-# ============================================================================
-
-@dg.schedule(
-    job=mh_forecast_job,
-    cron_schedule=SCHEDULE_6HR,
-    description="Daily multi-horizon H2S forecast (14:00 UTC / 6 AM PST)",
-    default_status=dg.DefaultScheduleStatus.STOPPED,
-    tags={"environment": "production", "schedule_type": "mh_forecast"},
-)
-def mh_forecast_schedule(context: dg.ScheduleEvaluationContext):
-    """Trigger daily multi-horizon forecast."""
-    return dg.RunRequest(
-        run_key=f"mh_forecast_{context.scheduled_execution_time.strftime('%Y-%m-%d')}",
     )
 
 
@@ -724,19 +674,6 @@ daily_station_validation_job = dg.define_asset_job(
 
 
 # ============================================================================
-# JOB 13: Multi-Horizon Validation (partitioned)
-# ============================================================================
-
-mh_validation_job = dg.define_asset_job(
-    name="mh_validation_job",
-    description="Validate multi-horizon forecasts against observations, per horizon band",
-    selection=dg.AssetSelection.assets(mh_validation_report),
-    partitions_def=validation_daily_partitions,
-    tags={"environment": "production", "pipeline": "h2s_validation"},
-)
-
-
-# ============================================================================
 # SCHEDULE 12: Daily Station Validation (9 AM UTC — 1h after hourly validation)
 # ============================================================================
 
@@ -753,24 +690,4 @@ def daily_station_validation_schedule(context: dg.ScheduleEvaluationContext):
     return dg.RunRequest(
         partition_key=yesterday_utc,
         run_key=f"daily_station_validation_{yesterday_utc}",
-    )
-
-
-# ============================================================================
-# SCHEDULE 13: Multi-Horizon Validation (9:30 AM UTC)
-# ============================================================================
-
-@dg.schedule(
-    job=mh_validation_job,
-    cron_schedule="30 9 * * *",
-    description="Multi-horizon forecast validation at 9:30 AM UTC",
-    default_status=dg.DefaultScheduleStatus.RUNNING,
-    tags={"environment": "production", "schedule_type": "validation"},
-)
-def mh_validation_schedule(context: dg.ScheduleEvaluationContext):
-    """Validate yesterday's multi-horizon forecasts against observations."""
-    yesterday_utc = (context.scheduled_execution_time - timedelta(days=1)).date().strftime("%Y-%m-%d")
-    return dg.RunRequest(
-        partition_key=yesterday_utc,
-        run_key=f"mh_validation_{yesterday_utc}",
     )

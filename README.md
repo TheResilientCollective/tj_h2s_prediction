@@ -133,7 +133,6 @@ See [tj_calibration's calibration_status.md](https://github.com/TheResilientColl
 | `daily_validation_schedule` | `0 8 * * *` | `daily_validation_job` | RUNNING |
 | `dispersion_forecast_schedule` | `0 */6 * * *` | `dispersion_forecast_job` | RUNNING |
 | `dispersion_inversion_schedule` | Mon 02:30 UTC | `dispersion_inversion_job` | STOPPED |
-| `mh_forecast_schedule` | `0 */6 * * *` | `mh_forecast_job` | STOPPED |
 | `monthly_model_training_schedule` | `0 4 1 * *` | `multi_station_training_job` | RUNNING |
 
 ---
@@ -276,7 +275,6 @@ tj_h2s_prediction/
 │   │   │   ├── h2s_dispersion_pipeline.py      # Gaussian + Lagrangian + HYSPLIT
 │   │   │   ├── h2s_calibration_pipeline.py     # Channel-snapped emission inversion
 │   │   │   ├── h2s_multi_station_training.py   # Per-station model training
-│   │   │   ├── h2s_multihorizon_*.py           # MH forecast + training (STOPPED)
 │   │   │   ├── h2s_validation_pipeline.py      # Daily metrics + monthly dashboard
 │   │   │   ├── h2s_alert_system.py             # NESTOR alert state machine
 │   │   │   ├── apcd_sensor_watch.py            # APCD multi-station event reports
@@ -287,7 +285,6 @@ tj_h2s_prediction/
 │   │   │   ├── calibration_eval.py     # Spearman + recall@threshold harness
 │   │   │   ├── feature_builder.py      # ensure_base_features (idempotent)
 │   │   │   ├── multi_station_trainer.py  # per-station train + eval + selector
-│   │   │   ├── multihorizon_trainer.py
 │   │   │   ├── model_trainer.py        # legacy single-model training
 │   │   │   └── validation.py           # metrics + comparison
 │   │   ├── reporting/                  # Weekly scorecard

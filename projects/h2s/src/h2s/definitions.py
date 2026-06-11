@@ -119,16 +119,6 @@ def defs():
         daily_analysis_job,
     )
 
-    # Import multi-horizon training pipeline assets
-    from h2s.defs.h2s_multihorizon_training import (
-        mh_training_data,
-        mh_trained_models,
-        mh_training_report,
-        mh_model_deployment,
-        mh_training_job,
-        mh_deployment_job,
-    )
-
     # Import dispersion modeling pipeline assets
     from h2s.defs.h2s_dispersion_pipeline import (
         lagrangian_source_attribution,
@@ -153,21 +143,9 @@ def defs():
         calibration_viz,
     )
 
-    # Import multi-horizon forecast pipeline assets
-    from h2s.defs.h2s_multihorizon_pipeline import (
-        mh_model_artifacts,
-        mh_observation_state,
-        mh_forecasts,
-        mh_dashboard_viz,
-        mh_summary_export,
-        mh_slack_alerts,
-        mh_forecast_job,
-    )
-
     # Import validation pipeline assets
     from h2s.defs.h2s_validation_pipeline import (
         daily_station_validation_report,
-        mh_validation_report,
     )
 
     # Import schedules and jobs
@@ -185,8 +163,6 @@ def defs():
         daily_validation_schedule,
         multi_station_training_schedule,
         daily_analysis_schedule,
-        mh_training_schedule,
-        mh_forecast_schedule,
         dispersion_inversion_job,
         dispersion_forecast_job,
         dispersion_hysplit_execution_job,
@@ -196,8 +172,6 @@ def defs():
         emissions_calibration_schedule,
         daily_station_validation_job,
         daily_station_validation_schedule,
-        mh_validation_job,
-        mh_validation_schedule,
     )
 
     # Create definitions with assets, jobs, schedules, and resources
@@ -249,21 +223,8 @@ def defs():
             calibration_viz,
             # Seed Models
             seed_models,
-            # Multi-Horizon Training Pipeline Assets
-            mh_training_data,
-            mh_trained_models,
-            mh_training_report,
-            mh_model_deployment,
-            # Multi-Horizon Forecast Pipeline Assets
-            mh_model_artifacts,
-            mh_observation_state,
-            mh_forecasts,
-            mh_dashboard_viz,
-            mh_summary_export,
-            mh_slack_alerts,
             # Validation Pipeline Assets
             daily_station_validation_report,
-            mh_validation_report,
             # Tiered Pre-Alert Assets (Tiers 1–3, forecast-based)
             tiered_alert_features,
             tier_1_scores,
@@ -288,10 +249,6 @@ def defs():
             daily_analysis_job,
             # Seed models job
             seed_models_job,
-            # Multi-horizon jobs
-            mh_training_job,
-            mh_deployment_job,
-            mh_forecast_job,
             # Dispersion jobs
             dispersion_inversion_job,
             dispersion_forecast_job,
@@ -306,7 +263,6 @@ def defs():
             tiered_alerts_job,
             # Validation jobs
             daily_station_validation_job,
-            mh_validation_job,
         ],
         schedules=[
             forecast_prediction_schedule,
@@ -315,8 +271,6 @@ def defs():
             monthly_model_training_schedule,
             multi_station_training_schedule,
             daily_analysis_schedule,
-            mh_training_schedule,
-            mh_forecast_schedule,
             # Dispersion schedules
             dispersion_inversion_schedule,
             dispersion_forecast_schedule,
@@ -324,7 +278,6 @@ def defs():
             emissions_calibration_schedule,
             # Validation schedules
             daily_station_validation_schedule,
-            mh_validation_schedule,
             # Tiered pre-alert schedule
             tiered_alerts_schedule,
         ],

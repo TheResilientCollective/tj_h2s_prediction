@@ -287,34 +287,6 @@ def overall_from_sites(site_cards: list[SiteScorecard]) -> dict[str, Any]:
     }
 
 
-def lead_time_accuracy(
-    multihorizon_preds: pd.DataFrame,
-    obs: pd.DataFrame,
-) -> list[dict[str, Any]]:
-    """For each horizon present in `multihorizon_preds`, compute balanced
-    accuracy and orange recall vs. observations."""
-    out: list[dict[str, Any]] = []
-    if "horizon" not in multihorizon_preds.columns or multihorizon_preds.empty:
-        return out
-    for horizon, group in multihorizon_preds.groupby("horizon"):
-        card = scorecard_from_predictions(group, obs, site="ALL") if (group["site_name"] == "ALL").any() else None
-        # Aggregate across sites
-        cms = [
-            scorecard_from_predictions(group, obs, site).confusion_matrix
-            for site in group["site_name"].unique()
-        ]
-        cm = combine_confusion_matrices(cms)
-        _, rec = class_precision_recall(cm, "orange")
-        out.append({
-            "horizon": horizon,
-            "balanced_accuracy": balanced_accuracy(cm),
-            "orange_recall": rec,
-            "false_alarm_rate": false_alarm_rate_for_orange(cm),
-            "n": int(np.asarray(cm).sum()),
-        })
-    return out
-
-
 def regime_slices(
     preds: pd.DataFrame,
     obs: pd.DataFrame,
@@ -432,7 +404,7 @@ def _extract_sites_dict(m: dict[str, Any]) -> dict[str, Any] | None:
 # Pipeline subdirectories to scan for per-day metrics.
 # Order matters: daily_station covers all 3 stations, so its metrics are
 # preferred.  The root path (pipeline=None) is the legacy hourly-only fallback.
-_PIPELINES_TO_SCAN: list[str | None] = ["daily_station", "multihorizon", None]
+_PIPELINES_TO_SCAN: list[str | None] = ["daily_station", None]
 
 
 def build_period_scorecard(
@@ -443,10 +415,10 @@ def build_period_scorecard(
 ) -> PeriodScorecard:
     """Aggregate per-day metrics.json into a single scorecard for [start, end].
 
-    Scans multiple pipeline subdirectories (daily_station, multihorizon, and
-    the legacy root) for each day and merges all sites found.  When a site
-    appears in more than one pipeline on the same day, daily_station takes
-    precedence (it covers all 3 stations and uses per-station models).
+    Scans multiple pipeline subdirectories (daily_station and the legacy
+    root) for each day and merges all sites found.  When a site appears in
+    more than one pipeline on the same day, daily_station takes precedence
+    (it covers all 3 stations and uses per-station models).
 
     Raises ``dg.Failure`` when no validation days are found in the window.
     """
@@ -459,7 +431,7 @@ def build_period_scorecard(
     while cur <= end:
         # Collect sites from all pipelines for this day.
         # Track which sites we've already seen so earlier pipelines in the
-        # list take precedence (daily_station > multihorizon > root).
+        # list take precedence (daily_station > root).
         seen_sites_today: set[str] = set()
 
         for pipeline in _PIPELINES_TO_SCAN:
