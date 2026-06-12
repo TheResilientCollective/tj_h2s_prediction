@@ -106,6 +106,13 @@ def defs():
         promote_station_models_job,
     )
 
+    # Import nowcast/nearcast/forecast products pipeline
+    from h2s.defs.h2s_products_pipeline import (
+        products_model_artifacts,
+        h2s_products,
+        products_forecast_job,
+    )
+
     # Import seed models job
     from h2s.defs.h2s_seed_models import (
         seed_models,
@@ -205,6 +212,9 @@ def defs():
             station_model_archive,
             station_model_deployment,
             station_model_promotion,
+            # Products pipeline (nowcast / nearcast / forecast)
+            products_model_artifacts,
+            h2s_products,
             # Daily Analysis Pipeline Assets
             multi_station_model_artifacts,
             source_attribution,
@@ -251,6 +261,8 @@ def defs():
             multi_station_training_job,
             station_deployment_job,
             promote_station_models_job,
+            # Products job
+            products_forecast_job,
             # Daily analysis job
             daily_analysis_job,
             # Seed models job

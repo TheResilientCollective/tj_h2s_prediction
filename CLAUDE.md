@@ -197,7 +197,30 @@ uv run dg launch --job dispersion_forecast_job
 
 # Dispersion modeling: Weekly Lagrangian source attribution (Monday 02:30 UTC, STOPPED by default)
 uv run dg launch --job dispersion_inversion_job
+
+# Nowcast/nearcast/forecast products: 24 leads × 3 stations × 2 variants,
+# stored to tijuana/forecast/products/run_ts=.../products.parquet (+ latest mirror).
+# Manual for now — Phase 4 wires the cascade triggers, Phase 6 the schedule.
+uv run dg launch --job products_forecast_job
 ```
+
+### The Forecast Products (nowcast / nearcast / forecast)
+
+`products_forecast_job` runs the recursive engine (`h2s/forecasting/recursive.py`)
+for every station × variant:
+
+- **nowcast** (leads 1–3): autoregressive features from actual H2S only —
+  time-true lags where observed, held at the last actual otherwise. No recursion.
+- **nearcast** (leads 4–6): recursion seeded at the last actual — each hour's
+  prediction feeds the next hour's lag/rolling features.
+- **forecast** (leads 7–24): fully recursive; by lead 7 every lag ≤6h is a
+  prediction. Honest scope: magnitude skill decays toward the exogenous
+  ceiling at this horizon — treat as a risk ranking, not ppb truth.
+
+Row schema (validation substrate): run_ts, product, station, lead_hour, time,
+variant, model_version, h2s_pred, p5, p10, p30. Missing classifiers (e.g.
+clf_30ppb before a station's first post-Phase-1 retrain) yield NaN
+probabilities, never errors.
 
 ### Re-executing a Failed daily_analysis_job
 
