@@ -151,9 +151,11 @@ def prepare_multi_station_features(df: pd.DataFrame, station: str = None) -> pd.
                     'h2s_rolling_24h', 'flow_lag_6h', 'flow_rolling_24h']:
             df.loc[m, col] = s[col].values
 
-    # Target variables
+    # Target variables — thresholds match the categorical boundaries
+    # (5 = green/yellow_low, 10 = yellow_low/yellow_high, 30 = orange watch)
     df['exceed_5'] = (df['H2S'] > 5).astype(int)
     df['exceed_10'] = (df['H2S'] > 10).astype(int)
+    df['exceed_30'] = (df['H2S'] > 30).astype(int)
 
     # Drop rows missing required features
     df = df.dropna(subset=MODEL_FEATURES).reset_index(drop=True)

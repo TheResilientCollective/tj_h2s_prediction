@@ -261,3 +261,38 @@ class TestRealXGBoostIntegration:
         # eval dicts both carry the alert keys
         for sub in (metrics["RF"], metrics["XGB"]):
             assert {"recall_30", "recall_100", "R2", "MAE"} <= set(sub.keys())
+
+
+# ---------------------------------------------------------------------------
+# exceed_30 target for clf_30ppb (Phase 1, docs/feature/rename_workplan.md)
+# ---------------------------------------------------------------------------
+
+_PARQUET_PATH = __import__("os").path.join(
+    __import__("os").path.dirname(__file__),
+    "..", "..", "..", "data", "modeldata_h2s_nofill.parquet",
+)
+
+
+@pytest.mark.skipif(
+    not __import__("os").path.exists(_PARQUET_PATH),
+    reason=f"real parquet not present at {_PARQUET_PATH}",
+)
+class TestExceed30Target:
+    """prepare_multi_station_features must emit the exceed_30 target that
+    clf_30ppb trains on — and it must equal (H2S > 30) exactly."""
+
+    def test_exceed_30_present_and_correct(self):
+        from h2s.training.multi_station_trainer import prepare_multi_station_features
+
+        raw = pd.read_parquet(_PARQUET_PATH)
+        df = prepare_multi_station_features(raw, station="NESTOR - BES")
+
+        for col in ("exceed_5", "exceed_10", "exceed_30"):
+            assert col in df.columns, f"missing target column {col}"
+
+        expected = (df["H2S"] > 30).astype(int)
+        assert (df["exceed_30"] == expected).all()
+        # Berry must have a meaningful positive count to train clf_30ppb on
+        assert df["exceed_30"].sum() > 300, (
+            f"unexpectedly few >30ppb hours at Berry: {int(df['exceed_30'].sum())}"
+        )
