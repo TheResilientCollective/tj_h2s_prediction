@@ -98,9 +98,12 @@ def defs():
         multi_station_training_data,
         per_station_trained_models,
         station_training_report,
+        station_model_archive,
         station_model_deployment,
+        station_model_promotion,
         multi_station_training_job,
         station_deployment_job,
+        promote_station_models_job,
     )
 
     # Import seed models job
@@ -199,7 +202,9 @@ def defs():
             multi_station_training_data,
             per_station_trained_models,
             station_training_report,
+            station_model_archive,
             station_model_deployment,
+            station_model_promotion,
             # Daily Analysis Pipeline Assets
             multi_station_model_artifacts,
             source_attribution,
@@ -245,6 +250,7 @@ def defs():
             # New multi-station training jobs
             multi_station_training_job,
             station_deployment_job,
+            promote_station_models_job,
             # Daily analysis job
             daily_analysis_job,
             # Seed models job
