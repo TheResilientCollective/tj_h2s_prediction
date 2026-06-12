@@ -164,6 +164,12 @@ CASCADE_TRIGGERS = {
     "tier_3": {"product": PRODUCT_FORECAST, "threshold_ppb": H2S_THRESHOLD_HIGH, "prob_cutoff": 0.5},
 }
 
+# Product-run storage. Every products run writes one parquet of rows
+# (run_ts, product, station, lead_hour, time, variant, model_version,
+# h2s_pred, p5, p10, p30) — the substrate for the Phase-5 validation store.
+PRODUCTS_PATH = 'tijuana/forecast/products'                       # + /run_ts=.../products.parquet
+PRODUCTS_LATEST_PATH = f'{LATEST_BASEPATH}/forecast_data/products_latest.parquet'
+
 # S3 path for extreme event summaries
 EXTREME_EVENT_PATH = 'tijuana/forecast/extreme_events'
 
