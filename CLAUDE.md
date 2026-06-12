@@ -58,8 +58,7 @@ tj_h2s_prediction/
 │   │   └── utils/
 │   │       └── store_assets.py  # S3 storage utilities
 │   ├── scripts/                 # Helper scripts
-│   │   ├── train_station_models.py  # Local per-station training
-│   │   └── seed_models_to_s3.py     # Seed models to S3 (also available as Dagster job)
+│   │   └── train_station_models.py  # Local per-station training (analysis only)
 │   ├── tests/                   # Test suite
 │   │   ├── conftest.py
 │   │   ├── test_h2s_pipeline.py
@@ -94,19 +93,28 @@ cd projects/h2s
 uv sync
 cp .env.example .env   # fill in S3 credentials
 
-# 1. Seed S3 with starter models (hourly pipeline + per-station daily pipeline)
+# 1. Seed S3 with the hourly starter model (trains inline from S3 training data)
 uv run dg launch --job seed_models_job
 
-# 2. Run hourly forecast pipeline
+# 2. Train + deploy per-station daily models (repeat per partition:
+#    nestor_bes / san_ysidro / ib_civic_ctr)
+uv run dg launch --job multi_station_training_job --partition nestor_bes
+uv run dg launch --job station_deployment_job --partition nestor_bes
+
+# 3. Run hourly forecast pipeline
 uv run dg launch --job forecast_prediction_job
 
-# 3. Run daily analysis (source attribution + station forecasts + dashboard)
+# 4. Run daily analysis (source attribution + station forecasts + dashboard)
 uv run dg launch --job daily_analysis_job
 ```
 
-`seed_models_job` uploads:
-- Hourly pipeline models from `data/startmodels/` → `tijuana/forecast/models/`
-- Per-station daily models from `data/models_v2/` → `tijuana/forecast/models/stations/`
+`seed_models_job` trains the hourly NESTOR 3-class model inline from S3
+training data and uploads it to `tijuana/forecast/models/`. It does NOT seed
+per-station models (step 2 is the real training pipeline — it also produces
+the Lean variant, training reports, and data snapshots) and does not seed the
+hourly variant models (`xgboost_base` / `xgboost_smote` / `random_forest` come
+from the legacy monthly training pipeline; `h2s_variant_predictions` skips
+missing variants gracefully until then).
 
 ### Rebuilding Models (new training data available)
 
@@ -268,13 +276,12 @@ uv run dg launch --assets h2s/h2s_predictions
 ```bash
 cd projects/h2s
 
-# Train per-station models locally (outputs to data/models_v2/YYYYMMDD/)
+# Train per-station models locally for inspection (outputs to data/models_v2/YYYYMMDD/)
+# NOTE: local outputs are for analysis only — seed_models_job no longer uploads
+# them. Deploy through multi_station_training_job → station_deployment_job.
 uv run python scripts/train_station_models.py \
   --obs ../../data/modeldata_h2s_nofill.parquet \
   --models ../../data/models_v2/$(date +%Y%m%d)
-
-# Then seed to S3 via Dagster:
-uv run dg launch --job seed_models_job
 ```
 
 ### Standalone Scripts

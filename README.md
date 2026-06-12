@@ -80,26 +80,31 @@ cd projects/h2s
 uv sync
 cp .env.example .env   # fill in S3 credentials
 
-# 1. Seed S3 with starter models (hourly + per-station)
+# 1. Seed S3 with the hourly starter model (trains inline from S3 training data)
 uv run dg launch --job seed_models_job
 
-# 2. Hourly forecast (auto-runs every 6 h)
+# 2. Train + deploy per-station daily models (repeat for each of
+#    nestor_bes / san_ysidro / ib_civic_ctr)
+uv run dg launch --job multi_station_training_job --partition nestor_bes
+uv run dg launch --job station_deployment_job --partition nestor_bes
+
+# 3. Hourly forecast (auto-runs every 6 h)
 uv run dg launch --job forecast_prediction_job
 
-# 3. Daily analysis (auto-runs daily)
+# 4. Daily analysis (auto-runs daily)
 uv run dg launch --job daily_analysis_job
 
-# 4. Dispersion forecast (auto-runs every 6 h)
+# 5. Dispersion forecast (auto-runs every 6 h)
 uv run dg launch --job dispersion_forecast_job
 
 # Dagster UI
 uv run dg dev   # http://localhost:3000
 ```
 
-`seed_models_job` uploads starter models for every pipeline:
-
-- `data/startmodels/` → `tijuana/forecast/models/` (hourly pipeline)
-- `data/models_v2/` → `tijuana/forecast/models/stations/` (per-station daily pipeline)
+`seed_models_job` trains the hourly NESTOR 3-class model inline from S3
+training data and uploads it. Per-station models come from the real training
+pipeline (step 2), which also produces the Lean variant, training reports,
+and data snapshots.
 
 For the full operational runbook (rebuilding, deploying, HYSPLIT worker setup), see [CLAUDE.md](CLAUDE.md).
 
@@ -312,12 +317,13 @@ tj_h2s_prediction/
 For one-off training, prediction, and visualization outside the Dagster pipeline:
 
 ```bash
-# Train per-station models locally (outputs to data/models_v2/YYYYMMDD/)
+# Train per-station models locally for inspection (outputs to data/models_v2/YYYYMMDD/)
+# Local outputs are analysis-only — deploy through multi_station_training_job
+# → station_deployment_job, not seed_models_job.
 cd projects/h2s
 uv run python scripts/train_station_models.py \
   --obs ../../data/modeldata_h2s_nofill.parquet \
   --models ../../data/models_v2/$(date +%Y%m%d)
-# Then seed to S3: uv run dg launch --job seed_models_job
 
 # Single-file prediction
 python src/predict_h2s.py --input data.csv --output predictions.csv
