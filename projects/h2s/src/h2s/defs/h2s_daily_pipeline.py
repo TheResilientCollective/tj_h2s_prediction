@@ -203,18 +203,20 @@ def _engineer_forecast_features(fc_site: pd.DataFrame, last_state: dict) -> pd.D
     description="Load all 9 per-station models (3 stations × 3 tasks) from S3",
 )
 def multi_station_model_artifacts(context: dg.AssetExecutionContext) -> dict:
-    """Load Evidence-variant regression + >5ppb + >10ppb models per station from S3.
+    """Load Evidence-variant regression + classifier models per station from S3.
 
     Returns nested dict: {station_name: {task: model}} where `task` is the
-    bare task name (regression / clf_5ppb / clf_10ppb). The daily pipeline
-    routes through the Evidence variant; Lean is deployed alongside but is
-    available for explicit opt-in (see `_VARIANT` below).
+    bare task name (regression / clf_5ppb / clf_10ppb / clf_30ppb). The
+    daily pipeline routes through the Evidence variant; Lean is deployed
+    alongside but is available for explicit opt-in (see `_VARIANT` below).
 
-    Falls back gracefully if models for a station are not yet deployed.
+    Falls back gracefully if models for a station (or an individual task,
+    e.g. clf_30ppb before the first post-Phase-1 deployment) are not yet
+    in S3.
     """
     s3 = context.resources.s3
     artifacts = {}
-    tasks = ['regression', 'clf_5ppb', 'clf_10ppb']
+    tasks = ['regression', 'clf_5ppb', 'clf_10ppb', 'clf_30ppb']
     # The variant the daily pipeline routes through. Changing this to
     # 'lean' (or a future variant) is the only edit needed to switch
     # production routing — no path-string sprawl.

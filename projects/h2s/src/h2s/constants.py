@@ -125,9 +125,37 @@ H2S_THRESHOLD_HIGH = 30  # ppb — yellow_high / orange boundary
 PROB_5_CAUTION = 0.25
 PROB_5_ALERT = 0.5
 PROB_10_ALERT = 0.5
-PROB_30_ALERT = 0.35  # p(H2S>30ppb) threshold to trigger ORANGE (used by MH pipeline)
+PROB_30_ALERT = 0.35  # p(H2S>30ppb) threshold to trigger ORANGE (legacy hourly path)
 
+# ==============================================================================
+# Forecast Products (docs/feature/rename_workplan.md)
+# ==============================================================================
+# Output naming reflects what each product honestly is: skill decays with
+# lead time because autoregressive H2S features shift from actual
+# measurements (nowcast) to the model's own predictions (forecast).
 
+PRODUCT_NOWCAST = "nowcast"      # 0–3 h  — actual H2S lags
+PRODUCT_NEARCAST = "nearcast"    # 3–6 h  — recursion seeded at last actual
+PRODUCT_FORECAST = "forecast"    # 6–24 h — fully recursive
+
+# Lead-hour windows per product: (start_inclusive, end_inclusive)
+PRODUCT_HORIZONS_H = {
+    PRODUCT_NOWCAST: (0, 3),
+    PRODUCT_NEARCAST: (3, 6),
+    PRODUCT_FORECAST: (6, 24),
+}
+
+# Compute-on-trigger cascade at NESTOR-BES. Each tier evaluates
+# P(H2S > threshold_ppb) from `product` (Evidence variant drives triggers;
+# Lean is reported alongside). Firing a tier runs the next product.
+# Cutoffs are starting points — tuned once the Phase 5 validation store
+# has accuracy data (the legacy PROB_30_ALERT was 0.35; 0.5 here is a
+# deliberate tightening).
+CASCADE_TRIGGERS = {
+    "tier_1": {"product": PRODUCT_NOWCAST,  "threshold_ppb": H2S_THRESHOLD_LOW,  "prob_cutoff": 0.5},
+    "tier_2": {"product": PRODUCT_NEARCAST, "threshold_ppb": H2S_THRESHOLD_MED,  "prob_cutoff": 0.5},
+    "tier_3": {"product": PRODUCT_FORECAST, "threshold_ppb": H2S_THRESHOLD_HIGH, "prob_cutoff": 0.5},
+}
 
 # S3 path for extreme event summaries
 EXTREME_EVENT_PATH = 'tijuana/forecast/extreme_events'

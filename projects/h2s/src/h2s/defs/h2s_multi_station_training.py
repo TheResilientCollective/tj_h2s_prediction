@@ -130,7 +130,7 @@ def _train_one_variant(
     ensemble_margin: float,
     variant_label: str,
 ) -> dict[str, tuple]:
-    """Train regression + clf_5ppb + clf_10ppb for one feature set.
+    """Train regression + clf_5ppb + clf_10ppb + clf_30ppb for one feature set.
 
     Returns dict[task → (model, choice_str)] for the current station.
     The full metrics dict is recomputed downstream by station_training_report
@@ -140,17 +140,20 @@ def _train_one_variant(
     y_cont = sdf['H2S'].values
     y_5 = sdf['exceed_5'].values
     y_10 = sdf['exceed_10'].values
+    y_30 = sdf['exceed_30'].values
 
     Xtr, Xte = X[:split], X[split:]
     ytr_c, yte_c = y_cont[:split], y_cont[split:]
     ytr_5, yte_5 = y_5[:split], y_5[split:]
     ytr_10, yte_10 = y_10[:split], y_10[split:]
+    ytr_30, yte_30 = y_30[:split], y_30[split:]
 
     result: dict[str, tuple] = {}
     for task, ytr_, yte_ in [
         ('regression', ytr_c, yte_c),
         ('clf_5ppb',   ytr_5, yte_5),
         ('clf_10ppb',  ytr_10, yte_10),
+        ('clf_30ppb',  ytr_30, yte_30),
     ]:
         context.log.info(f"  [{variant_label}] Training {task}...")
         model, choice, _ = train_and_select(
@@ -182,9 +185,15 @@ def per_station_trained_models(
 ) -> dict:
     """Train every variant in _VARIANTS for the current station partition.
 
-    Returns a flat dict, one entry per (task, variant). Both variants today:
-      regression_evidence, clf_5ppb_evidence, clf_10ppb_evidence ← 33 feat, production
-      regression_lean,     clf_5ppb_lean,     clf_10ppb_lean     ← 19 feat, parallel
+    Returns a flat dict, one entry per (task, variant). Tasks: regression,
+    clf_5ppb, clf_10ppb, clf_30ppb. Both variants today:
+      {task}_evidence ← 33 feat, production
+      {task}_lean     ← 19 feat, parallel
+
+    clf_30ppb exists to give the tiered alert cascade a calibrated
+    P(H2S > 30 ppb) — Tier 3 in docs/feature/rename_workplan.md. Positives
+    at 30 ppb are sparse outside NESTOR-BES; per-site AUC/recall in the
+    training report is the honest gauge.
 
     Both variants are deployed in parallel so reviewers can load either
     model from S3 and reproduce the comparison; see RESULTS.md for the
@@ -207,8 +216,12 @@ def per_station_trained_models(
     split = int(len(sdf) * TRAIN_FRACTION)
     y_5 = sdf['exceed_5'].values
     y_10 = sdf['exceed_10'].values
+    y_30 = sdf['exceed_30'].values
     context.log.info(f"  Records: {len(sdf):,} (train: {split:,}, test: {len(sdf)-split:,})")
-    context.log.info(f"  Exceedance: >5={y_5.mean()*100:.1f}%, >10={y_10.mean()*100:.1f}%")
+    context.log.info(
+        f"  Exceedance: >5={y_5.mean()*100:.1f}%, >10={y_10.mean()*100:.1f}%, "
+        f">30={y_30.mean()*100:.1f}% (n={int(y_30.sum())})"
+    )
 
     models: dict = {}
     choices: dict[str, dict[str, str]] = {}
@@ -296,13 +309,15 @@ def station_training_report(
     yte_c = sdf['H2S'].values[split:]
     yte_5 = sdf['exceed_5'].values[split:]
     yte_10 = sdf['exceed_10'].values[split:]
+    yte_30 = sdf['exceed_30'].values[split:]
 
     tasks_metrics: dict[str, dict] = {}
     for variant, features in _VARIANTS.items():
         suffix = f"_{variant}"
         Xte = sdf[features].values[split:]
         variant_metrics: dict[str, dict] = {}
-        for task_base, yte in [('regression', yte_c), ('clf_5ppb', yte_5), ('clf_10ppb', yte_10)]:
+        for task_base, yte in [('regression', yte_c), ('clf_5ppb', yte_5),
+                               ('clf_10ppb', yte_10), ('clf_30ppb', yte_30)]:
             model = per_station_trained_models[f"{task_base}{suffix}"]
             if task_base == 'regression':
                 m = eval_regressor(model, Xte, yte)
@@ -348,9 +363,11 @@ def station_training_report(
         "evidence_regression_r2": tasks_metrics['evidence']['regression'].get('R2'),
         "evidence_clf5_auc": tasks_metrics['evidence']['clf_5ppb'].get('AUC'),
         "evidence_clf10_auc": tasks_metrics['evidence']['clf_10ppb'].get('AUC'),
+        "evidence_clf30_auc": tasks_metrics['evidence']['clf_30ppb'].get('AUC'),
         "lean_regression_r2": tasks_metrics['lean']['regression'].get('R2'),
         "lean_clf5_auc": tasks_metrics['lean']['clf_5ppb'].get('AUC'),
         "lean_clf10_auc": tasks_metrics['lean']['clf_10ppb'].get('AUC'),
+        "lean_clf30_auc": tasks_metrics['lean']['clf_30ppb'].get('AUC'),
     })
     return report
 
@@ -450,7 +467,8 @@ def station_model_deployment(
         variants_meta[variant] = {
             'features_path': feature_files[variant],
             'n_features': len(features),
-            'models': {task: uploaded[f"{task}{suffix}"] for task in ('regression', 'clf_5ppb', 'clf_10ppb')},
+            'models': {task: uploaded[f"{task}{suffix}"]
+                       for task in ('regression', 'clf_5ppb', 'clf_10ppb', 'clf_30ppb')},
         }
 
     meta = {

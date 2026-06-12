@@ -408,9 +408,11 @@ s3://test/
 │   │   ├── stations/{station_key}/              # IB_CIVIC_CTR, NESTOR__BES, SAN_YSIDRO
 │   │   │   ├── clf_5ppb_evidence.pkl            # Evidence variant — 33 feat, production default
 │   │   │   ├── clf_10ppb_evidence.pkl
+│   │   │   ├── clf_30ppb_evidence.pkl           # P(>30ppb) for the Tier-3 cascade trigger
 │   │   │   ├── regression_evidence.pkl
 │   │   │   ├── clf_5ppb_lean.pkl                # Lean variant — 19 feat, deployed in parallel
 │   │   │   ├── clf_10ppb_lean.pkl
+│   │   │   ├── clf_30ppb_lean.pkl
 │   │   │   ├── regression_lean.pkl
 │   │   │   ├── features_evidence.json           # Evidence column schema
 │   │   │   ├── features_lean.json               # Lean column schema

@@ -144,3 +144,40 @@ class TestCalibrationDismissalsDropped:
     def test_minimal_drops_all_calibration_dismissals(self):
         kept = self._CALIBRATION_DISMISSED & set(MODEL_FEATURES_MINIMAL)
         assert not kept, f"Minimal should drop calibration-dismissed features: {kept}"
+
+
+class TestForecastProducts:
+    """Pins for the nowcast/nearcast/forecast product constants (Phase 1 of
+    docs/feature/rename_workplan.md on the feature/rename_models branch).
+    """
+
+    def test_product_horizons_cover_0_to_24(self):
+        from h2s.constants import (
+            PRODUCT_FORECAST,
+            PRODUCT_HORIZONS_H,
+            PRODUCT_NEARCAST,
+            PRODUCT_NOWCAST,
+        )
+        assert PRODUCT_HORIZONS_H[PRODUCT_NOWCAST] == (0, 3)
+        assert PRODUCT_HORIZONS_H[PRODUCT_NEARCAST] == (3, 6)
+        assert PRODUCT_HORIZONS_H[PRODUCT_FORECAST] == (6, 24)
+        # Windows chain: each product starts where the previous ends
+        assert PRODUCT_HORIZONS_H[PRODUCT_NOWCAST][1] == PRODUCT_HORIZONS_H[PRODUCT_NEARCAST][0]
+        assert PRODUCT_HORIZONS_H[PRODUCT_NEARCAST][1] == PRODUCT_HORIZONS_H[PRODUCT_FORECAST][0]
+
+    def test_cascade_triggers_ladder(self):
+        from h2s.constants import (
+            CASCADE_TRIGGERS,
+            H2S_THRESHOLD_HIGH,
+            H2S_THRESHOLD_LOW,
+            H2S_THRESHOLD_MED,
+            PRODUCT_FORECAST,
+            PRODUCT_NEARCAST,
+            PRODUCT_NOWCAST,
+        )
+        assert CASCADE_TRIGGERS["tier_1"] == {
+            "product": PRODUCT_NOWCAST, "threshold_ppb": H2S_THRESHOLD_LOW, "prob_cutoff": 0.5}
+        assert CASCADE_TRIGGERS["tier_2"] == {
+            "product": PRODUCT_NEARCAST, "threshold_ppb": H2S_THRESHOLD_MED, "prob_cutoff": 0.5}
+        assert CASCADE_TRIGGERS["tier_3"] == {
+            "product": PRODUCT_FORECAST, "threshold_ppb": H2S_THRESHOLD_HIGH, "prob_cutoff": 0.5}
