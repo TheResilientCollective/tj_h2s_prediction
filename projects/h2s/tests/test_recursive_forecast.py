@@ -8,10 +8,9 @@ used only to test mechanics — never for training or skill claims.
 Conventions under test:
 - h2s history is ordered oldest → newest; history[-1] is the last actual (t0)
 - predicting lead hour h means time t0 + h
-- recursive mode appends each prediction to the series, so lag features at
-  later leads read the model's own predictions
-- nowcast mode appends the LAST ACTUAL instead (held-persistence features —
-  "actual lags only", no recursion)
+- ONE recursive pass produces all leads: each prediction is appended to the
+  series, so lag features at later leads read the model's own predictions —
+  including inside the nowcast window (leads 2-3), per the PR #37 decision
 - short history clamps to the oldest available value (mirrors training's
   rolling(min_periods=1); training drops NaN-lag rows, inference can't)
 """
@@ -171,30 +170,36 @@ class TestRecursiveBoundary:
 
 
 # ---------------------------------------------------------------------------
-# Nowcast mode — actual lags only, no recursion
+# Nowcast window — same recursion, just the first three leads
 # ---------------------------------------------------------------------------
 
-class TestNowcastMode:
-    def test_nowcast_lag1_holds_last_actual(self):
-        out, reg = _run(_history(24), constant=77.0)
-        # Engine runs the nowcast pass AFTER the 24 recursive rows
-        nowcast_rows = reg.rows[24:]
-        assert len(nowcast_rows) == 3
-        for row in nowcast_rows:
-            assert row[_IDX["h2s_lag_1h"]] == 24.0      # never the prediction
+class TestNowcastWindow:
+    """Per the design decision on PR #37: the nowcast is NOT a separate
+    held-persistence pass — it is leads 1-3 of the single recursion. Lead 1
+    is entirely observed; leads 2-3 already read the model's predictions
+    through the short lags."""
 
-    def test_nowcast_lag3_is_time_true_where_possible(self):
+    def test_single_pass_only(self):
         out, reg = _run(_history(24), constant=77.0)
-        nowcast_rows = reg.rows[24:]
-        # lead 1: t-3 = t0-2 → a22; lead 3: t-3 = t0 → a24 (the held boundary)
-        assert nowcast_rows[0][_IDX["h2s_lag_3h"]] == 22.0
-        assert nowcast_rows[2][_IDX["h2s_lag_3h"]] == 24.0
+        # 24 scored rows total — no separate nowcast pass
+        assert len(reg.rows) == 24
 
-    def test_nowcast_rolling6_at_lead3(self):
+    def test_nowcast_lead2_lag1_is_the_prediction(self):
         out, reg = _run(_history(24), constant=77.0)
-        row = reg.rows[24 + 2]  # nowcast lead 3
-        # series = a1..a24 + [a24, a24] (held); last 6 = a21..a24, a24, a24
-        expected = np.mean([21.0, 22.0, 23.0, 24.0, 24.0, 24.0])
+        row = reg.rows[1]  # lead 2, emitted as nowcast
+        assert row[_IDX["h2s_lag_1h"]] == 77.0          # recursion inside 0-3h
+
+    def test_nowcast_lag3_is_actual_through_lead3(self):
+        out, reg = _run(_history(24), constant=77.0)
+        # lead 1: t-3 = t0-2 → a22; lead 3: t-3 = t0 → a24 (last actual)
+        assert reg.rows[0][_IDX["h2s_lag_3h"]] == 22.0
+        assert reg.rows[2][_IDX["h2s_lag_3h"]] == 24.0
+
+    def test_nowcast_rolling6_at_lead3_blends_predictions(self):
+        out, reg = _run(_history(24), constant=77.0)
+        row = reg.rows[2]  # lead 3
+        # series = a1..a24 + [p1, p2]; last 6 = a21..a24, 77, 77
+        expected = np.mean([21.0, 22.0, 23.0, 24.0, 77.0, 77.0])
         assert row[_IDX["h2s_rolling_6h"]] == pytest.approx(expected)
 
 

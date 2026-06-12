@@ -1,18 +1,17 @@
 """Recursive inference engine for the nowcast / nearcast / forecast products.
 
-The three products differ only in how the autoregressive H₂S features are
-constructed (docs/feature/rename.md):
+One recursive pass produces all three products (docs/feature/rename.md);
+they differ only in how far the recursion has drifted from observed data:
 
-- **nowcast** (leads 1–3): "actual lags only". Features are time-true where
-  the lag reaches back into observed history, and held at the last actual
-  where it would need an unobserved hour. No recursion — the model's own
-  predictions never feed back.
-- **nearcast** (leads 4–6): recursion seeded at the last actual. Each hour's
-  prediction is appended to the series, so later leads read earlier
-  predictions through their lag/rolling features.
-- **forecast** (leads 7–24): same recursion, but by lead 7 every lag ≤ 6 h
-  is a prediction and the rolling windows are mostly predictions —
-  "all forecasted h2s as features".
+- **nowcast** (leads 1–3): recursion seeded at the last actual. Lead 1's
+  features are entirely observed; by lead 3 the 1–2 h lags are the model's
+  own predictions, but the longer lags and most of the rolling windows are
+  still actuals.
+- **nearcast** (leads 4–6): the mid-window — lag_3h crosses into
+  predictions at lead 4.
+- **forecast** (leads 7–24): by lead 7 every lag ≤ 6 h is a prediction and
+  the rolling windows are mostly predictions — "all forecasted h2s as
+  features".
 
 Honest scope (inherited from the tj_calibration arc): recursion compounds
 error, and at the forecast tier magnitude skill is bounded by the exogenous
@@ -20,13 +19,13 @@ ceiling (Spearman ≈ 0.33 on calm-night extremes). The forecast product is a
 risk-ranker at that horizon; the Phase-5 validation store measures exactly
 how fast skill decays per lead hour.
 
-Mechanics — both modes share one primitive: a value series ordered
-oldest → newest where ``series[-1]`` is the value one hour before the hour
-being predicted. The recursive pass appends each prediction; the nowcast
-pass appends the last actual (held persistence). ``autoregressive_features``
-then reads lags and rolling means off the series tail, clamping to the
-oldest value when history is short (training drops NaN-lag rows; inference
-cannot, so the clamp mirrors rolling(min_periods=1) behaviour).
+Mechanics: a value series ordered oldest → newest where ``series[-1]`` is
+the value one hour before the hour being predicted. Each hour's prediction
+is appended to the series before the next hour is scored.
+``autoregressive_features`` reads lags and rolling means off the series
+tail, clamping to the oldest value when history is short (training drops
+NaN-lag rows; inference cannot, so the clamp mirrors rolling(min_periods=1)
+behaviour).
 """
 
 from __future__ import annotations
@@ -151,11 +150,10 @@ def run_products(
 
     rows: list[dict] = []
 
-    # --- Recursive pass (nearcast + forecast windows) ----------------------
-    # Runs from lead 1 so the recursion is seeded at the last actual, but
-    # only emits leads outside the nowcast window.
+    # Single recursive pass, seeded at the last actual. Every lead's
+    # prediction joins the series before the next lead is scored; product
+    # labels are just window slices of the same recursion.
     series = list(h2s_history)
-    nowcast_end = PRODUCT_HORIZONS_H[PRODUCT_NOWCAST][1]
     for lead_idx in range(n_hours):
         lead = lead_idx + 1
         ar = autoregressive_features(series)
@@ -163,7 +161,7 @@ def run_products(
         series.append(h2s_pred)
 
         product = _product_for_lead(lead)
-        if product is not None and lead > nowcast_end:
+        if product is not None:
             rows.append({
                 "lead_hour": lead,
                 "time": feature_frame.iloc[lead_idx]["time"],
@@ -171,23 +169,6 @@ def run_products(
                 "h2s_pred": round(h2s_pred, 2),
                 "p5": p5, "p10": p10, "p30": p30,
             })
-
-    # --- Nowcast pass (actual lags only, held at last actual) --------------
-    last_actual = float(h2s_history[-1])
-    series = list(h2s_history)
-    for lead_idx in range(min(nowcast_end, n_hours)):
-        lead = lead_idx + 1
-        ar = autoregressive_features(series)
-        h2s_pred, p5, p10, p30 = _predict_one(models, feature_frame, lead_idx, ar, feature_cols)
-        series.append(last_actual)  # hold — predictions never feed back
-
-        rows.append({
-            "lead_hour": lead,
-            "time": feature_frame.iloc[lead_idx]["time"],
-            "product": PRODUCT_NOWCAST,
-            "h2s_pred": round(h2s_pred, 2),
-            "p5": p5, "p10": p10, "p30": p30,
-        })
 
     out = pd.DataFrame(rows).sort_values("lead_hour").reset_index(drop=True)
     return out
