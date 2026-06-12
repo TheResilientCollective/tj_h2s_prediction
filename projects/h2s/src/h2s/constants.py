@@ -141,8 +141,11 @@ PROB_30_ALERT = 0.35  # p(H2S>30ppb) threshold to trigger ORANGE (legacy hourly 
 # lead time because autoregressive H2S features shift from actual
 # measurements (nowcast) to the model's own predictions (forecast).
 
-PRODUCT_NOWCAST = "nowcast"      # 0–3 h  — actual H2S lags
-PRODUCT_NEARCAST = "nearcast"    # 3–6 h  — recursion seeded at last actual
+# All three products are window slices of ONE recursion seeded at the last
+# actual H2S observation (PR #37 decision): nowcast leads still read mostly
+# observed lags, forecast leads read almost entirely predicted ones.
+PRODUCT_NOWCAST = "nowcast"      # 0–3 h  — lags mostly actual
+PRODUCT_NEARCAST = "nearcast"    # 3–6 h  — lag_3h crosses into predictions
 PRODUCT_FORECAST = "forecast"    # 6–24 h — fully recursive
 
 # Lead-hour windows per product: (start_inclusive, end_inclusive)

@@ -209,13 +209,17 @@ uv run dg launch --job products_forecast_job
 `products_forecast_job` runs the recursive engine (`h2s/forecasting/recursive.py`)
 for every station × variant:
 
-- **nowcast** (leads 1–3): autoregressive features from actual H2S only —
-  time-true lags where observed, held at the last actual otherwise. No recursion.
-- **nearcast** (leads 4–6): recursion seeded at the last actual — each hour's
-  prediction feeds the next hour's lag/rolling features.
-- **forecast** (leads 7–24): fully recursive; by lead 7 every lag ≤6h is a
-  prediction. Honest scope: magnitude skill decays toward the exogenous
-  ceiling at this horizon — treat as a risk ranking, not ppb truth.
+One recursive pass produces all three products — they are window slices of
+the same recursion, distinguished by how far it has drifted from observed data:
+
+- **nowcast** (leads 1–3): recursion seeded at the last actual. Lead 1 is
+  entirely observed; by lead 3 the short lags are predictions but the longer
+  lags and rolling windows are still mostly actuals.
+- **nearcast** (leads 4–6): the mid-window — lag_3h crosses into predictions
+  at lead 4.
+- **forecast** (leads 7–24): by lead 7 every lag ≤6h is a prediction.
+  Honest scope: magnitude skill decays toward the exogenous ceiling at this
+  horizon — treat as a risk ranking, not ppb truth.
 
 Row schema (validation substrate): run_ts, product, station, lead_hour, time,
 variant, model_version, h2s_pred, p5, p10, p30. Missing classifiers (e.g.
