@@ -133,11 +133,16 @@ No approval gate is required — `station_deployment_job` acts as the explicit a
 cd projects/h2s
 
 # 1. Train per-station models (partitioned: san_ysidro, nestor_bes, ib_civic_ctr)
-#    Runs multi_station_training_data → per_station_trained_models → station_training_report
+#    Runs multi_station_training_data → per_station_trained_models →
+#    station_training_report → station_model_archive
+#    The archive asset writes an IMMUTABLE version to
+#    models/archive/stations/{KEY}/{version}/ and posts a new-vs-production
+#    comparison to Slack with a promote/review recommendation.
 uv run dg launch --job multi_station_training_job --partition <station>
 # Repeat for each of nestor_bes / san_ysidro / ib_civic_ctr.
 
-# 2. Review training metrics in Dagster UI (station_training_report asset metadata)
+# 2. Review training metrics in Dagster UI (station_training_report asset
+#    metadata) and/or the Slack promotion report.
 
 # 3. Deploy to S3 (this IS the approval — running this job means you approve)
 uv run dg launch --job station_deployment_job --partition <station>
@@ -150,9 +155,31 @@ uv run dg launch --job station_deployment_job --partition <station>
 uv run dg launch --job daily_analysis_job
 ```
 
-**Important:** `multi_station_training_job` stores models in Dagster's IO only.
-`station_deployment_job` uploads them to S3 where the daily pipeline reads from.
-Running `daily_analysis_job` after training but before deployment will use the previously deployed models.
+**Important:** `multi_station_training_job` stores models in Dagster's IO only
+(plus the immutable S3 archive). `station_deployment_job` uploads them to the
+production prefix where the daily pipeline reads from. Running
+`daily_analysis_job` after training but before deployment will use the
+previously deployed models.
+
+### Promoting an Archived Model Version (human-in-the-loop)
+
+The monthly retraining flow archives every run WITHOUT touching production,
+posts the comparison to Slack, and waits for a human:
+
+```bash
+# Promote the version named in the Slack report (running this IS the approval):
+uv run dg launch --job promote_station_models_job --partition nestor_bes \
+  --config-json '{"ops":{"h2s__station_model_promotion":{"config":{"version_tag":"20260612T214639Z-0f024ab"}}}}'
+
+# Or promote the latest archived version for a station:
+uv run dg launch --job promote_station_models_job --partition nestor_bes
+```
+
+Promotion copies all model pickles + feature schemas + training_report.json
+from the archive to production and stamps `model_version` into
+`deployment_metadata.json`. Every daily-pipeline forecast row carries that
+`model_version`, so any analysis can be replayed against the exact archived
+models that produced it (`models/archive/stations/{KEY}/{version}/`).
 
 ### Running the Forecast Pipelines
 
@@ -416,8 +443,11 @@ s3://test/
 │   │   │   ├── regression_lean.pkl
 │   │   │   ├── features_evidence.json           # Evidence column schema
 │   │   │   ├── features_lean.json               # Lean column schema
-│   │   │   ├── deployment_metadata.json         # `variants` key lists both
+│   │   │   ├── deployment_metadata.json         # `variants` + `model_version`
 │   │   │   └── training_report.json             # metrics for both variants
+│   │   └── archive/stations/{station_key}/{version_tag}/  # immutable version history
+│   │       └── (same artifact set + archive_metadata.json; version_tag =
+│   │            YYYYMMDDTHHMMSSZ-{gitsha}, never overwritten)
 │   └── output/YYYY-MM-DD_HH/                   # Timestamped hourly predictions
 ├── tijuana/dispersion/
 │   ├── lagrangian/
