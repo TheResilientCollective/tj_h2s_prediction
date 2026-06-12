@@ -2,6 +2,15 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Session Rules
+
+- **Do all branch work in a git worktree.** Use `EnterWorktree` at the start of
+  any task that creates commits or switches branches — never check out branches
+  in the main working copy (`tj_h2s_prediction/`); it is the user's active
+  checkout. The user also keeps manual worktrees as sibling directories
+  (`tj_h2s_prediction-<name>`); when asked to work in one of those, `cd` to it
+  directly.
+
 ## Repository Overview
 
 This is an H2S (Hydrogen Sulfide) prediction system for the Tijuana River region, covering three monitoring stations: IB_CIVIC_CTR, NESTOR__BES, and SAN_YSIDRO. The repository contains two implementations:
