@@ -1,0 +1,12 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="build/Dockerfile_workflows" type="docker-deploy" factoryName="dockerfile" server-name="Docker">
+    <deployment type="dockerfile">
+      <settings>
+        <option name="containerName" value="" />
+        <option name="contextFolderPath" value="." />
+        <option name="sourceFilePath" value="build/Dockerfile_workflows" />
+      </settings>
+    </deployment>
+    <method v="2" />
+  </configuration>
+</component>

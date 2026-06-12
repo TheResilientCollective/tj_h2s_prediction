@@ -1,0 +1,12 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="build/Dockerfile_hysplit_worker" type="docker-deploy" factoryName="dockerfile" server-name="Docker">
+    <deployment type="dockerfile">
+      <settings>
+        <option name="containerName" value="" />
+        <option name="contextFolderPath" value="." />
+        <option name="sourceFilePath" value="build/Dockerfile_hysplit_worker" />
+      </settings>
+    </deployment>
+    <method v="2" />
+  </configuration>
+</component>
