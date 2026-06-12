@@ -141,8 +141,11 @@ PROB_30_ALERT = 0.35  # p(H2S>30ppb) threshold to trigger ORANGE (legacy hourly 
 # lead time because autoregressive H2S features shift from actual
 # measurements (nowcast) to the model's own predictions (forecast).
 
-PRODUCT_NOWCAST = "nowcast"      # 0–3 h  — actual H2S lags
-PRODUCT_NEARCAST = "nearcast"    # 3–6 h  — recursion seeded at last actual
+# All three products are window slices of ONE recursion seeded at the last
+# actual H2S observation (PR #37 decision): nowcast leads still read mostly
+# observed lags, forecast leads read almost entirely predicted ones.
+PRODUCT_NOWCAST = "nowcast"      # 0–3 h  — lags mostly actual
+PRODUCT_NEARCAST = "nearcast"    # 3–6 h  — lag_3h crosses into predictions
 PRODUCT_FORECAST = "forecast"    # 6–24 h — fully recursive
 
 # Lead-hour windows per product: (start_inclusive, end_inclusive)
@@ -163,6 +166,12 @@ CASCADE_TRIGGERS = {
     "tier_2": {"product": PRODUCT_NEARCAST, "threshold_ppb": H2S_THRESHOLD_MED,  "prob_cutoff": 0.5},
     "tier_3": {"product": PRODUCT_FORECAST, "threshold_ppb": H2S_THRESHOLD_HIGH, "prob_cutoff": 0.5},
 }
+
+# Product-run storage. Every products run writes one parquet of rows
+# (run_ts, product, station, lead_hour, time, variant, model_version,
+# h2s_pred, p5, p10, p30) — the substrate for the Phase-5 validation store.
+PRODUCTS_PATH = 'tijuana/forecast/products'                       # + /run_ts=.../products.parquet
+PRODUCTS_LATEST_PATH = f'{LATEST_BASEPATH}/forecast_data/products_latest.parquet'
 
 # S3 path for extreme event summaries
 EXTREME_EVENT_PATH = 'tijuana/forecast/extreme_events'
