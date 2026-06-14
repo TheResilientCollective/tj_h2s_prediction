@@ -26,6 +26,13 @@ VALIDATION_PATH = 'tijuana/forecast/validation'
 STATION_MODELS_S3_BASE = 'tijuana/forecast/models/stations'
 TRAINING_SNAPSHOTS_PATH = 'tijuana/forecast/training_snapshots'
 
+# Immutable per-station model versions. Every training run archives to
+# {STATION_MODELS_ARCHIVE_BASE}/{station_key}/{version_tag}/ and the
+# production prefix (STATION_MODELS_S3_BASE) is updated by deployment or
+# by promote_station_models_job. Old versions stay forever so any past
+# analysis can be replayed against the exact models that produced it.
+STATION_MODELS_ARCHIVE_BASE = 'tijuana/forecast/models/archive/stations'
+
 # Pre-featurized data paths
 OBS_DATA_PATH = 'latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet'
 FORECAST_DATA_PATH = 'latest/tijuana/forecast_data/model_forecast.parquet'

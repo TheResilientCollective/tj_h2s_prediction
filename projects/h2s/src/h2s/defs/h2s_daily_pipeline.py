@@ -246,6 +246,16 @@ def multi_station_model_artifacts(context: dg.AssetExecutionContext) -> dict:
         except Exception:
             context.log.info(f"  ⚠ {site_name} / features_{_VARIANT}.json not found, will use MODEL_FEATURES default")
 
+        # Model version from deployment metadata — stamped into every
+        # prediction-run output so analyses can be replayed against the
+        # exact archived models that produced them.
+        try:
+            meta_bytes = s3.getFile(path=f"{base_path}/deployment_metadata.json", bucket=s3.S3_BUCKET)
+            station_models['_model_version'] = json.loads(meta_bytes.decode('utf-8')).get(
+                'model_version', 'unversioned')
+        except Exception:
+            station_models['_model_version'] = 'unversioned'
+
         if station_models:
             artifacts[site_name] = station_models
 
@@ -253,6 +263,7 @@ def multi_station_model_artifacts(context: dg.AssetExecutionContext) -> dict:
     context.add_output_metadata({
         "stations_loaded": list(artifacts.keys()),
         "tasks_per_station": {s: list(m.keys()) for s, m in artifacts.items()},
+        "model_versions": {s: m.get('_model_version') for s, m in artifacts.items()},
     })
     return artifacts
 
@@ -490,6 +501,7 @@ def daily_station_forecasts(
                 'flow': round(float(sfc[FLOW_COL].iloc[i]) if FLOW_COL in sfc.columns else 2.0, 2),
                 'is_night': is_night,
                 'aligned_source': aligned,
+                'model_version': station_models.get('_model_version', 'unversioned'),
             })
 
     forecast_df = pd.DataFrame(results)
@@ -847,6 +859,13 @@ def daily_summary_json(
         'stations': {},
         'forecast_24h': {},
         'active_sources': {},
+        # Which archived model version produced each station's forecast —
+        # lets any consumer replay the analysis against the exact models.
+        'model_versions': (
+            {s: str(v) for s, v in
+             fc_df.groupby('station')['model_version'].first().items()}
+            if 'model_version' in getattr(fc_df, 'columns', []) else {}
+        ),
     }
 
     # Per-station observation summary (last 24h)

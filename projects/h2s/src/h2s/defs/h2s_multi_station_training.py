@@ -13,8 +13,11 @@ Uploaded to S3 at:
 
 import io
 import json
+import os
 import pickle
+import subprocess
 from datetime import datetime, timezone
+from pathlib import Path
 
 import dagster as dg
 import numpy as np
@@ -23,6 +26,7 @@ import pandas as pd
 from h2s.constants import (
     MODEL_FEATURES,
     MODEL_FEATURES_LEAN,
+    STATION_MODELS_ARCHIVE_BASE,
     STATION_MODELS_S3_BASE,
     STATION_PARTITION_MAP,
     STATIONS,
@@ -52,6 +56,149 @@ STATION_PARTITIONS = dg.StaticPartitionsDefinition(
 )
 
 _KEY = lambda name: dg.AssetKey(["h2s", name])
+
+_TASKS = ('regression', 'clf_5ppb', 'clf_10ppb', 'clf_30ppb')
+
+
+# ==============================================================================
+# Model versioning helpers
+# ==============================================================================
+
+def _git_short_sha() -> str:
+    """Short git sha of the running code, or a fallback for git-less deploys."""
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parent,
+            text=True, stderr=subprocess.DEVNULL,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return os.environ.get("GIT_SHA", "unknown")[:12] or "unknown"
+
+
+def make_version_tag(now: datetime | None = None, sha: str | None = None) -> str:
+    """Lexically-sortable model version: 20260612T213000Z-a1b2c3d.
+
+    Sorting version tags as strings sorts them chronologically, which is what
+    `station_model_promotion` relies on to resolve "latest".
+    """
+    now = now or datetime.now(timezone.utc)
+    sha = sha or _git_short_sha()
+    return f"{now.strftime('%Y%m%dT%H%M%SZ')}-{sha}"
+
+
+def _station_artifact_names() -> list[str]:
+    """Every file that constitutes one station's deployed model set."""
+    names = [f"{task}_{variant}.pkl" for variant in _VARIANTS for task in _TASKS]
+    names += [f"features_{variant}.json" for variant in _VARIANTS]
+    return names
+
+
+# Headline metrics for the new-vs-production promotion comparison.
+# (metric_path, higher_is_better); regression recalls are the
+# calibration-aligned alert metrics, AUCs cover the classifier ladder.
+_COMPARISON_METRICS = [
+    ("regression.R2", True),
+    ("regression.recall_5", True),
+    ("regression.recall_10", True),
+    ("regression.recall_30", True),
+    ("regression.recall_100", True),
+    ("clf_5ppb.AUC", True),
+    ("clf_10ppb.AUC", True),
+    ("clf_30ppb.AUC", True),
+]
+
+# A metric "regresses" if it drops more than this vs production.
+_PROMOTION_TOLERANCE = 0.02
+
+
+def _metric_lookup(report_tasks: dict, variant: str, path: str):
+    """Fetch tasks[variant][task][metric] from a training report, or None."""
+    task, metric = path.split(".", 1)
+    try:
+        value = report_tasks[variant][task][metric]
+    except (KeyError, TypeError):
+        return None
+    return float(value) if value is not None else None
+
+
+def compare_training_reports(new_report: dict, prod_report: dict | None,
+                             variant: str = "evidence") -> dict:
+    """Compare a fresh training report against the production one.
+
+    Returns {"metrics": [{name, new, prod, delta}], "n_improved",
+    "n_regressed", "recommendation", "reason"}. With no production baseline
+    the recommendation is to promote (nothing to lose).
+    """
+    if prod_report is None:
+        return {
+            "metrics": [],
+            "n_improved": 0,
+            "n_regressed": 0,
+            "recommendation": "promote",
+            "reason": "no production baseline found — nothing to compare against",
+        }
+
+    rows = []
+    n_improved = 0
+    n_regressed = 0
+    for path, _higher_better in _COMPARISON_METRICS:
+        new_v = _metric_lookup(new_report.get("tasks", {}), variant, path)
+        prod_v = _metric_lookup(prod_report.get("tasks", {}), variant, path)
+        if new_v is None or prod_v is None:
+            continue
+        delta = new_v - prod_v
+        rows.append({"name": path, "new": round(new_v, 4),
+                     "prod": round(prod_v, 4), "delta": round(delta, 4)})
+        if delta > 0:
+            n_improved += 1
+        if delta < -_PROMOTION_TOLERANCE:
+            n_regressed += 1
+
+    if not rows:
+        recommendation, reason = "review", "no comparable metrics between reports"
+    elif n_regressed == 0:
+        recommendation = "promote"
+        reason = (f"{n_improved}/{len(rows)} headline metrics improved, "
+                  f"none regressed beyond {_PROMOTION_TOLERANCE}")
+    else:
+        recommendation = "review"
+        worst = min(rows, key=lambda r: r["delta"])
+        reason = (f"{n_regressed} metric(s) regressed beyond {_PROMOTION_TOLERANCE} "
+                  f"(worst: {worst['name']} {worst['delta']:+.3f}) — human judgement needed")
+
+    return {"metrics": rows, "n_improved": n_improved,
+            "n_regressed": n_regressed,
+            "recommendation": recommendation, "reason": reason}
+
+
+def build_promotion_message(site_name: str, partition: str, version_tag: str,
+                            comparison: dict, env_label: str = "") -> str:
+    """Slack text for the post-training promotion decision."""
+    label = f" [{env_label}]" if env_label else ""
+    lines = [
+        f"*H2S model training complete{label}* — {site_name}",
+        f"Archived as version `{version_tag}`",
+        "",
+    ]
+    if comparison["metrics"]:
+        lines.append("*New vs production (evidence variant):*")
+        for row in comparison["metrics"]:
+            arrow = "▲" if row["delta"] > 0 else ("▼" if row["delta"] < 0 else "→")
+            lines.append(
+                f"  {arrow} {row['name']}: {row['new']:.3f} (prod {row['prod']:.3f}, {row['delta']:+.3f})"
+            )
+        lines.append("")
+    lines.append(f"*Recommendation: {comparison['recommendation'].upper()}* — {comparison['reason']}")
+    lines.append("")
+    lines.append("To promote this version to production:")
+    lines.append(
+        "```uv run dg launch --job promote_station_models_job "
+        f"--partition {partition} "
+        "--config-json '{\"ops\":{\"h2s__station_model_promotion\":"
+        f"{{\"config\":{{\"version_tag\":\"{version_tag}\"}}}}}}'```"
+    )
+    return "\n".join(lines)
 
 
 # ==============================================================================
@@ -373,6 +520,123 @@ def station_training_report(
 
 
 # ==============================================================================
+# Asset 3b: Immutable model archive + Slack promotion report
+# ==============================================================================
+
+@dg.asset(
+    key_prefix="h2s",
+    group_name="h2s_multi_station_training",
+    partitions_def=STATION_PARTITIONS,
+    required_resource_keys={"s3", "slack"},
+    kinds={"python", "s3"},
+    description="Archive trained models to a versioned S3 prefix + Slack promotion report",
+    ins={
+        "per_station_trained_models": dg.AssetIn(key=_KEY("per_station_trained_models")),
+        "station_training_report": dg.AssetIn(key=_KEY("station_training_report")),
+    },
+    config_schema={
+        "post_to_slack": dg.Field(
+            bool, default_value=True,
+            description="Post the new-vs-production comparison to Slack",
+        ),
+    },
+)
+def station_model_archive(
+    context: dg.AssetExecutionContext,
+    per_station_trained_models: dict,
+    station_training_report: dict,
+) -> dict:
+    """Write this training run to an immutable versioned archive.
+
+    Every run lands at {STATION_MODELS_ARCHIVE_BASE}/{station_key}/{version}/
+    regardless of whether it is ever promoted — so any past analysis can be
+    replayed against the exact models that produced it. Production is NOT
+    touched here; that happens via station_model_deployment (direct) or
+    promote_station_models_job (from this archive, human-in-the-loop).
+
+    Also posts the new-vs-production metric comparison to Slack with a
+    promote/review recommendation and the exact promote command.
+    """
+    partition = context.partition_key
+    site_name = STATION_PARTITION_MAP[partition]
+    s3 = context.resources.s3
+    station_key = STATIONS[site_name]['key']
+
+    version_tag = make_version_tag()
+    archive_base = f"{STATION_MODELS_ARCHIVE_BASE}/{station_key}/{version_tag}"
+    context.log.info(f"Archiving {site_name} models as version {version_tag}")
+
+    # Model pickles
+    for name, model in per_station_trained_models.items():
+        s3.putFile(pickle.dumps(model), f"{archive_base}/{name}.pkl",
+                   bucket=s3.S3_BUCKET, content_type='application/octet-stream')
+    # Feature schemas
+    for variant, features in _VARIANTS.items():
+        s3.putFile(json.dumps(features, indent=2).encode('utf-8'),
+                   f"{archive_base}/features_{variant}.json",
+                   bucket=s3.S3_BUCKET, content_type='application/json')
+    # Training report (makes the version self-describing for replays)
+    s3.putFile(json.dumps(station_training_report, indent=2, default=str).encode('utf-8'),
+               f"{archive_base}/training_report.json",
+               bucket=s3.S3_BUCKET, content_type='application/json')
+    # Archive metadata
+    archive_meta = {
+        "model_version": version_tag,
+        "archived_at": datetime.now(timezone.utc).isoformat(),
+        "git_sha": _git_short_sha(),
+        "station": site_name,
+        "partition": partition,
+        "artifacts": _station_artifact_names(),
+    }
+    s3.putFile(json.dumps(archive_meta, indent=2).encode('utf-8'),
+               f"{archive_base}/archive_metadata.json",
+               bucket=s3.S3_BUCKET, content_type='application/json')
+    context.log.info(f"✓ Archived {len(per_station_trained_models) + 4} files → {archive_base}")
+
+    # Compare against the production training report (if any)
+    prod_report = None
+    try:
+        prod_bytes = s3.getFile(
+            path=f"{STATION_MODELS_S3_BASE}/{station_key}/training_report.json",
+            bucket=s3.S3_BUCKET)
+        prod_report = json.loads(prod_bytes.decode('utf-8'))
+    except Exception:
+        context.log.info("No production training report found — first deployment?")
+
+    comparison = compare_training_reports(station_training_report, prod_report)
+    context.log.info(
+        f"Comparison vs production: {comparison['recommendation'].upper()} — {comparison['reason']}"
+    )
+
+    message = build_promotion_message(
+        site_name, partition, version_tag, comparison,
+        env_label=os.environ.get("ENV_LABEL", ""),
+    )
+    if context.op_config["post_to_slack"]:
+        try:
+            slack = context.resources.slack
+            slack.get_client().chat_postMessage(channel=slack.channel, text=message)
+            context.log.info("✓ Posted promotion report to Slack")
+        except Exception as e:
+            context.log.warning(f"Could not post to Slack: {e}")
+    else:
+        context.log.info(f"Slack posting disabled; message would have been:\n{message}")
+
+    context.add_output_metadata({
+        "model_version": version_tag,
+        "archive_prefix": archive_base,
+        "recommendation": comparison["recommendation"],
+        "n_improved": comparison["n_improved"],
+        "n_regressed": comparison["n_regressed"],
+    })
+    return {
+        "model_version": version_tag,
+        "archive_prefix": archive_base,
+        "comparison": comparison,
+    }
+
+
+# ==============================================================================
 # Asset 4: Model deployment gate (manual approval + S3 upload)
 # ==============================================================================
 
@@ -383,7 +647,10 @@ def station_training_report(
     required_resource_keys={"s3"},
     kinds={"python", "s3"},
     description="Manual approval gate → upload station models to S3 production path",
-    ins={"per_station_trained_models": dg.AssetIn(key=_KEY("per_station_trained_models"))},
+    ins={
+        "per_station_trained_models": dg.AssetIn(key=_KEY("per_station_trained_models")),
+        "station_model_archive": dg.AssetIn(key=_KEY("station_model_archive")),
+    },
     config_schema={
         "approve_deployment": dg.Field(
             bool,
@@ -399,6 +666,7 @@ def station_training_report(
 def station_model_deployment(
     context: dg.AssetExecutionContext,
     per_station_trained_models: dict,
+    station_model_archive: dict,
 ) -> dict:
     """Upload trained station models to S3 (default) or dry-run.
 
@@ -471,10 +739,13 @@ def station_model_deployment(
                        for task in ('regression', 'clf_5ppb', 'clf_10ppb', 'clf_30ppb')},
         }
 
+    model_version = station_model_archive.get("model_version", "unversioned")
     meta = {
         'deployed_at': datetime.now(timezone.utc).isoformat(),
         'station': site_name,
         'partition': partition,
+        'model_version': model_version,
+        'archive_prefix': station_model_archive.get("archive_prefix"),
         'variants': variants_meta,
     }
     meta_path = f"{base_path}/deployment_metadata.json"
@@ -488,11 +759,115 @@ def station_model_deployment(
     context.add_output_metadata({
         "status": "deployed",
         "station": site_name,
+        "model_version": model_version,
         "models_uploaded": list(uploaded.keys()),
         "variants": list(_VARIANTS.keys()),
         "s3_base_path": base_path,
     })
-    return {"status": "deployed", "station": site_name, "models": uploaded, "variants": list(_VARIANTS.keys())}
+    return {"status": "deployed", "station": site_name, "model_version": model_version,
+            "models": uploaded, "variants": list(_VARIANTS.keys())}
+
+
+# ==============================================================================
+# Asset 5: Promote an archived version to production (human-in-the-loop)
+# ==============================================================================
+
+@dg.asset(
+    key_prefix="h2s",
+    group_name="h2s_multi_station_training",
+    partitions_def=STATION_PARTITIONS,
+    required_resource_keys={"s3"},
+    kinds={"python", "s3"},
+    description="Copy an archived model version to the production prefix",
+    config_schema={
+        "version_tag": dg.Field(
+            str, default_value="",
+            description=(
+                "Archive version to promote (e.g. 20260612T213000Z-a1b2c3d). "
+                "Empty = latest version in the archive for this station."
+            ),
+        ),
+    },
+)
+def station_model_promotion(context: dg.AssetExecutionContext) -> dict:
+    """Promote an archived model version to production.
+
+    This is the human-in-the-loop approval for the monthly retrain flow:
+    training archives every run and posts a comparison to Slack; a human
+    reviews and runs promote_station_models_job with the version tag from
+    the Slack message. Running this job IS the approval.
+
+    Copies all model pickles + feature schemas + training_report.json from
+    {STATION_MODELS_ARCHIVE_BASE}/{station_key}/{version}/ to the production
+    prefix, then rewrites production deployment_metadata.json with the
+    promoted model_version.
+    """
+    partition = context.partition_key
+    site_name = STATION_PARTITION_MAP[partition]
+    s3 = context.resources.s3
+    station_key = STATIONS[site_name]['key']
+
+    archive_root = f"{STATION_MODELS_ARCHIVE_BASE}/{station_key}/"
+    version_tag = context.op_config["version_tag"]
+
+    if not version_tag:
+        # Resolve latest: version tags are lexically sortable by design
+        prefixes = [
+            obj.object_name for obj in s3.listPath(path=archive_root, bucket=s3.S3_BUCKET)
+            if obj.object_name.endswith('/')
+        ]
+        versions = sorted(p.rstrip('/').rsplit('/', 1)[-1] for p in prefixes)
+        if not versions:
+            raise dg.Failure(f"No archived versions found under {archive_root}")
+        version_tag = versions[-1]
+        context.log.info(f"No version_tag configured — promoting latest: {version_tag}")
+
+    archive_base = f"{archive_root}{version_tag}"
+    prod_base = f"{STATION_MODELS_S3_BASE}/{station_key}"
+    context.log.info(f"Promoting {site_name} {version_tag}: {archive_base} → {prod_base}")
+
+    promoted: list[str] = []
+    for name in _station_artifact_names() + ["training_report.json"]:
+        try:
+            data = s3.getFile(path=f"{archive_base}/{name}", bucket=s3.S3_BUCKET)
+        except Exception as e:
+            raise dg.Failure(
+                f"Archive {version_tag} is missing {name} — refusing partial promotion: {e}"
+            )
+        content_type = 'application/json' if name.endswith('.json') else 'application/octet-stream'
+        s3.putFile(data, f"{prod_base}/{name}", bucket=s3.S3_BUCKET, content_type=content_type)
+        promoted.append(name)
+        context.log.info(f"  ✓ {name}")
+
+    # Rebuild production deployment metadata around the promoted version
+    variants_meta: dict[str, dict] = {}
+    for variant, features in _VARIANTS.items():
+        variants_meta[variant] = {
+            'features_path': f"{prod_base}/features_{variant}.json",
+            'n_features': len(features),
+            'models': {task: f"{prod_base}/{task}_{variant}.pkl" for task in _TASKS},
+        }
+    meta = {
+        'deployed_at': datetime.now(timezone.utc).isoformat(),
+        'station': site_name,
+        'partition': partition,
+        'model_version': version_tag,
+        'archive_prefix': archive_base,
+        'promoted': True,
+        'variants': variants_meta,
+    }
+    s3.putFile(json.dumps(meta, indent=2).encode('utf-8'),
+               f"{prod_base}/deployment_metadata.json",
+               bucket=s3.S3_BUCKET, content_type='application/json')
+
+    context.add_output_metadata({
+        "station": site_name,
+        "model_version": version_tag,
+        "files_promoted": len(promoted),
+        "archive_prefix": archive_base,
+    })
+    return {"status": "promoted", "station": site_name,
+            "model_version": version_tag, "files": promoted}
 
 
 # ==============================================================================
@@ -506,6 +881,7 @@ multi_station_training_job = dg.define_asset_job(
         multi_station_training_data,
         per_station_trained_models,
         station_training_report,
+        station_model_archive,
     ),
     partitions_def=STATION_PARTITIONS,
     tags={"environment": "production", "pipeline": "h2s_multi_station_training"},
@@ -518,6 +894,18 @@ station_deployment_job = dg.define_asset_job(
         "Pass approve_deployment=False in run config for a dry run."
     ),
     selection=dg.AssetSelection.assets(station_model_deployment),
+    partitions_def=STATION_PARTITIONS,
+    tags={"environment": "production", "pipeline": "h2s_deployment"},
+)
+
+promote_station_models_job = dg.define_asset_job(
+    name="promote_station_models_job",
+    description=(
+        "Promote an archived model version to production — running this job "
+        "IS the approval. Configure version_tag (from the Slack training "
+        "report) or leave empty for the latest archive."
+    ),
+    selection=dg.AssetSelection.assets(station_model_promotion),
     partitions_def=STATION_PARTITIONS,
     tags={"environment": "production", "pipeline": "h2s_deployment"},
 )
