@@ -826,16 +826,17 @@ def station_model_promotion(context: dg.AssetExecutionContext) -> dict:
     prod_base = f"{STATION_MODELS_S3_BASE}/{station_key}"
     context.log.info(f"Promoting {site_name} {version_tag}: {archive_base} → {prod_base}")
 
+    # Server-side copy each artifact from the archive to the production
+    # prefix (no download/upload round trip; content-type preserved). A
+    # missing source raises → refuse the partial promotion.
     promoted: list[str] = []
     for name in _station_artifact_names() + ["training_report.json"]:
         try:
-            data = s3.getFile(path=f"{archive_base}/{name}", bucket=s3.S3_BUCKET)
+            s3.copyFile(f"{archive_base}/{name}", f"{prod_base}/{name}")
         except Exception as e:
             raise dg.Failure(
                 f"Archive {version_tag} is missing {name} — refusing partial promotion: {e}"
             )
-        content_type = 'application/json' if name.endswith('.json') else 'application/octet-stream'
-        s3.putFile(data, f"{prod_base}/{name}", bucket=s3.S3_BUCKET, content_type=content_type)
         promoted.append(name)
         context.log.info(f"  ✓ {name}")
 
