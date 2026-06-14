@@ -245,6 +245,36 @@ class S3Resource(ResourceWithS3Configuration):
                 f"file {path} failed to push to {bucket} at {self.S3_ADDRESS} {ex}"
             )
 
+    def copyFile(self, src_path, dst_path, src_bucket=None, dst_bucket=None):
+        """Server-side copy of an object — no download/upload round trip.
+
+        The MinIO/S3 server copies the object directly; bytes never pass
+        through this client. Object metadata (including content-type) is
+        preserved from the source. Raises if the source object is missing.
+        """
+        from minio.commonconfig import CopySource
+        if src_bucket is None:
+            src_bucket = self.S3_BUCKET
+        if dst_bucket is None:
+            dst_bucket = self.S3_BUCKET
+        try:
+            result = self.getClient().copy_object(
+                dst_bucket, dst_path, CopySource(src_bucket, src_path)
+            )
+            get_dagster_logger().info(
+                f"copied {src_bucket}/{src_path} -> {dst_bucket}/{result.object_name}"
+            )
+            return result.object_name
+        except Exception as ex:
+            get_dagster_logger().info(
+                f"failed to copy {src_bucket}/{src_path} -> {dst_bucket}/{dst_path} "
+                f"at {self.S3_ADDRESS} {ex}"
+            )
+            raise Exception(
+                f"failed to copy {src_bucket}/{src_path} -> {dst_bucket}/{dst_path} "
+                f"at {self.S3_ADDRESS} {ex}"
+            )
+
     def get_presigned_url(self, path, bucket=None, expires_seconds=3600):
         """Get a presigned URL for reading an object (valid for 1 hour by default)."""
         from datetime import timedelta
