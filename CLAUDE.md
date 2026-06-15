@@ -92,6 +92,47 @@ When creating new assets:
 
 ## Operational Runbooks
 
+### Quickstart — the core run loop
+
+The shortest path from an empty store to working forecasts **and** accuracy
+stats. Your `.env` sets the target bucket via `S3_BUCKET` (dev `test` /
+prod `resilentpublic`); prefix any command with `S3_BUCKET=resilentpublic` to
+operate on prod.
+
+```bash
+cd projects/h2s
+
+# 1. Per-station models — trains, writes the promotable archive, AND deploys.
+#    Repeat for all three stations.
+for P in nestor_bes san_ysidro ib_civic_ctr; do
+  uv run dg launch --job multi_station_training_job --partition $P
+  uv run dg launch --job station_deployment_job     --partition $P
+done
+
+# 2. Forecast products (nowcast / nearcast / forecast, all stations × variants)
+uv run dg launch --job products_forecast_job
+
+# 3. Accuracy / skill stats (rebuild from ALL stored product runs)
+uv run dg launch --job forecast_validation_rebuild_job
+
+# Optional: products + Tier 1–3 cascade Slack alerts in one job
+uv run dg launch --job cascade_alerts_job
+# Optional: daily source attribution + dashboard
+uv run dg launch --job daily_analysis_job
+```
+
+**Deploy vs. promote — you only need one.** `station_deployment_job` deploys the
+models you just trained (running it *is* the approval) — use it for normal
+operation. `promote_station_models_job` is only for promoting a *specific older
+archived version* (the monthly review flow); skip it unless you are rolling back.
+Both read the archive that step 1 writes, so promote fails with "No archived
+versions found" until `multi_station_training_job` has run at least once.
+
+**On the stats (step 3):** the validation store joins forecasts against
+*measured* H2S, so it only carries rows where a product run's target hours have
+since been observed. It fills in over the days after you start running products;
+re-run the rebuild whenever you want the latest numbers.
+
 ### Initial Installation
 
 Run once when deploying to a new environment:
@@ -204,8 +245,15 @@ uv run dg launch --job dispersion_inversion_job
 
 # Nowcast/nearcast/forecast products: 24 leads × 3 stations × 2 variants,
 # stored to tijuana/forecast/products/run_ts=.../products.parquet (+ latest mirror).
-# Manual for now — Phase 4 wires the cascade triggers, Phase 6 the schedule.
 uv run dg launch --job products_forecast_job
+
+# Tier 1–3 forecast cascade: runs products, then alerts the ops Slack channel
+# when a tier's product probability clears its cutoff (auto-runs every 6h).
+uv run dg launch --job cascade_alerts_job
+
+# Forecast validation store + per-lead-hour skill curves (rebuild from ALL runs):
+uv run dg launch --job forecast_validation_rebuild_job
+# (forecast_validation_job is the recent-window daily variant; schedule STOPPED)
 ```
 
 ### The Forecast Products (nowcast / nearcast / forecast)
@@ -229,6 +277,40 @@ Row schema (validation substrate): run_ts, product, station, lead_hour, time,
 variant, model_version, h2s_pred, p5, p10, p30. Missing classifiers (e.g.
 clf_30ppb before a station's first post-Phase-1 retrain) yield NaN
 probabilities, never errors.
+
+### Forecast Cascade + Alerting
+
+`cascade_alerts_job` (every 6h, RUNNING) runs `products_forecast_job` then
+evaluates the Tier 1–3 cascade at NESTOR-BES off the **Evidence** product
+probabilities — Tier 1 P(>5) in nowcast, Tier 2 P(>10) in nearcast, Tier 3
+P(>30) in forecast — and posts an escalating report to the ops Slack channel
+when a tier's peak probability clears its cutoff (`CASCADE_TRIGGERS`, all 0.5).
+Tiers fire independently (no nesting), and both variants (Evidence/Lean) are
+shown in the report. A separate observed >10 ppb "Alert Performance" state
+machine (`h2s_alert_performance_sensor`, 5-min poll) opens/closes events and
+posts a forecast-vs-measured close-out. Both replaced the retired met-regime
+gate + sigmoid-score `tiered_alerts` system. The observation tiers
+(`watch` 30 / `critical` 100, in `h2s_alert_system`) are unchanged.
+
+### Forecast Validation Store + Skill Curves
+
+`forecast_validation_rebuild_job` joins every stored product row to the H2S
+actually measured at its target hour and writes:
+
+- a consolidated, **rebuildable** parquet at
+  `tijuana/forecast/validation_store/validation.parquet` (+ dated snapshot) —
+  recomputed from the immutable product runs each time, so it is idempotent;
+- per-(product, variant, lead-hour) **skill curves** (`skill_curves.parquet` +
+  `skill_report.json` + a `latest` mirror): n, Spearman, MAE, and recall@{5,10,
+  30,100} in two flavours — *magnitude* (cut h2s_pred at k, calibration harness)
+  and *probability-call* (did the classifier flag it: p_k > 0.5 vs actual ≥ k),
+  Evidence vs Lean.
+
+`forecast_validation_job` is the daily recent-window variant (`max_age_days`
+config, schedule STOPPED — enable in Phase 6); the rebuild job passes
+`max_age_days=None` to recompute the entire history. Stats only populate where a
+forecast's target hours have since been observed, so the store fills in over the
+days after products start running.
 
 ### Re-executing a Failed daily_analysis_job
 

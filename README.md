@@ -106,6 +106,32 @@ hourly NESTOR 3-class model that `forecast_prediction_job` reads comes from the
 legacy monthly training pipeline (`monthly_model_training_job` →
 `approve_and_deploy_job`).
 
+### The core run loop (models → products → stats)
+
+```bash
+cd projects/h2s   # prefix with S3_BUCKET=resilentpublic for prod
+
+# 1. Per-station models — trains, writes the promotable archive, AND deploys.
+for P in nestor_bes san_ysidro ib_civic_ctr; do
+  uv run dg launch --job multi_station_training_job --partition $P
+  uv run dg launch --job station_deployment_job     --partition $P
+done
+
+# 2. Forecast products (nowcast / nearcast / forecast)
+uv run dg launch --job products_forecast_job
+
+# 3. Accuracy / skill stats (rebuild from all stored product runs)
+uv run dg launch --job forecast_validation_rebuild_job
+
+# Optional: products + Tier 1–3 cascade Slack alerts
+uv run dg launch --job cascade_alerts_job
+```
+
+Use `station_deployment_job` to deploy what you just trained (running it *is* the
+approval); `promote_station_models_job` is only for rolling back to a specific
+archived version. The skill stats (step 3) populate only where forecasts' target
+hours have since been measured, filling in over the days after products run.
+
 For the full operational runbook (rebuilding, deploying, HYSPLIT worker setup), see [CLAUDE.md](CLAUDE.md).
 
 ---

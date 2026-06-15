@@ -116,6 +116,15 @@ def defs():
         products_forecast_job,
     )
 
+    # Import forecast validation store + accuracy reporting (Phase 5)
+    from h2s.defs.h2s_forecast_validation_pipeline import (
+        forecast_validation_store,
+        forecast_skill_report,
+        forecast_validation_job,
+        forecast_validation_rebuild_job,
+        forecast_validation_schedule,
+    )
+
     # Import daily analysis pipeline assets
     from h2s.defs.h2s_daily_pipeline import (
         multi_station_model_artifacts,
@@ -235,6 +244,9 @@ def defs():
             calibration_viz,
             # Validation Pipeline Assets
             daily_station_validation_report,
+            # Forecast Validation Store + Accuracy Reporting (Phase 5)
+            forecast_validation_store,
+            forecast_skill_report,
             # Forecast Cascade Pre-Alert (Tiers 1–3, product-probability-driven)
             cascade_alert_dispatcher,
             # Observed >10 ppb Alert-Performance machine (yellow tier)
@@ -256,6 +268,9 @@ def defs():
             promote_station_models_job,
             # Products job
             products_forecast_job,
+            # Forecast validation store + rebuild (Phase 5)
+            forecast_validation_job,
+            forecast_validation_rebuild_job,
             # Daily analysis job
             daily_analysis_job,
             # Dispersion jobs
@@ -291,6 +306,8 @@ def defs():
             daily_station_validation_schedule,
             # Forecast cascade pre-alert schedule
             cascade_alerts_schedule,
+            # Forecast validation store schedule (Phase 5)
+            forecast_validation_schedule,
         ],
         sensors=[slack_on_run_failure, h2s_alert_sensor, apcd_sensor_watch_sensor,
                  h2s_alert_performance_sensor],
