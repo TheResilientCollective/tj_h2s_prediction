@@ -223,6 +223,21 @@ ALERT_STATE_S3_PATH       = "tijuana/forecast/alerts/h2s_alert_state.json"
 ALERT_SUMMARY_ARCHIVE_PATH = EXTREME_EVENT_PATH
 ALERT_SUMMARY_LATEST_PATH  = f"{LATEST_BASEPATH}/forecast_data/extreme_event_summary.json"
 
+# ------------------------------------------------------------------------------
+# Observed-exceedance "Alert Performance" machine (Phase 4)
+# ------------------------------------------------------------------------------
+# A yellow-tier (>10 ppb) OBSERVATION state machine, separate from
+# watch (30) / critical (100). It opens on the first >10 ppb reading after a
+# quiet period and closes once readings stay below threshold for
+# ALERT_YELLOW_CLOSE_WAIT_HOURS. Its close-out scores the forecast cascade
+# against what was actually measured during the event — the bridge to the
+# Phase-5 validation store.
+ALERT_YELLOW_THRESHOLD        = H2S_THRESHOLD_MED   # 10 ppb (open / close threshold)
+ALERT_YELLOW_CLOSE_WAIT_HOURS = 2.0                 # hours below threshold before close-out
+ALERT_PERF_HOURS_WINDOW       = 12                  # look-back for the hours-above tally
+ALERT_PERF_ARCHIVE_PATH       = "tijuana/forecast/alert_performance/archive"
+ALERT_PERF_LATEST_PATH        = f"{LATEST_BASEPATH}/forecast_data/alert_performance_latest.json"
+
 # ==============================================================================
 # APCD Public-Bucket Sensor Watch
 # ==============================================================================
