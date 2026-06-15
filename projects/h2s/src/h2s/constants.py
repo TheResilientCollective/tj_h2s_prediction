@@ -173,6 +173,18 @@ CASCADE_TRIGGERS = {
 PRODUCTS_PATH = 'tijuana/forecast/products'                       # + /run_ts=.../products.parquet
 PRODUCTS_LATEST_PATH = f'{LATEST_BASEPATH}/forecast_data/products_latest.parquet'
 
+# Forecast validation store (Phase 5) — rebuildable join of the stored product
+# rows vs measured H2S. The consolidated parquet is recomputed from the
+# immutable product runs under PRODUCTS_PATH (so it is idempotent and fully
+# rebuildable); a dated snapshot + skill-curve report accompany each build.
+FORECAST_VALIDATION_BASE          = 'tijuana/forecast/validation_store'
+FORECAST_VALIDATION_STORE_PATH    = f'{FORECAST_VALIDATION_BASE}/validation.parquet'
+FORECAST_VALIDATION_SNAPSHOT_PATH = f'{FORECAST_VALIDATION_BASE}/snapshots/{{date_str}}/validation.parquet'
+FORECAST_SKILL_CURVES_PATH        = f'{FORECAST_VALIDATION_BASE}/skill_curves.parquet'
+FORECAST_SKILL_REPORT_PATH        = f'{FORECAST_VALIDATION_BASE}/skill_report.json'
+FORECAST_SKILL_REPORT_LATEST_PATH = f'{LATEST_BASEPATH}/forecast_data/forecast_skill_report.json'
+FORECAST_VALIDATION_MAX_AGE_DAYS  = 120  # default join window; rebuild job passes None (all runs)
+
 # S3 path for extreme event summaries
 EXTREME_EVENT_PATH = 'tijuana/forecast/extreme_events'
 
