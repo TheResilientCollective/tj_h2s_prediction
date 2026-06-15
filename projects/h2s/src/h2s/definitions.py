@@ -73,17 +73,20 @@ def defs():
         h2s_alert_job,
     )
 
-    # Import tiered pre-alert system (Tiers 1–3: forecast-based)
-    from h2s.defs.tiered_alerts.assets import (
-        tiered_alert_features,
-        tier_1_scores,
-        tier_2_scores,
-        tier_3_scores,
-        tier_alert_dispatcher,
+    # Import forecast cascade pre-alert system (Tiers 1–3: product-probability-driven)
+    from h2s.defs.cascade_alerts.assets import (
+        cascade_alert_dispatcher,
     )
-    from h2s.defs.tiered_alerts.schedules import (
-        tiered_alerts_job,
-        tiered_alerts_schedule,
+    from h2s.defs.cascade_alerts.schedules import (
+        cascade_alerts_job,
+        cascade_alerts_schedule,
+    )
+
+    # Import observed >10 ppb "Alert Performance" machine (yellow-tier state machine)
+    from h2s.defs.alert_performance.assets import (
+        h2s_alert_performance_dispatcher,
+        h2s_alert_performance_sensor,
+        h2s_alert_performance_job,
     )
 
     # Import APCD multi-station sensor watch
@@ -240,12 +243,10 @@ def defs():
             seed_models,
             # Validation Pipeline Assets
             daily_station_validation_report,
-            # Tiered Pre-Alert Assets (Tiers 1–3, forecast-based)
-            tiered_alert_features,
-            tier_1_scores,
-            tier_2_scores,
-            tier_3_scores,
-            tier_alert_dispatcher,
+            # Forecast Cascade Pre-Alert (Tiers 1–3, product-probability-driven)
+            cascade_alert_dispatcher,
+            # Observed >10 ppb Alert-Performance machine (yellow tier)
+            h2s_alert_performance_dispatcher,
         ],
         jobs=[
             # Prediction jobs
@@ -277,8 +278,10 @@ def defs():
             h2s_alert_job,
             # APCD multi-station sensor watch job
             apcd_sensor_watch_job,
-            # Tiered pre-alert job (Tiers 1–3)
-            tiered_alerts_job,
+            # Forecast cascade pre-alert job (Tiers 1–3)
+            cascade_alerts_job,
+            # Observed >10 ppb Alert-Performance job (yellow tier)
+            h2s_alert_performance_job,
             # Validation jobs
             daily_station_validation_job,
         ],
@@ -296,10 +299,11 @@ def defs():
             emissions_calibration_schedule,
             # Validation schedules
             daily_station_validation_schedule,
-            # Tiered pre-alert schedule
-            tiered_alerts_schedule,
+            # Forecast cascade pre-alert schedule
+            cascade_alerts_schedule,
         ],
-        sensors=[slack_on_run_failure, h2s_alert_sensor, apcd_sensor_watch_sensor],
+        sensors=[slack_on_run_failure, h2s_alert_sensor, apcd_sensor_watch_sensor,
+                 h2s_alert_performance_sensor],
         resources=resources[deployment_name]
     )
 
