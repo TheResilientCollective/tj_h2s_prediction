@@ -46,7 +46,6 @@ tj_h2s_prediction/
 │   │   │   ├── h2s_dispersion_pipeline.py  # Dispersion modeling: Lagrangian + Gaussian + HYSPLIT
 │   │   │   ├── h2s_multi_station_training.py  # Per-station model training (partitioned)
 │   │   │   ├── h2s_training_pipeline.py       # Legacy single-model training pipeline
-│   │   │   ├── h2s_seed_models.py             # Seed models job for initial S3 upload
 │   │   │   └── h2s_schedules.py               # All schedules and job definitions
 │   │   ├── predictor/
 │   │   │   ├── h2s_predictor.py  # H2SPredictor class with S3 loading
@@ -134,10 +133,6 @@ versions found" until `multi_station_training_job` has run at least once.
 since been observed. It fills in over the days after you start running products;
 re-run the rebuild whenever you want the latest numbers.
 
-> A legacy `seed_models_job` may still appear in the detailed sections below — it
-> only bootstraps the hourly model and is being retired; the per-station pipeline
-> above is the path to use.
-
 ### Initial Installation
 
 Run once when deploying to a new environment:
@@ -147,28 +142,33 @@ cd projects/h2s
 uv sync
 cp .env.example .env   # fill in S3 credentials
 
-# 1. Seed S3 with the hourly starter model (trains inline from S3 training data)
-uv run dg launch --job seed_models_job
-
-# 2. Train + deploy per-station daily models (repeat per partition:
-#    nestor_bes / san_ysidro / ib_civic_ctr)
+# 1. Train + deploy per-station daily models — the model-bootstrap path
+#    (repeat per partition: nestor_bes / san_ysidro / ib_civic_ctr).
+#    This also writes the immutable archive that promote_station_models_job reads.
 uv run dg launch --job multi_station_training_job --partition nestor_bes
 uv run dg launch --job station_deployment_job --partition nestor_bes
 
-# 3. Run hourly forecast pipeline
+# 2. Run hourly forecast pipeline
 uv run dg launch --job forecast_prediction_job
 
-# 4. Run daily analysis (source attribution + station forecasts + dashboard)
+# 3. Run daily analysis (source attribution + station forecasts + dashboard)
 uv run dg launch --job daily_analysis_job
 ```
 
-`seed_models_job` trains the hourly NESTOR 3-class model inline from S3
-training data and uploads it to `tijuana/forecast/models/`. It does NOT seed
-per-station models (step 2 is the real training pipeline — it also produces
-the Lean variant, training reports, and data snapshots) and does not seed the
-hourly variant models (`xgboost_base` / `xgboost_smote` / `random_forest` come
-from the legacy monthly training pipeline; `h2s_variant_predictions` skips
-missing variants gracefully until then).
+The per-station training pipeline (`multi_station_training_job` →
+`station_deployment_job`) is the model-production path: it trains both feature
+variants (evidence + lean), writes training reports and data snapshots, and
+writes the immutable version archive that `promote_station_models_job` promotes
+from. The previous one-off `seed_models_job` was removed — there is no separate
+bootstrap; the training pipeline owns model production.
+
+The hourly NESTOR 3-class model
+(`tijuana/forecast/models/nestor_xgboost_weighted_model.json`) that
+`forecast_prediction_job` reads, plus the hourly variant models
+(`xgboost_base` / `xgboost_smote` / `random_forest`), come from the legacy
+monthly training pipeline (`monthly_model_training_job` →
+`approve_and_deploy_job`); `h2s_variant_predictions` skips missing variants
+gracefully until they exist.
 
 ### Rebuilding Models (new training data available)
 
@@ -426,8 +426,8 @@ uv run dg launch --assets h2s/h2s_predictions
 cd projects/h2s
 
 # Train per-station models locally for inspection (outputs to data/models_v2/YYYYMMDD/)
-# NOTE: local outputs are for analysis only — seed_models_job no longer uploads
-# them. Deploy through multi_station_training_job → station_deployment_job.
+# NOTE: local outputs are for analysis only — deploy through
+# multi_station_training_job → station_deployment_job.
 uv run python scripts/train_station_models.py \
   --obs ../../data/modeldata_h2s_nofill.parquet \
   --models ../../data/models_v2/$(date +%Y%m%d)

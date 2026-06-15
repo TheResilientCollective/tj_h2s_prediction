@@ -80,31 +80,31 @@ cd projects/h2s
 uv sync
 cp .env.example .env   # fill in S3 credentials
 
-# 1. Seed S3 with the hourly starter model (trains inline from S3 training data)
-uv run dg launch --job seed_models_job
-
-# 2. Train + deploy per-station daily models (repeat for each of
-#    nestor_bes / san_ysidro / ib_civic_ctr)
+# 1. Train + deploy per-station daily models — the model-bootstrap path
+#    (repeat for each of nestor_bes / san_ysidro / ib_civic_ctr)
 uv run dg launch --job multi_station_training_job --partition nestor_bes
 uv run dg launch --job station_deployment_job --partition nestor_bes
 
-# 3. Hourly forecast (auto-runs every 6 h)
+# 2. Hourly forecast (auto-runs every 6 h)
 uv run dg launch --job forecast_prediction_job
 
-# 4. Daily analysis (auto-runs daily)
+# 3. Daily analysis (auto-runs daily)
 uv run dg launch --job daily_analysis_job
 
-# 5. Dispersion forecast (auto-runs every 6 h)
+# 4. Dispersion forecast (auto-runs every 6 h)
 uv run dg launch --job dispersion_forecast_job
 
 # Dagster UI
 uv run dg dev   # http://localhost:3000
 ```
 
-`seed_models_job` trains the hourly NESTOR 3-class model inline from S3
-training data and uploads it. Per-station models come from the real training
-pipeline (step 2), which also produces the Lean variant, training reports,
-and data snapshots.
+The per-station training pipeline (`multi_station_training_job` →
+`station_deployment_job`) is the model-production path — it trains both feature
+variants (evidence + lean), writes training reports and data snapshots, and the
+immutable version archive that `promote_station_models_job` promotes from. The
+hourly NESTOR 3-class model that `forecast_prediction_job` reads comes from the
+legacy monthly training pipeline (`monthly_model_training_job` →
+`approve_and_deploy_job`).
 
 ### The core run loop (models → products → stats)
 
@@ -345,7 +345,7 @@ For one-off training, prediction, and visualization outside the Dagster pipeline
 ```bash
 # Train per-station models locally for inspection (outputs to data/models_v2/YYYYMMDD/)
 # Local outputs are analysis-only — deploy through multi_station_training_job
-# → station_deployment_job, not seed_models_job.
+# → station_deployment_job.
 cd projects/h2s
 uv run python scripts/train_station_models.py \
   --obs ../../data/modeldata_h2s_nofill.parquet \
