@@ -73,8 +73,11 @@ _FALLBACK_PARQUET_URL = (
 _STATION_MODELS_BASE = "tijuana/forecast/models/stations"
 _VARIANTS = ("evidence", "lean")
 _TASKS = ("regression", "clf_5ppb", "clf_10ppb", "clf_30ppb")
-_THRESHOLDS = (5, 10, 30, 100)
+# 8 ppb is the resident-complaint trigger (the 5–10 "yellow-low" band), so it
+# sits in the ladder as a magnitude-only threshold — there is no clf_8ppb.
+_THRESHOLDS = (5, 8, 10, 30, 100)
 _PROB_FOR_THRESHOLD = {5: "p5", 10: "p10", 30: "p30"}
+_COMPLAINT_PPB = 8
 
 _GREEN_MAX = 5.0
 _ORANGE_MIN = 30.0
@@ -300,18 +303,20 @@ _C = {"green": "#27ae60", "yellow": "#f39c12", "orange": "#e74c3c",
 def _chart_spearman_recall_by_month(monthly: dict) -> str:
     months = [m for m in sorted(monthly) if m != "ALL"]
     sp = [monthly[m]["spearman"] for m in months]
+    r8 = [monthly[m]["mag"][8]["recall"] for m in months]
+    r10 = [monthly[m]["mag"][10]["recall"] for m in months]
     r30 = [monthly[m]["mag"][30]["recall"] for m in months]
-    r100 = [monthly[m]["mag"][100]["recall"] for m in months]
     xs = range(len(months))
     fig, ax = plt.subplots(figsize=(11, 4))
     ax.plot(xs, sp, color=_C["blue"], marker="o", lw=1.8, label="Spearman (rank skill)")
-    ax.plot(xs, r30, color=_C["orange"], marker="s", lw=1.8, label="recall@30 (magnitude)")
-    ax.plot(xs, r100, color=_C["purple"], marker="^", lw=1.8, label="recall@100 (magnitude)")
+    ax.plot(xs, r8, color="#d4ac0d", marker="*", ms=8, lw=1.8, label="recall@8 (complaint)")
+    ax.plot(xs, r10, color=_C["yellow"], marker="s", lw=1.6, label="recall@10")
+    ax.plot(xs, r30, color=_C["orange"], marker="^", lw=1.6, label="recall@30")
     ax.set_xticks(list(xs)); ax.set_xticklabels(months, rotation=45, ha="right", fontsize=8)
     ax.set_ylim(0, 1.05)
     ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1.0, decimals=0))
-    ax.set_title("Monthly rank skill & exceedance recall", fontsize=11)
-    ax.legend(fontsize=8); ax.grid(axis="y", lw=0.4, alpha=0.5)
+    ax.set_title("Monthly rank skill & alert detection (complaint band → watch)", fontsize=11)
+    ax.legend(fontsize=8, ncol=2); ax.grid(axis="y", lw=0.4, alpha=0.5)
     fig.tight_layout()
     return _fig_to_b64(fig)
 
@@ -406,12 +411,12 @@ def _cards(m: dict) -> str:
     cards = [
         (_num(m["spearman"]), "Spearman"),
         (_num(m["mae"], "{:.1f}"), "MAE (ppb)"),
-        (_pct(m["mag"][30]["recall"]), "recall@30 (mag)"),
-        (_pct(m["mag"][100]["recall"]), "recall@100 (mag)"),
-        (_pct(m["prob"][30]["recall"]), "P(>30)>.5 recall"),
-        (_pct(m["per_class"]["orange"]["recall"]), "Orange detect (3-cls)"),
+        (_pct(m["mag"][5]["recall"]), "recall@5"),
+        (_pct(m["mag"][8]["recall"]), "recall@8 (complaint)"),
+        (_pct(m["mag"][10]["recall"]), "recall@10"),
+        (_pct(m["mag"][30]["recall"]), "recall@30"),
+        (_pct(m["mag"][100]["recall"]), "recall@100"),
         (_pct(m["false_alarm_rate"]), "False alarm rate"),
-        (f"{m['n']:,}", "Predictions"),
     ]
     html = '<div class="metric-grid">'
     for val, lbl in cards:
@@ -440,8 +445,8 @@ def _threshold_table(m: dict) -> str:
 
 def _monthly_table(monthly: dict, months: list[str]) -> str:
     head = ("<tr><th>Month</th><th>n</th><th>Spearman</th><th>MAE</th>"
-            "<th>recall@30 (mag)</th><th>recall@100 (mag)</th>"
-            "<th>P(&gt;30)&gt;.5 recall</th><th>Orange detect</th><th>FAR</th></tr>")
+            "<th>recall@5</th><th>recall@8</th><th>recall@10</th>"
+            "<th>recall@30</th><th>recall@100</th><th>FAR</th></tr>")
     rows = ""
     for m in months:
         mm = monthly[m]
@@ -449,10 +454,11 @@ def _monthly_table(monthly: dict, months: list[str]) -> str:
             f"<tr><td><b>{m}</b></td><td>{mm['n']:,}</td>"
             f"<td class='{_color_cell(mm['spearman'])}'>{_num(mm['spearman'])}</td>"
             f"<td>{_num(mm['mae'], '{:.1f}')}</td>"
+            f"<td class='{_color_cell(mm['mag'][5]['recall'])}'>{_pct(mm['mag'][5]['recall'])}</td>"
+            f"<td class='{_color_cell(mm['mag'][8]['recall'])}'>{_pct(mm['mag'][8]['recall'])}</td>"
+            f"<td class='{_color_cell(mm['mag'][10]['recall'])}'>{_pct(mm['mag'][10]['recall'])}</td>"
             f"<td class='{_color_cell(mm['mag'][30]['recall'])}'>{_pct(mm['mag'][30]['recall'])}</td>"
             f"<td class='{_color_cell(mm['mag'][100]['recall'])}'>{_pct(mm['mag'][100]['recall'])}</td>"
-            f"<td class='{_color_cell(mm['prob'][30]['recall'])}'>{_pct(mm['prob'][30]['recall'])}</td>"
-            f"<td class='{_color_cell(mm['per_class']['orange']['recall'])}'>{_pct(mm['per_class']['orange']['recall'])}</td>"
             f"<td class='{_color_cell(1 - mm['false_alarm_rate'], low=0.9, high=0.96)}'>{_pct(mm['false_alarm_rate'])}</td></tr>"
         )
     return f"<table><thead>{head}</thead><tbody>{rows}</tbody></table>"
@@ -488,9 +494,9 @@ def build_station_page(station: str, variant: str, records: pd.DataFrame, monthl
 
 def build_index(summaries: list[dict], records: pd.DataFrame) -> str:
     rng = f"{records['time'].min().strftime('%Y-%m-%d')} – {records['time'].max().strftime('%Y-%m-%d')}"
-    head = ("<tr><th>Station</th><th>Variant</th><th>n</th><th>Spearman</th><th>MAE</th>"
-            "<th>recall@30</th><th>recall@100</th><th>P(&gt;30)&gt;.5 recall</th>"
-            "<th>Orange detect</th><th>FAR</th></tr>")
+    head = ("<tr><th>Station</th><th>Variant</th><th>n</th><th>Spearman</th>"
+            "<th>recall@5</th><th>recall@8</th><th>recall@10</th>"
+            "<th>recall@30</th><th>recall@100</th><th>FAR</th></tr>")
     rows = ""
     for s in summaries:
         m = s["overall"]; badge = "ev" if s["variant"] == "evidence" else "ln"
@@ -499,11 +505,11 @@ def build_index(summaries: list[dict], records: pd.DataFrame) -> str:
             f"<td><span class='badge {badge}'>{s['variant']}</span></td>"
             f"<td>{m['n']:,}</td>"
             f"<td class='{_color_cell(m['spearman'])}'>{_num(m['spearman'])}</td>"
-            f"<td>{_num(m['mae'], '{:.1f}')}</td>"
+            f"<td class='{_color_cell(m['mag'][5]['recall'])}'>{_pct(m['mag'][5]['recall'])}</td>"
+            f"<td class='{_color_cell(m['mag'][8]['recall'])}'>{_pct(m['mag'][8]['recall'])}</td>"
+            f"<td class='{_color_cell(m['mag'][10]['recall'])}'>{_pct(m['mag'][10]['recall'])}</td>"
             f"<td class='{_color_cell(m['mag'][30]['recall'])}'>{_pct(m['mag'][30]['recall'])}</td>"
             f"<td class='{_color_cell(m['mag'][100]['recall'])}'>{_pct(m['mag'][100]['recall'])}</td>"
-            f"<td class='{_color_cell(m['prob'][30]['recall'])}'>{_pct(m['prob'][30]['recall'])}</td>"
-            f"<td class='{_color_cell(m['per_class']['orange']['recall'])}'>{_pct(m['per_class']['orange']['recall'])}</td>"
             f"<td class='{_color_cell(1 - m['false_alarm_rate'], low=0.9, high=0.96)}'>{_pct(m['false_alarm_rate'])}</td></tr>"
         )
     return f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
@@ -513,10 +519,14 @@ def build_index(summaries: list[dict], records: pd.DataFrame) -> str:
 <p>Evidence + Lean · regression + clf_5/10/30 · oracle one-step inputs · {rng}</p></div>
 <div class="content">
   <div class="section"><h2>All stations × variants</h2>
-  <p style="font-size:0.85em;color:#555;">Magnitude metrics cut the regression prediction at the
-  threshold; <i>P(&gt;30)&gt;.5 recall</i> is the classifier's exceedance call. Features use observed
-  H2S lags (one-step / oracle), so these are upper-bound skill given good inputs — not the recursive
-  multi-step forecast (see the Phase-5 validation store for skill-vs-lead-hour).</p>
+  <p style="font-size:0.85em;color:#555;"><b>Alerting focus:</b> residents report H2S complaints
+  around <b>~8 ppb</b> (the 5–10 "yellow-low" band), so <b>recall@5 / @8 / @10</b> are the
+  alerting-relevant detection rates; recall@30 / @100 cover the watch / extreme tiers. Each number
+  is the magnitude recall — the share of hours that actually crossed the threshold that the model's
+  predicted ppb also crossed. The per-station pages add the classifier's P(&gt;k)&gt;0.5 call and
+  precision. Features use observed H2S lags (one-step / oracle), so these are upper-bound skill given
+  good inputs — not the recursive multi-step forecast (see the Phase-5 validation store for
+  skill-vs-lead-hour).</p>
   <table><thead>{head}</thead><tbody>{rows}</tbody></table></div>
 </div></body></html>"""
 
