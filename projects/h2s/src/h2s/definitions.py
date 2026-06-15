@@ -116,12 +116,6 @@ def defs():
         products_forecast_job,
     )
 
-    # Import seed models job
-    from h2s.defs.h2s_seed_models import (
-        seed_models,
-        seed_models_job,
-    )
-
     # Import daily analysis pipeline assets
     from h2s.defs.h2s_daily_pipeline import (
         multi_station_model_artifacts,
@@ -239,8 +233,6 @@ def defs():
             channel_emission_inversion,
             calibration_diagnostics,
             calibration_viz,
-            # Seed Models
-            seed_models,
             # Validation Pipeline Assets
             daily_station_validation_report,
             # Forecast Cascade Pre-Alert (Tiers 1–3, product-probability-driven)
@@ -266,8 +258,6 @@ def defs():
             products_forecast_job,
             # Daily analysis job
             daily_analysis_job,
-            # Seed models job
-            seed_models_job,
             # Dispersion jobs
             dispersion_inversion_job,
             dispersion_forecast_job,
