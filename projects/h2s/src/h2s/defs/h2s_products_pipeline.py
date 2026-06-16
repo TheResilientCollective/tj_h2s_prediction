@@ -260,8 +260,8 @@ def h2s_products(
     return out
 
 
-products_forecast_job = dg.define_asset_job(
-    name="products_forecast_job",
+station_forecast_job = dg.define_asset_job(
+    name="station_forecast_job",
     description=(
         "Run nowcast + nearcast + forecast for all stations × variants and "
         "store the product rows to S3. Cascade-triggered alerting consumes "
