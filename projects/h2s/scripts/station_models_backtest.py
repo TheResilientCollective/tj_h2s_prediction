@@ -194,13 +194,23 @@ def load_station_models(s3, station_key: str, variant: str) -> dict | None:
         from h2s.constants import MODEL_FEATURES, MODEL_FEATURES_LEAN
         feats = MODEL_FEATURES if variant == "evidence" else MODEL_FEATURES_LEAN
 
-    # Try to load deployment metadata
+    # Try to load training metadata (training_report.json has date ranges)
     metadata = {}
-    try:
-        meta_bytes = s3.getFile(path=f"{base}/deployment_metadata.json", bucket=s3.S3_BUCKET)
-        metadata = json.loads(meta_bytes.decode("utf-8"))
-    except Exception:
-        pass
+    for bucket in [s3.S3_BUCKET, "resilientpublic"]:
+        try:
+            # Try training_report.json first (has training data info)
+            meta_bytes = s3.getFile(path=f"{base}/training_report.json", bucket=bucket)
+            metadata = json.loads(meta_bytes.decode("utf-8"))
+            break
+        except Exception:
+            pass
+        try:
+            # Fallback to deployment_metadata.json
+            meta_bytes = s3.getFile(path=f"{base}/deployment_metadata.json", bucket=bucket)
+            metadata = json.loads(meta_bytes.decode("utf-8"))
+            break
+        except Exception:
+            pass
 
     models["_features"] = feats
     models["_legacy"] = legacy
@@ -310,17 +320,41 @@ _C = {"green": "#27ae60", "yellow": "#f39c12", "orange": "#e74c3c",
 
 
 def _get_training_end_month(metadata: dict = None) -> str | None:
-    """Extract training end month from metadata, e.g. '2024-09' from '2024-01 to 2024-09'."""
-    if not metadata or not metadata.get('training_data_range'):
+    """Extract training end month from metadata, e.g. '2024-09' from various formats."""
+    if not metadata:
         return None
-    try:
-        range_str = metadata['training_data_range']
-        if ' to ' in range_str:
-            end_date = range_str.split(' to ')[1].strip()
-            # Parse date like "2024-09-30" to "2024-09"
-            return '-'.join(end_date.split('-')[:2])
-    except Exception:
-        pass
+
+    # Try different metadata field names
+    candidates = [
+        ('training_data_range', 'training_data_range'),  # deployment_metadata format: "2024-01 to 2024-09"
+        ('training_date_range', 'training_date_range'),   # alternate format
+        ('training_end_date', 'training_end_date'),       # single date format
+        ('training_period', 'training_period'),           # another alternate
+    ]
+
+    for field_name, desc in candidates:
+        if field_name not in metadata:
+            continue
+        try:
+            value = metadata[field_name]
+            if not isinstance(value, str):
+                continue
+
+            # Parse "2024-01 to 2024-09" format
+            if ' to ' in value:
+                end_date = value.split(' to ')[1].strip()
+            else:
+                # Single date like "2024-09" or "2024-09-30"
+                end_date = value
+
+            # Extract YYYY-MM from various date formats
+            if '-' in end_date:
+                parts = end_date.split('-')
+                return '-'.join(parts[:2])
+            return end_date
+        except Exception:
+            continue
+
     return None
 
 
