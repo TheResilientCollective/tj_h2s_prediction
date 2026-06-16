@@ -309,7 +309,22 @@ _C = {"green": "#27ae60", "yellow": "#f39c12", "orange": "#e74c3c",
       "blue": "#2980b9", "purple": "#8e44ad"}
 
 
-def _chart_spearman_recall_by_month(monthly: dict) -> str:
+def _get_training_end_month(metadata: dict = None) -> str | None:
+    """Extract training end month from metadata, e.g. '2024-09' from '2024-01 to 2024-09'."""
+    if not metadata or not metadata.get('training_data_range'):
+        return None
+    try:
+        range_str = metadata['training_data_range']
+        if ' to ' in range_str:
+            end_date = range_str.split(' to ')[1].strip()
+            # Parse date like "2024-09-30" to "2024-09"
+            return '-'.join(end_date.split('-')[:2])
+    except Exception:
+        pass
+    return None
+
+
+def _chart_spearman_recall_by_month(monthly: dict, metadata: dict = None) -> str:
     months = [m for m in sorted(monthly) if m != "ALL"]
     sp = [monthly[m]["spearman"] for m in months]
     r8 = [monthly[m]["mag"][8]["recall"] for m in months]
@@ -321,6 +336,13 @@ def _chart_spearman_recall_by_month(monthly: dict) -> str:
     ax.plot(xs, r8, color="#d4ac0d", marker="*", ms=8, lw=1.8, label="recall@8 (complaint)")
     ax.plot(xs, r10, color=_C["yellow"], marker="s", lw=1.6, label="recall@10")
     ax.plot(xs, r30, color=_C["orange"], marker="^", lw=1.6, label="recall@30")
+
+    # Add training/test split line if metadata available
+    training_end = _get_training_end_month(metadata)
+    if training_end and training_end in months:
+        split_idx = months.index(training_end) + 0.5
+        ax.axvline(split_idx, color="#e74c3c", lw=2, ls="--", alpha=0.7, label="Training data end")
+
     ax.set_xticks(list(xs)); ax.set_xticklabels(months, rotation=45, ha="right", fontsize=8)
     ax.set_ylim(0, 1.05)
     ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1.0, decimals=0))
@@ -330,7 +352,7 @@ def _chart_spearman_recall_by_month(monthly: dict) -> str:
     return _fig_to_b64(fig)
 
 
-def _chart_mae_by_month(monthly: dict) -> str:
+def _chart_mae_by_month(monthly: dict, metadata: dict = None) -> str:
     months = [m for m in sorted(monthly) if m != "ALL"]
     mae = [monthly[m]["mae"] for m in months]
     n_orange = [monthly[m]["per_class"]["orange"]["n"] for m in months]
@@ -339,6 +361,13 @@ def _chart_mae_by_month(monthly: dict) -> str:
     ax.bar(xs, mae, color=_C["blue"], alpha=0.75, label="MAE (ppb)")
     ax2 = ax.twinx()
     ax2.plot(xs, n_orange, color=_C["orange"], marker="D", lw=1.6, label="Observed orange hours")
+
+    # Add training/test split line if metadata available
+    training_end = _get_training_end_month(metadata)
+    if training_end and training_end in months:
+        split_idx = months.index(training_end) + 0.5
+        ax.axvline(split_idx, color="#e74c3c", lw=2, ls="--", alpha=0.7, label="Training data end")
+
     ax.set_xticks(list(xs)); ax.set_xticklabels(months, rotation=45, ha="right", fontsize=8)
     ax.set_ylabel("MAE (ppb)"); ax2.set_ylabel("Orange hours")
     ax.set_title("Monthly MAE vs observed orange-event volume", fontsize=11)
@@ -348,7 +377,7 @@ def _chart_mae_by_month(monthly: dict) -> str:
     return _fig_to_b64(fig)
 
 
-def _chart_category_recall_by_month(monthly: dict) -> str:
+def _chart_category_recall_by_month(monthly: dict, metadata: dict = None) -> str:
     months = [m for m in sorted(monthly) if m != "ALL"]
     green_recall = [monthly[m]["per_class"]["green"]["recall"] for m in months]
     yellow_recall = [monthly[m]["per_class"]["yellow"]["recall"] for m in months]
@@ -358,6 +387,13 @@ def _chart_category_recall_by_month(monthly: dict) -> str:
     ax.plot(xs, green_recall, color=_C["green"], marker="o", lw=1.8, label="Green recall")
     ax.plot(xs, yellow_recall, color=_C["yellow"], marker="s", lw=1.8, label="Yellow recall")
     ax.plot(xs, orange_recall, color=_C["orange"], marker="^", lw=1.8, label="Orange recall")
+
+    # Add training/test split line if metadata available
+    training_end = _get_training_end_month(metadata)
+    if training_end and training_end in months:
+        split_idx = months.index(training_end) + 0.5
+        ax.axvline(split_idx, color="#e74c3c", lw=2, ls="--", alpha=0.7, label="Training data end")
+
     ax.set_xticks(list(xs)); ax.set_xticklabels(months, rotation=45, ha="right", fontsize=8)
     ax.set_ylim(0, 1.05)
     ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1.0, decimals=0))
@@ -367,7 +403,7 @@ def _chart_category_recall_by_month(monthly: dict) -> str:
     return _fig_to_b64(fig)
 
 
-def _chart_category_precision_by_month(monthly: dict) -> str:
+def _chart_category_precision_by_month(monthly: dict, metadata: dict = None) -> str:
     months = [m for m in sorted(monthly) if m != "ALL"]
     green_prec = [monthly[m]["per_class"]["green"]["precision"] for m in months]
     yellow_prec = [monthly[m]["per_class"]["yellow"]["precision"] for m in months]
@@ -377,6 +413,13 @@ def _chart_category_precision_by_month(monthly: dict) -> str:
     ax.plot(xs, green_prec, color=_C["green"], marker="o", lw=1.8, label="Green precision")
     ax.plot(xs, yellow_prec, color=_C["yellow"], marker="s", lw=1.8, label="Yellow precision")
     ax.plot(xs, orange_prec, color=_C["orange"], marker="^", lw=1.8, label="Orange precision")
+
+    # Add training/test split line if metadata available
+    training_end = _get_training_end_month(metadata)
+    if training_end and training_end in months:
+        split_idx = months.index(training_end) + 0.5
+        ax.axvline(split_idx, color="#e74c3c", lw=2, ls="--", alpha=0.7, label="Training data end")
+
     ax.set_xticks(list(xs)); ax.set_xticklabels(months, rotation=45, ha="right", fontsize=8)
     ax.set_ylim(0, 1.05)
     ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1.0, decimals=0))
@@ -386,7 +429,7 @@ def _chart_category_precision_by_month(monthly: dict) -> str:
     return _fig_to_b64(fig)
 
 
-def _chart_category_volume_by_month(monthly: dict) -> str:
+def _chart_category_volume_by_month(monthly: dict, metadata: dict = None) -> str:
     months = [m for m in sorted(monthly) if m != "ALL"]
     green_n = [monthly[m]["per_class"]["green"]["n"] for m in months]
     yellow_n = [monthly[m]["per_class"]["yellow"]["n"] for m in months]
@@ -396,6 +439,13 @@ def _chart_category_volume_by_month(monthly: dict) -> str:
     ax.bar(xs - 0.25, green_n, width=0.25, color=_C["green"], alpha=0.75, label="Green hours")
     ax.bar(xs, yellow_n, width=0.25, color=_C["yellow"], alpha=0.75, label="Yellow hours")
     ax.bar(xs + 0.25, orange_n, width=0.25, color=_C["orange"], alpha=0.75, label="Orange hours")
+
+    # Add training/test split line if metadata available
+    training_end = _get_training_end_month(metadata)
+    if training_end and training_end in months:
+        split_idx = months.index(training_end) + 0.5
+        ax.axvline(split_idx, color="#e74c3c", lw=2, ls="--", alpha=0.7, label="Training data end")
+
     ax.set_xticks(list(xs)); ax.set_xticklabels(months, rotation=45, ha="right", fontsize=8)
     ax.set_ylabel("Hours observed")
     ax.set_title("Monthly distribution of observed H2S categories", fontsize=11)
@@ -590,7 +640,7 @@ def build_month_page(station: str, variant: str, month: str, month_data: pd.Data
 <div class="nav"><a href="../{station_clean}_{variant}.html">← Back to {station}</a></div>
 <div class="content">
   {f'<div class="section"><h2>Model Info</h2>{metadata_html}</div>' if metadata_html else ''}
-  <div class="section"><h2>Monthly metrics — {month}</h2>{_cards(metrics)}
+  <div class="section"><h2>Detailed metrics for {month}</h2>{_cards(metrics)}
     <div class="chart-row">
       <img src="data:image/png;base64,{_chart_confusion(metrics, 'Confusion matrix')}" style="max-width:380px">
       <img src="data:image/png;base64,{_chart_scatter(month_data, 'Predicted vs actual H2S')}" style="max-width:430px">
@@ -634,11 +684,11 @@ def build_station_page(station: str, variant: str, records: pd.DataFrame, monthl
     {_threshold_table(overall)}
   </div>
   <div class="section"><h2>Monthly skill trends</h2>
-    <img src="data:image/png;base64,{_chart_spearman_recall_by_month(monthly)}" style="width:100%">
-    <img src="data:image/png;base64,{_chart_mae_by_month(monthly)}" style="width:100%">
-    <img src="data:image/png;base64,{_chart_category_recall_by_month(monthly)}" style="width:100%">
-    <img src="data:image/png;base64,{_chart_category_precision_by_month(monthly)}" style="width:100%">
-    <img src="data:image/png;base64,{_chart_category_volume_by_month(monthly)}" style="width:100%">
+    <img src="data:image/png;base64,{_chart_spearman_recall_by_month(monthly, metadata)}" style="width:100%">
+    <img src="data:image/png;base64,{_chart_mae_by_month(monthly, metadata)}" style="width:100%">
+    <img src="data:image/png;base64,{_chart_category_recall_by_month(monthly, metadata)}" style="width:100%">
+    <img src="data:image/png;base64,{_chart_category_precision_by_month(monthly, metadata)}" style="width:100%">
+    <img src="data:image/png;base64,{_chart_category_volume_by_month(monthly, metadata)}" style="width:100%">
   </div>
   <div class="section"><h2>Monthly summary</h2>
     <p style="font-size:0.85em;color:#555;">Click on a month to see detailed metrics for that month.</p>
@@ -740,7 +790,23 @@ def main() -> None:
         print(f"Loading records from {args.report_only} ...")
         records = pd.read_parquet(args.report_only)
         records["time"] = pd.to_datetime(records["time"], utc=True)
-        generate_reports(records, out_dir)
+
+        # Try to load metadata from JSON file if available
+        models_metadata = {}
+        metadata_file = out_dir / "models_metadata.json"
+        if metadata_file.exists():
+            try:
+                metadata_json = json.loads(metadata_file.read_text(encoding="utf-8"))
+                # Convert back to (station, variant) tuple keys
+                for key_str, meta in metadata_json.items():
+                    parts = key_str.split("/")
+                    if len(parts) == 2:
+                        models_metadata[(parts[0], parts[1])] = meta
+                print(f"  Loaded metadata for {len(models_metadata)} station/variant pairs")
+            except Exception as e:
+                print(f"  Warning: Could not load metadata: {e}")
+
+        generate_reports(records, out_dir, models_metadata)
         return
 
     print("Loading observation data...")
@@ -790,6 +856,13 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     records.to_parquet(out_dir / "records.parquet", index=False)
     print(f"  Records saved → {out_dir / 'records.parquet'}")
+
+    # Save metadata as JSON for report-only mode
+    if models_metadata:
+        metadata_file = out_dir / "models_metadata.json"
+        metadata_json = {k[0] + "/" + k[1]: v for k, v in models_metadata.items()}
+        metadata_file.write_text(json.dumps(metadata_json, indent=2), encoding="utf-8")
+        print(f"  Metadata saved → {metadata_file}")
 
     print("Generating reports...")
     generate_reports(records, out_dir, models_metadata)
