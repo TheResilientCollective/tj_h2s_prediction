@@ -104,9 +104,9 @@ def defs():
         station_model_archive,
         station_model_deployment,
         station_model_promotion,
-        multi_station_training_job,
-        station_deployment_job,
-        promote_station_models_job,
+        station_model_training_job,
+        station_model_deployment_job,
+        station_model_promotion_job,
     )
 
     # Import nowcast/nearcast/forecast products pipeline
@@ -125,14 +125,14 @@ def defs():
         forecast_validation_schedule,
     )
 
-    # Import daily analysis pipeline assets
+    # Import station forecast analysis pipeline assets
     from h2s.defs.h2s_daily_pipeline import (
         multi_station_model_artifacts,
         source_attribution,
-        daily_station_forecasts,
-        daily_dashboard_viz,
-        daily_summary_json,
-        daily_analysis_job,
+        station_forecasts,
+        station_forecast_dashboard,
+        station_forecast_summary,
+        station_forecast_analysis_job,
     )
 
     # Import dispersion modeling pipeline assets
@@ -174,11 +174,11 @@ def defs():
         monthly_model_training_schedule,
         forecast_prediction_job,
         forecast_prediction_schedule,
-        daily_validation_job,
-        daily_validation_metrics_job,
-        daily_validation_schedule,
-        multi_station_training_schedule,
-        daily_analysis_schedule,
+        station_forecast_validation_job,
+        station_forecast_validation_metrics_job,
+        station_forecast_validation_schedule,
+        station_model_training_schedule,
+        station_forecast_analysis_schedule,
         dispersion_inversion_job,
         dispersion_forecast_job,
         dispersion_hysplit_execution_job,
@@ -221,12 +221,12 @@ def defs():
             # Products pipeline (nowcast / nearcast / forecast)
             products_model_artifacts,
             h2s_products,
-            # Daily Analysis Pipeline Assets
+            # Station Forecast Analysis Pipeline Assets
             multi_station_model_artifacts,
             source_attribution,
-            daily_station_forecasts,
-            daily_dashboard_viz,
-            daily_summary_json,
+            station_forecasts,
+            station_forecast_dashboard,
+            station_forecast_summary,
             # Dispersion Pipeline Assets
             lagrangian_source_attribution,
             emission_rate_inversion,
@@ -255,24 +255,23 @@ def defs():
         jobs=[
             # Prediction jobs
             forecast_prediction_job,
-            daily_validation_job,
-            daily_validation_metrics_job,
+            station_forecast_validation_job,
+            station_forecast_validation_metrics_job,
             # Training jobs (old single-model pipeline — kept for reference)
             monthly_data_extraction_job,
             monthly_model_training_job,
             deploy_approved_model_job,
             approve_and_deploy_job,
             # New multi-station training jobs
-            multi_station_training_job,
-            station_deployment_job,
-            promote_station_models_job,
+            station_model_training_job,
+            station_model_deployment_job,
+            station_model_promotion_job,
             # Products job
             products_forecast_job,
             # Forecast validation store + rebuild (Phase 5)
-            forecast_validation_job,
             forecast_validation_rebuild_job,
-            # Daily analysis job
-            daily_analysis_job,
+            # Station forecast analysis job
+            station_forecast_analysis_job,
             # Dispersion jobs
             dispersion_inversion_job,
             dispersion_forecast_job,
@@ -292,11 +291,11 @@ def defs():
         ],
         schedules=[
             forecast_prediction_schedule,
-            daily_validation_schedule,
+            station_forecast_validation_schedule,
             monthly_data_schedule,
             monthly_model_training_schedule,
-            multi_station_training_schedule,
-            daily_analysis_schedule,
+            station_model_training_schedule,
+            station_forecast_analysis_schedule,
             # Dispersion schedules
             dispersion_inversion_schedule,
             dispersion_forecast_schedule,
@@ -306,8 +305,6 @@ def defs():
             daily_station_validation_schedule,
             # Forecast cascade pre-alert schedule
             cascade_alerts_schedule,
-            # Forecast validation store schedule (Phase 5)
-            forecast_validation_schedule,
         ],
         sensors=[slack_on_run_failure, h2s_alert_sensor, apcd_sensor_watch_sensor,
                  h2s_alert_performance_sensor],

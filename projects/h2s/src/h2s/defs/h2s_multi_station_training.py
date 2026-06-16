@@ -861,8 +861,8 @@ def station_model_promotion(context: dg.AssetExecutionContext) -> dict:
 # Job definitions
 # ==============================================================================
 
-multi_station_training_job = dg.define_asset_job(
-    name="multi_station_training_job",
+station_model_training_job = dg.define_asset_job(
+    name="station_model_training_job",
     description="Train per-station H2S models for all stations",
     selection=dg.AssetSelection.assets(
         multi_station_training_data,
@@ -874,8 +874,8 @@ multi_station_training_job = dg.define_asset_job(
     tags={"environment": "production", "pipeline": "h2s_multi_station_training"},
 )
 
-station_deployment_job = dg.define_asset_job(
-    name="station_deployment_job",
+station_model_deployment_job = dg.define_asset_job(
+    name="station_model_deployment_job",
     description=(
         "Deploy station models to S3 — running this job IS the approval. "
         "Pass approve_deployment=False in run config for a dry run."
@@ -885,8 +885,8 @@ station_deployment_job = dg.define_asset_job(
     tags={"environment": "production", "pipeline": "h2s_deployment"},
 )
 
-promote_station_models_job = dg.define_asset_job(
-    name="promote_station_models_job",
+station_model_promotion_job = dg.define_asset_job(
+    name="station_model_promotion_job",
     description=(
         "Promote an archived model version to production — running this job "
         "IS the approval. Configure version_tag (from the Slack training "

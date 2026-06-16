@@ -241,7 +241,7 @@ def daily_station_validation_report(context: AssetExecutionContext) -> dict[str,
         except Exception:
             raise dg.Failure(
                 f"No daily station forecast CSV found for {date_str}. "
-                f"Has daily_analysis_job run for this date?"
+                f"Has station_forecast_analysis_job run for this date?"
             )
 
     preds_df = pd.read_csv(csv_url)
