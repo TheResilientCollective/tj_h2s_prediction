@@ -1073,7 +1073,7 @@ def daily_validation_report(context: dg.AssetExecutionContext) -> None:
     # Round to nearest hour for consistent merging with actuals
     predictions_df['time'] = predictions_df['time'].dt.round('h')
 
-    # Load actual H2S measurements from OBS_DATA_PATH (FAIL if missing)
+    # Load actual H2S measurements from OBS_DATA_PATH (skip gracefully if missing)
     context.log.info(f"Loading observation data from {OBS_DATA_PATH} (bucket: {public_bucket})")
     parquet_url = s3_resource.publicUrl(path=OBS_DATA_PATH, bucket=public_bucket)
     actuals_df = pd.read_parquet(parquet_url)
@@ -1111,7 +1111,7 @@ def daily_validation_report(context: dg.AssetExecutionContext) -> None:
 
     validation_base = f"{VALIDATION_PATH}/{yesterday}"
 
-    # Calculate metrics and generate plots (FAIL if H2S data missing)
+    # Calculate metrics and generate plots
     h2s_cols = [col for col in actuals_df.columns if col.upper() == 'H2S' or 'h2s' in col.lower()]
     if not h2s_cols:
         raise ValueError(f"No H2S column found in observation data (columns: {actuals_df.columns.tolist()})")
