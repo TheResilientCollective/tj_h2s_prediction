@@ -59,12 +59,12 @@ from h2s.defs.h2s_multi_station_training import (
     multi_station_training_data,
     per_station_trained_models,
     station_training_report,
-    multi_station_training_job,
+    station_model_training_job,
     STATION_PARTITIONS,
 )
 
 from h2s.defs.h2s_daily_pipeline import (
-    daily_analysis_job,
+    station_forecast_analysis_job,
 )
 
 from h2s.constants import SCHEDULE_6HR
@@ -257,12 +257,12 @@ forecast_prediction_job = dg.define_asset_job(
 
 
 # ============================================================================
-# JOB 5: Daily Validation Report (unpartitioned)
+# JOB 5: Station Forecast Validation Report (unpartitioned)
 # ============================================================================
 
-daily_validation_metrics_job = dg.define_asset_job(
-    name="daily_validation_metrics_job",
-    description="Generate daily metrics only (useful for backfilling)",
+station_forecast_validation_metrics_job = dg.define_asset_job(
+    name="station_forecast_validation_metrics_job",
+    description="Generate station forecast validation metrics only (useful for backfilling)",
     selection=dg.AssetSelection.assets(
         daily_validation_report,
     ),
@@ -270,8 +270,8 @@ daily_validation_metrics_job = dg.define_asset_job(
     tags={"environment": "production", "pipeline": "h2s_validation"},
 )
 
-daily_validation_job = dg.define_asset_job(
-    name="daily_validation_job",
+station_forecast_validation_job = dg.define_asset_job(
+    name="station_forecast_validation_job",
     description="Compare previous day's H2S predictions against actual measurements and generate performance dashboard",
     selection=dg.AssetSelection.assets(
         daily_validation_report,
@@ -311,18 +311,18 @@ def forecast_prediction_schedule(context: dg.ScheduleEvaluationContext):
 
 
 # ============================================================================
-# SCHEDULE 4: Daily Validation (8 AM UTC)
+# SCHEDULE 4: Station Forecast Validation (8 AM UTC)
 # ============================================================================
 
 @dg.schedule(
-    job=daily_validation_job,
+    job=station_forecast_validation_job,
     cron_schedule="0 8 * * *",
-    description="Daily validation report at 8 AM UTC (after actuals data is expected)",
+    description="Station forecast validation report at 8 AM UTC (after actuals data is expected)",
     default_status=dg.DefaultScheduleStatus.RUNNING,
     tags={"environment": "production", "schedule_type": "validation"},
 )
-def daily_validation_schedule(context: dg.ScheduleEvaluationContext):
-    """Trigger daily validation report comparing predictions vs actuals.
+def station_forecast_validation_schedule(context: dg.ScheduleEvaluationContext):
+    """Trigger station forecast validation report comparing predictions vs actuals.
 
     Partition key is YESTERDAY's date (the day being validated).
     """
@@ -335,22 +335,22 @@ def daily_validation_schedule(context: dg.ScheduleEvaluationContext):
 
 
 # ============================================================================
-# SCHEDULE 5: Multi-Station Model Training (2 AM on 1st of month)
+# SCHEDULE 5: Station Model Training (2 AM on 1st of month)
 # ============================================================================
 
 @dg.schedule(
-    job=multi_station_training_job,
+    job=station_model_training_job,
     cron_schedule="0 2 1 * *",
-    description="Monthly multi-station training — all 3 stations on 1st of month at 2 AM UTC",
+    description="Monthly station model training — all 3 stations on 1st of month at 2 AM UTC",
     default_status=dg.DefaultScheduleStatus.RUNNING,
-    tags={"environment": "production", "schedule_type": "multi_station_training"},
+    tags={"environment": "production", "schedule_type": "station_model_training"},
 )
-def multi_station_training_schedule(context: dg.ScheduleEvaluationContext):
+def station_model_training_schedule(context: dg.ScheduleEvaluationContext):
     """Train per-station models for all partitions (one RunRequest per station)."""
     return [
         dg.RunRequest(
             partition_key=partition_key,
-            run_key=f"multi_station_training_{context.scheduled_execution_time.strftime('%Y-%m')}_{partition_key}",
+            run_key=f"station_model_training_{context.scheduled_execution_time.strftime('%Y-%m')}_{partition_key}",
             tags={"training_month": context.scheduled_execution_time.strftime('%Y-%m')},
         )
         for partition_key in STATION_PARTITIONS.get_partition_keys()
@@ -358,20 +358,20 @@ def multi_station_training_schedule(context: dg.ScheduleEvaluationContext):
 
 
 # ============================================================================
-# SCHEDULE 6: Daily Analysis (14:00 UTC = 6 AM PST)
+# SCHEDULE 6: Station Forecast Analysis (every 6h)
 # ============================================================================
 
 @dg.schedule(
-    job=daily_analysis_job,
+    job=station_forecast_analysis_job,
     cron_schedule=SCHEDULE_6HR,
-    description="Daily H2S source attribution + 48h forecast + dashboard (14:00 UTC / 6 AM PST)",
+    description="Station forecast analysis: H2S source attribution + 24h forecast + dashboard (every 6 hours: 00, 06, 12, 18 UTC)",
     default_status=dg.DefaultScheduleStatus.RUNNING,
-    tags={"environment": "production", "schedule_type": "daily_analysis"},
+    tags={"environment": "production", "schedule_type": "station_forecast_analysis"},
 )
-def daily_analysis_schedule(context: dg.ScheduleEvaluationContext):
-    """Trigger daily H2S analysis pipeline."""
+def station_forecast_analysis_schedule(context: dg.ScheduleEvaluationContext):
+    """Trigger station forecast analysis pipeline."""
     return dg.RunRequest(
-        run_key=f"daily_analysis_{context.scheduled_execution_time.strftime('%Y-%m-%d')}",
+        run_key=f"station_forecast_analysis_{context.scheduled_execution_time.strftime('%Y-%m-%d_%H')}",
     )
 
 

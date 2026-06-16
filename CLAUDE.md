@@ -105,7 +105,7 @@ cd projects/h2s
 # 1. Per-station models — trains, writes the promotable archive, AND deploys.
 #    Repeat for all three stations.
 for P in nestor_bes san_ysidro ib_civic_ctr; do
-  uv run dg launch --job multi_station_training_job --partition $P
+  uv run dg launch --job station_model_training_job --partition $P
   uv run dg launch --job station_deployment_job     --partition $P
 done
 
@@ -118,7 +118,7 @@ uv run dg launch --job forecast_validation_rebuild_job
 # Optional: products + Tier 1–3 cascade Slack alerts in one job
 uv run dg launch --job cascade_alerts_job
 # Optional: daily source attribution + dashboard
-uv run dg launch --job daily_analysis_job
+uv run dg launch --job forecast_analysis_job
 ```
 
 **Deploy vs. promote — you only need one.** `station_deployment_job` deploys the
@@ -126,7 +126,7 @@ models you just trained (running it *is* the approval) — use it for normal
 operation. `promote_station_models_job` is only for promoting a *specific older
 archived version* (the monthly review flow); skip it unless you are rolling back.
 Both read the archive that step 1 writes, so promote fails with "No archived
-versions found" until `multi_station_training_job` has run at least once.
+versions found" until `station_model_training_job` has run at least once.
 
 **On the stats (step 3):** the validation store joins forecasts against
 *measured* H2S, so it only carries rows where a product run's target hours have
@@ -145,17 +145,17 @@ cp .env.example .env   # fill in S3 credentials
 # 1. Train + deploy per-station daily models — the model-bootstrap path
 #    (repeat per partition: nestor_bes / san_ysidro / ib_civic_ctr).
 #    This also writes the immutable archive that promote_station_models_job reads.
-uv run dg launch --job multi_station_training_job --partition nestor_bes
+uv run dg launch --job station_model_training_job --partition nestor_bes
 uv run dg launch --job station_deployment_job --partition nestor_bes
 
 # 2. Run hourly forecast pipeline
 uv run dg launch --job forecast_prediction_job
 
 # 3. Run daily analysis (source attribution + station forecasts + dashboard)
-uv run dg launch --job daily_analysis_job
+uv run dg launch --job forecast_analysis_job
 ```
 
-The per-station training pipeline (`multi_station_training_job` →
+The per-station training pipeline (`station_model_training_job` →
 `station_deployment_job`) is the model-production path: it trains both feature
 variants (evidence + lean), writes training reports and data snapshots, and
 writes the immutable version archive that `promote_station_models_job` promotes
@@ -183,7 +183,7 @@ cd projects/h2s
 #    The archive asset writes an IMMUTABLE version to
 #    models/archive/stations/{KEY}/{version}/ and posts a new-vs-production
 #    comparison to Slack with a promote/review recommendation.
-uv run dg launch --job multi_station_training_job --partition <station>
+uv run dg launch --job station_model_training_job --partition <station>
 # Repeat for each of nestor_bes / san_ysidro / ib_civic_ctr.
 
 # 2. Review training metrics in Dagster UI (station_training_report asset
@@ -197,13 +197,13 @@ uv run dg launch --job station_deployment_job --partition <station>
 #     --config-json '{"ops":{"h2s__station_model_deployment":{"config":{"approve_deployment":false}}}}'
 
 # 4. Run daily analysis — it will re-load fresh models from S3
-uv run dg launch --job daily_analysis_job
+uv run dg launch --job forecast_analysis_job
 ```
 
-**Important:** `multi_station_training_job` stores models in Dagster's IO only
+**Important:** `station_model_training_job` stores models in Dagster's IO only
 (plus the immutable S3 archive). `station_deployment_job` uploads them to the
 production prefix where the daily pipeline reads from. Running
-`daily_analysis_job` after training but before deployment will use the
+`forecast_analysis_job` after training but before deployment will use the
 previously deployed models.
 
 ### Promoting an Archived Model Version (human-in-the-loop)
@@ -235,7 +235,7 @@ cd projects/h2s
 uv run dg launch --job forecast_prediction_job
 
 # Daily source attribution + station forecasts + dashboard (auto-runs daily at 8am)
-uv run dg launch --job daily_analysis_job
+uv run dg launch --job forecast_analysis_job
 
 # Dispersion modeling: 72h Gaussian forward forecast + alert check (auto-runs every 6h)
 uv run dg launch --job dispersion_forecast_job
@@ -312,9 +312,9 @@ config, schedule STOPPED — enable in Phase 6); the rebuild job passes
 forecast's target hours have since been observed, so the store fills in over the
 days after products start running.
 
-### Re-executing a Failed daily_analysis_job
+### Re-executing a Failed forecast_analysis_job
 
-If `daily_analysis_job` fails partway through, use **"Re-execute all"** in the Dagster UI — not "Re-execute failed steps". Re-executing only the failed step reads `multi_station_model_artifacts` from a stale IO cache and will fail again. Running all steps re-loads models fresh from S3.
+If `forecast_analysis_job` fails partway through, use **"Re-execute all"** in the Dagster UI — not "Re-execute failed steps". Re-executing only the failed step reads `multi_station_model_artifacts` from a stale IO cache and will fail again. Running all steps re-loads models fresh from S3.
 
 ### Dispersion Pipeline Operations
 
@@ -427,7 +427,7 @@ cd projects/h2s
 
 # Train per-station models locally for inspection (outputs to data/models_v2/YYYYMMDD/)
 # NOTE: local outputs are for analysis only — deploy through
-# multi_station_training_job → station_deployment_job.
+# station_model_training_job → station_deployment_job.
 uv run python scripts/train_station_models.py \
   --obs ../../data/modeldata_h2s_nofill.parquet \
   --models ../../data/models_v2/$(date +%Y%m%d)
@@ -516,7 +516,7 @@ h2s_model_artifacts → feature_importance_viz / confusion_matrix_viz / model_co
                     → prediction_timeline_viz / cross_correlation_viz
 ```
 
-**`daily_analysis_job`** (every 6h) — multi-station source attribution + 48h forecasts
+**`forecast_analysis_job`** (every 6h) — multi-station source attribution + 48h forecasts
 ```
 multi_station_model_artifacts → source_attribution → daily_station_forecasts → daily_dashboard_viz
                                                                               → daily_summary_json

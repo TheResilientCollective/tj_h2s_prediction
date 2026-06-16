@@ -1,14 +1,14 @@
-"""H2S Daily Analysis Pipeline — Multi-Station Source Attribution & Forecast.
+"""H2S Forecast Analysis Pipeline — Multi-Station Source Attribution & Forecast.
 
 Ported from src/h2s_daily_analysis.py as Dagster assets.
-Runs daily at 14:00 UTC (6 AM PST).
+Runs every 6 hours (00:00, 06:00, 12:00, 18:00 UTC).
 
 Assets:
   1. multi_station_model_artifacts — Load all 9 per-station models from S3
   2. source_attribution            — Last 7 days attribution via wind bearing + Gaussian plume
-  3. daily_station_forecasts       — 24h forward prediction per station
-  4. daily_dashboard_viz           — 5-row PNG dashboard
-  5. daily_summary_json            — JSON summary for web dashboards
+  3. station_forecasts             — 24h forward prediction per station
+  4. station_forecast_dashboard    — 5-row PNG dashboard
+  5. station_forecast_summary      — JSON summary for web dashboards
 """
 
 import io
@@ -375,7 +375,7 @@ def source_attribution(context: dg.AssetExecutionContext) -> pd.DataFrame:
         "forecast_hours": dg.Field(int, default_value=24),
     },
 )
-def daily_station_forecasts(
+def station_forecasts(
     context: dg.AssetExecutionContext,
     multi_station_model_artifacts: dict,
 ) -> pd.DataFrame:
@@ -567,16 +567,16 @@ def _generate_synthetic_forecast(obs_df: pd.DataFrame, hours: int) -> pd.DataFra
     description="5-row daily dashboard PNG (obs + source map + forecasts + exceedance probs)",
     ins={
         "source_attribution": dg.AssetIn(key=_KEY("source_attribution")),
-        "daily_station_forecasts": dg.AssetIn(key=_KEY("daily_station_forecasts")),
+        "station_forecasts": dg.AssetIn(key=_KEY("station_forecasts")),
     },
     config_schema={
         "obs_bucket": dg.Field(str, default_value="resilentpublic"),
     },
 )
-def daily_dashboard_viz(
+def station_forecast_dashboard(
     context: dg.AssetExecutionContext,
     source_attribution: pd.DataFrame,
-    daily_station_forecasts: pd.DataFrame,
+    station_forecasts: pd.DataFrame,
 ) -> None:
     """Generate and upload the 5-row daily dashboard PNG to S3."""
     import matplotlib
@@ -605,7 +605,7 @@ def daily_dashboard_viz(
 
     station_list = ['SAN YSIDRO', 'NESTOR - BES', 'IB CIVIC CTR']
     attr_df = source_attribution
-    fc_df = daily_station_forecasts
+    fc_df = station_forecasts
 
     fig = plt.figure(figsize=(24, 28))
     fig.set_facecolor('#0f0f1a')
@@ -613,7 +613,7 @@ def daily_dashboard_viz(
                           height_ratios=[0.3, 1.0, 1.0, 1.0, 1.0])
 
     run_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
-    fig.suptitle(f'H₂S Daily Analysis & Forecast Dashboard\n{run_str}',
+    fig.suptitle(f'H₂S Forecast Analysis & Station Forecast Dashboard\n{run_str}',
                  fontsize=16, fontweight='bold', color='white', y=0.99)
 
     fc48 = (fc_df[fc_df['time'] <= fc_df['time'].min() + pd.Timedelta(hours=24)]
@@ -844,17 +844,17 @@ def _compute_source_probability_grid(obs_df: pd.DataFrame):
     description="JSON summary for web dashboards (station stats, 24h rollup, active sources)",
     ins={
         "source_attribution": dg.AssetIn(key=_KEY("source_attribution")),
-        "daily_station_forecasts": dg.AssetIn(key=_KEY("daily_station_forecasts")),
+        "station_forecasts": dg.AssetIn(key=_KEY("station_forecasts")),
     },
-    deps=[_KEY("daily_station_forecasts")],
+    deps=[_KEY("station_forecasts")],
     config_schema={
         "obs_bucket": dg.Field(str, default_value="resilentpublic"),
     },
 )
-def daily_summary_json(
+def station_forecast_summary(
     context: dg.AssetExecutionContext,
     source_attribution: pd.DataFrame,
-    daily_station_forecasts: pd.DataFrame,
+    station_forecasts: pd.DataFrame,
 ) -> dict:
     """Generate and upload daily summary JSON to S3."""
     s3 = context.resources.s3
@@ -873,7 +873,7 @@ def daily_summary_json(
     obs_df['H2S'] = obs_df['H2S'].clip(lower=0)
 
     attr_df = source_attribution
-    fc_df = daily_station_forecasts
+    fc_df = station_forecasts
 
     summary = {
         'generated_at': datetime.now(timezone.utc).isoformat(),
@@ -1049,15 +1049,15 @@ def daily_summary_json(
 # Job definition
 # ==============================================================================
 
-daily_analysis_job = dg.define_asset_job(
-    name="daily_analysis_job",
-    description="Run daily H2S source attribution + 24h forecast + dashboard + JSON summary",
+station_forecast_analysis_job = dg.define_asset_job(
+    name="station_forecast_analysis_job",
+    description="Run station forecast analysis: source attribution + 24h forecast + dashboard + JSON summary",
     selection=dg.AssetSelection.assets(
         multi_station_model_artifacts,
         source_attribution,
-        daily_station_forecasts,
-        daily_dashboard_viz,
-        daily_summary_json,
+        station_forecasts,
+        station_forecast_dashboard,
+        station_forecast_summary,
     ),
     tags={"environment": "production", "pipeline": "h2s_daily"},
 )

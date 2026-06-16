@@ -1109,11 +1109,11 @@ def generate_h2s_line_chart(
     return buf
 
 
-def generate_daily_slack_chart(daily_station_forecasts: pd.DataFrame, env_label: str = "") -> BytesIO:
-    """Generate a 3-panel 48h forecast chart for the daily pipeline Slack message.
+def generate_daily_slack_chart(station_forecasts: pd.DataFrame, env_label: str = "") -> BytesIO:
+    """Generate a 3-panel 24h forecast chart for the station forecast analysis Slack message.
 
     Args:
-        daily_station_forecasts: Output of the daily_station_forecasts asset with columns:
+        station_forecasts: Output of the station_forecasts asset with columns:
             time, station, h2s_pred, risk, temp, wind_speed.
         env_label: Optional environment label (e.g. "DEV") for the title.
 
@@ -1126,7 +1126,7 @@ def generate_daily_slack_chart(daily_station_forecasts: pd.DataFrame, env_label:
     pacific = ZoneInfo("America/Los_Angeles")
     station_colors = {"IB_CIVIC_CTR": "#1565c0", "NESTOR__BES": "#6a1b9a", "SAN_YSIDRO": "#2e7d32"}
 
-    df = daily_station_forecasts.copy()
+    df = station_forecasts.copy()
     if "time" in df.columns:
         df["time_pt"] = df["time"].apply(
             lambda t: t.astimezone(pacific) if hasattr(t, "astimezone") else t
