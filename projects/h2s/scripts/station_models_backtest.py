@@ -157,7 +157,7 @@ def load_station_models(s3, station_key: str, variant: str) -> dict | None:
     single-variant deployments — those have no Lean and may lack clf_30ppb, which
     degrade gracefully (Lean skipped, p30 → NaN).
 
-    Returns {task: model, '_features': [...], '_legacy': bool} or None if no
+    Returns {task: model, '_features': [...], '_legacy': bool, '_metadata': {...}} or None if no
     regression model is found.
     """
     base = f"{_STATION_MODELS_BASE}/{station_key}"
@@ -194,8 +194,17 @@ def load_station_models(s3, station_key: str, variant: str) -> dict | None:
         from h2s.constants import MODEL_FEATURES, MODEL_FEATURES_LEAN
         feats = MODEL_FEATURES if variant == "evidence" else MODEL_FEATURES_LEAN
 
+    # Try to load deployment metadata
+    metadata = {}
+    try:
+        meta_bytes = s3.getFile(path=f"{base}/deployment_metadata.json", bucket=s3.S3_BUCKET)
+        metadata = json.loads(meta_bytes.decode("utf-8"))
+    except Exception:
+        pass
+
     models["_features"] = feats
     models["_legacy"] = legacy
+    models["_metadata"] = metadata
     return models
 
 
@@ -468,7 +477,32 @@ tr:hover td { background: #f0f4ff; }
 .ev { background:#dbeafe; color:#1e40af; } .ln { background:#ede9fe; color:#5b21b6; }
 .month-link { color: #2563eb; text-decoration: none; cursor: pointer; }
 .month-link:hover { text-decoration: underline; }
+.metadata-box { background: #f0f4ff; border-left: 4px solid #2563eb; padding: 12px 14px; margin-bottom: 16px; font-size: 0.84em; border-radius: 4px; }
+.metadata-box > div { margin: 5px 0; }
+.metadata-box b { color: #1a2233; }
 """
+
+
+def _metadata_section(metadata: dict = None, test_data_range: tuple = None) -> str:
+    """Format model and test data metadata into HTML."""
+    html = '<div class="metadata-box">'
+
+    # Model training info
+    if metadata and metadata.get('model_version'):
+        html += f"<div><b>Model version:</b> {metadata['model_version']}</div>"
+    if metadata and metadata.get('training_date'):
+        html += f"<div><b>Trained:</b> {metadata['training_date']}</div>"
+    if metadata and metadata.get('training_data_range'):
+        html += f"<div><b>Training data:</b> {metadata['training_data_range']}</div>"
+
+    # Test data info
+    if test_data_range:
+        start, end = test_data_range
+        html += f"<div><b>Backtest data (holdout):</b> {start.strftime('%Y-%m-%d')} to {end.strftime('%Y-%m-%d')}</div>"
+        html += f"<div style='font-size:0.85em;color:#666;margin-top:6px;'>Features use observed H2S values (oracle one-step inputs) — not recursive forecasts</div>"
+
+    html += '</div>'
+    return html
 
 
 def _cards(m: dict) -> str:
@@ -533,12 +567,21 @@ def _monthly_table(monthly: dict, months: list[str], station: str = None, varian
     return f"<table><thead>{head}</thead><tbody>{rows}</tbody></table>"
 
 
-def build_month_page(station: str, variant: str, month: str, month_data: pd.DataFrame, metrics: dict) -> str:
+def build_month_page(station: str, variant: str, month: str, month_data: pd.DataFrame, metrics: dict, metadata: dict = None) -> str:
     """Build detail page for a single month."""
     vlabel = "Evidence (33 feat)" if variant == "evidence" else "Lean (19 feat)"
     page_title = f"{station} — {vlabel} — {month}"
     rng = f"{month_data['time'].min().strftime('%Y-%m-%d')} – {month_data['time'].max().strftime('%Y-%m-%d')}"
     station_clean = station.replace(' ', '_').replace('-', '')
+
+    metadata_html = ""
+    if metadata and metadata.get('model_version'):
+        metadata_html = f"""<div class="metadata-box">
+    <div><b>Model version:</b> {metadata.get('model_version')}</div>"""
+        if metadata.get('training_date'):
+            metadata_html += f"<div><b>Trained:</b> {metadata['training_date']}</div>"
+        metadata_html += "</div>"
+
     return f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Backtest — {page_title}</title><style>{_CSS}</style></head><body>
@@ -546,6 +589,7 @@ def build_month_page(station: str, variant: str, month: str, month_data: pd.Data
 <p>{rng} · {metrics['n']:,} hours</p></div>
 <div class="nav"><a href="../{station_clean}_{variant}.html">← Back to {station}</a></div>
 <div class="content">
+  {f'<div class="section"><h2>Model Info</h2>{metadata_html}</div>' if metadata_html else ''}
   <div class="section"><h2>Monthly metrics — {month}</h2>{_cards(metrics)}
     <div class="chart-row">
       <img src="data:image/png;base64,{_chart_confusion(metrics, 'Confusion matrix')}" style="max-width:380px">
@@ -557,7 +601,7 @@ def build_month_page(station: str, variant: str, month: str, month_data: pd.Data
 </div></body></html>"""
 
 
-def build_station_page(station: str, variant: str, records: pd.DataFrame, monthly: dict) -> str:
+def build_station_page(station: str, variant: str, records: pd.DataFrame, monthly: dict, metadata: dict = None) -> str:
     overall = monthly["ALL"]
     months = [m for m in sorted(monthly) if m != "ALL"]
     rng = f"{records['time'].min().strftime('%Y-%m-%d')} – {records['time'].max().strftime('%Y-%m-%d')}"
@@ -569,6 +613,9 @@ def build_station_page(station: str, variant: str, records: pd.DataFrame, monthl
         month_tabs += f'<a href="#{m}" class="month-tab">{m}</a>'
     month_tabs += '</div>'
 
+    test_data_range = (records['time'].min(), records['time'].max())
+    metadata_html = _metadata_section(metadata, test_data_range)
+
     return f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Backtest — {station} / {variant}</title><style>{_CSS}</style></head><body>
@@ -577,6 +624,7 @@ def build_station_page(station: str, variant: str, records: pd.DataFrame, monthl
 <div class="nav"><a href="index.html">↑ All stations</a></div>
 {month_tabs}
 <div class="content">
+  <div class="section"><h2 id="overall">Model & Data Info</h2>{metadata_html}</div>
   <div class="section"><h2 id="overall">Overall</h2>{_cards(overall)}
     <div class="chart-row">
       <img src="data:image/png;base64,{_chart_confusion(overall, 'Confusion matrix (category from regression)')}" style="max-width:380px">
@@ -639,13 +687,16 @@ def build_index(summaries: list[dict], records: pd.DataFrame) -> str:
 
 # ── orchestration ─────────────────────────────────────────────────────────────
 
-def generate_reports(records: pd.DataFrame, output_dir: Path) -> None:
+def generate_reports(records: pd.DataFrame, output_dir: Path, models_metadata: dict = None) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     summaries = []
     for (station, variant), sub in records.groupby(["station", "variant"]):
         monthly = monthly_metrics(sub)
         station_clean = station.replace(' ', '_').replace('-', '')
         page = f"{station_clean}_{variant}.html"
+
+        # Get metadata for this station/variant
+        metadata = models_metadata.get((station, variant), {}) if models_metadata else {}
 
         # Generate individual month detail pages
         month_dir = output_dir / f"{station_clean}_{variant}_monthly"
@@ -656,12 +707,12 @@ def generate_reports(records: pd.DataFrame, output_dir: Path) -> None:
             month_metrics = compute_metrics(month_records)
             month_page = f"{month}.html"
             (month_dir / month_page).write_text(
-                build_month_page(station, variant, month, month_records, month_metrics),
+                build_month_page(station, variant, month, month_records, month_metrics, metadata),
                 encoding="utf-8")
 
         # Generate main station page
         (output_dir / page).write_text(
-            build_station_page(station, variant, sub, monthly), encoding="utf-8")
+            build_station_page(station, variant, sub, monthly, metadata), encoding="utf-8")
         print(f"  {page}")
         for month in months:
             print(f"    → {month}.html")
@@ -709,6 +760,7 @@ def main() -> None:
     print(f"Loading models from s3://{s3.S3_BUCKET}/{_STATION_MODELS_BASE} ...")
 
     all_records = []
+    models_metadata = {}
     for station in stations:
         if station not in STATIONS:
             print(f"  ! unknown station '{station}' — skipping"); continue
@@ -727,6 +779,8 @@ def main() -> None:
             print(f"  ✓ {station}/{variant}: {len(rec):,} predictions, "
                   f"{len(models['_features'])} feat, {has30}{tag} "
                   f"(Spearman={spearman_rank(rec['actual_h2s'], rec['h2s_pred']):.3f})")
+            # Store metadata for this station/variant
+            models_metadata[(station, variant)] = models.get("_metadata", {})
 
     if not all_records:
         print("No predictions generated — check model deployment / station names.")
@@ -738,7 +792,7 @@ def main() -> None:
     print(f"  Records saved → {out_dir / 'records.parquet'}")
 
     print("Generating reports...")
-    generate_reports(records, out_dir)
+    generate_reports(records, out_dir, models_metadata)
 
 
 if __name__ == "__main__":
