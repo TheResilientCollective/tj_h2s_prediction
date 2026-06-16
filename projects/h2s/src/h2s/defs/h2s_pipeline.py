@@ -1050,11 +1050,12 @@ def daily_validation_report(context: dg.AssetExecutionContext) -> None:
             context.log.warning(f"No predictions found for {yesterday}_{hour}: {e}")
 
     if not prediction_dfs:
-        raise dg.Failure(
-            f"No predictions found for {yesterday} in "
+        context.log.warning(
+            f"Skipping validation: no predictions found for {yesterday} in "
             f"{HOURLY_PREDICTIONS_PATH}/model=nestor_xgboost/year={y}/month={m}/day={d}/hour={{00,06,12,18}}/. "
             f"Is forecast_prediction_schedule running?"
         )
+        return
 
     predictions_df = pd.concat(prediction_dfs, ignore_index=True)
     context.log.info(f"Combined {len(predictions_df)} predictions across {len(prediction_dfs)} runs")
@@ -1102,10 +1103,11 @@ def daily_validation_report(context: dg.AssetExecutionContext) -> None:
     context.log.info(f"✓ Loaded {len(actuals_df)} actual H2S measurements for NESTOR-BES on {yesterday}")
 
     if len(actuals_df) == 0:
-        raise dg.Failure(
-            f"No observation data found for NESTOR-BES on {yesterday}. "
+        context.log.warning(
+            f"Skipping validation: no observation data found for NESTOR-BES on {yesterday}. "
             f"Sensors may be offline or {OBS_DATA_PATH} may not cover this date."
         )
+        return
 
     validation_base = f"{VALIDATION_PATH}/{yesterday}"
 
@@ -1129,11 +1131,12 @@ def daily_validation_report(context: dg.AssetExecutionContext) -> None:
     context.log.info(f"Merged {len(merged)} predictions with actuals (match rate: {len(merged)/len(predictions_df):.1%})")
 
     if len(merged) == 0:
-        raise dg.Failure(
-            f"No predictions matched with actuals for {yesterday}. "
+        context.log.warning(
+            f"Skipping validation: no predictions matched with actuals for {yesterday}. "
             f"Predictions: {predictions_df['time'].min()} to {predictions_df['time'].max()}, "
             f"Actuals: {actuals_df['time'].min()} to {actuals_df['time'].max()}"
         )
+        return
 
     # Categorize actual H2S values
     def categorize_h2s(value):
@@ -1149,10 +1152,11 @@ def daily_validation_report(context: dg.AssetExecutionContext) -> None:
     merged = merged[merged['actual_category'].notna()].copy()
 
     if len(merged) == 0:
-        raise dg.Failure(
-            f"No valid H2S measurements for {yesterday} after filtering NaNs. "
+        context.log.warning(
+            f"Skipping validation: no valid H2S measurements for {yesterday} after filtering NaNs. "
             f"Sensors may be offline for maintenance."
         )
+        return
 
     # Convert string categories to integers (for calculate_metrics compatibility)
     y_true_int = merged['actual_category'].map(H2S_CLASS_TO_INT)
