@@ -319,17 +319,19 @@ _C = {"green": "#27ae60", "yellow": "#f39c12", "orange": "#e74c3c",
       "blue": "#2980b9", "purple": "#8e44ad"}
 
 
-def _get_training_end_month(metadata: dict = None) -> str | None:
-    """Extract training end month from metadata, e.g. '2024-09' from various formats."""
+def _get_training_end_month(metadata: dict = None, records: pd.DataFrame = None) -> str | None:
+    """Extract training end month from metadata or estimate from training data split."""
     if not metadata:
         return None
 
-    # Try different metadata field names
+    # Try different metadata field names for explicit date range
     candidates = [
         ('training_data_range', 'training_data_range'),  # deployment_metadata format: "2024-01 to 2024-09"
         ('training_date_range', 'training_date_range'),   # alternate format
         ('training_end_date', 'training_end_date'),       # single date format
         ('training_period', 'training_period'),           # another alternate
+        ('training_dates', 'training_dates'),
+        ('data_range', 'data_range'),
     ]
 
     for field_name, desc in candidates:
@@ -355,6 +357,17 @@ def _get_training_end_month(metadata: dict = None) -> str | None:
         except Exception:
             continue
 
+    # Fallback: if we have training snapshot with timestamp, use that as approximate training end
+    try:
+        if 'training_snapshot' in metadata and isinstance(metadata['training_snapshot'], dict):
+            timestamp = metadata['training_snapshot'].get('timestamp', '')
+            if timestamp and 'T' in timestamp:
+                # Format like "2026-06-16T185116Z" -> "2026-06"
+                date_part = timestamp.split('T')[0]
+                return '-'.join(date_part.split('-')[:2])
+    except Exception:
+        pass
+
     return None
 
 
@@ -373,9 +386,15 @@ def _chart_spearman_recall_by_month(monthly: dict, metadata: dict = None) -> str
 
     # Add training/test split line if metadata available
     training_end = _get_training_end_month(metadata)
-    if training_end and training_end in months:
-        split_idx = months.index(training_end) + 0.5
-        ax.axvline(split_idx, color="#e74c3c", lw=2, ls="--", alpha=0.7, label="Training data end")
+    if training_end:
+        if training_end in months:
+            split_idx = months.index(training_end) + 0.5
+            ax.axvline(split_idx, color="#e74c3c", lw=2, ls="--", alpha=0.7, label="Training data end")
+        elif training_end > months[-1] if months else False:
+            # Training end is beyond backtest data - show at the right edge
+            # Position line slightly past the last data point to make it visible
+            split_idx = len(months) + 0.3
+            ax.axvline(split_idx, color="#e74c3c", lw=2.5, ls="--", alpha=0.8, label=f"Training data end ({training_end})")
 
     ax.set_xticks(list(xs)); ax.set_xticklabels(months, rotation=45, ha="right", fontsize=8)
     ax.set_ylim(0, 1.05)
@@ -398,9 +417,15 @@ def _chart_mae_by_month(monthly: dict, metadata: dict = None) -> str:
 
     # Add training/test split line if metadata available
     training_end = _get_training_end_month(metadata)
-    if training_end and training_end in months:
-        split_idx = months.index(training_end) + 0.5
-        ax.axvline(split_idx, color="#e74c3c", lw=2, ls="--", alpha=0.7, label="Training data end")
+    if training_end:
+        if training_end in months:
+            split_idx = months.index(training_end) + 0.5
+            ax.axvline(split_idx, color="#e74c3c", lw=2, ls="--", alpha=0.7, label="Training data end")
+        elif training_end > months[-1] if months else False:
+            # Training end is beyond backtest data - show at the right edge
+            # Position line slightly past the last data point to make it visible
+            split_idx = len(months) + 0.3
+            ax.axvline(split_idx, color="#e74c3c", lw=2.5, ls="--", alpha=0.8, label=f"Training data end ({training_end})")
 
     ax.set_xticks(list(xs)); ax.set_xticklabels(months, rotation=45, ha="right", fontsize=8)
     ax.set_ylabel("MAE (ppb)"); ax2.set_ylabel("Orange hours")
@@ -424,9 +449,15 @@ def _chart_category_recall_by_month(monthly: dict, metadata: dict = None) -> str
 
     # Add training/test split line if metadata available
     training_end = _get_training_end_month(metadata)
-    if training_end and training_end in months:
-        split_idx = months.index(training_end) + 0.5
-        ax.axvline(split_idx, color="#e74c3c", lw=2, ls="--", alpha=0.7, label="Training data end")
+    if training_end:
+        if training_end in months:
+            split_idx = months.index(training_end) + 0.5
+            ax.axvline(split_idx, color="#e74c3c", lw=2, ls="--", alpha=0.7, label="Training data end")
+        elif training_end > months[-1] if months else False:
+            # Training end is beyond backtest data - show at the right edge
+            # Position line slightly past the last data point to make it visible
+            split_idx = len(months) + 0.3
+            ax.axvline(split_idx, color="#e74c3c", lw=2.5, ls="--", alpha=0.8, label=f"Training data end ({training_end})")
 
     ax.set_xticks(list(xs)); ax.set_xticklabels(months, rotation=45, ha="right", fontsize=8)
     ax.set_ylim(0, 1.05)
@@ -450,9 +481,15 @@ def _chart_category_precision_by_month(monthly: dict, metadata: dict = None) -> 
 
     # Add training/test split line if metadata available
     training_end = _get_training_end_month(metadata)
-    if training_end and training_end in months:
-        split_idx = months.index(training_end) + 0.5
-        ax.axvline(split_idx, color="#e74c3c", lw=2, ls="--", alpha=0.7, label="Training data end")
+    if training_end:
+        if training_end in months:
+            split_idx = months.index(training_end) + 0.5
+            ax.axvline(split_idx, color="#e74c3c", lw=2, ls="--", alpha=0.7, label="Training data end")
+        elif training_end > months[-1] if months else False:
+            # Training end is beyond backtest data - show at the right edge
+            # Position line slightly past the last data point to make it visible
+            split_idx = len(months) + 0.3
+            ax.axvline(split_idx, color="#e74c3c", lw=2.5, ls="--", alpha=0.8, label=f"Training data end ({training_end})")
 
     ax.set_xticks(list(xs)); ax.set_xticklabels(months, rotation=45, ha="right", fontsize=8)
     ax.set_ylim(0, 1.05)
@@ -476,9 +513,15 @@ def _chart_category_volume_by_month(monthly: dict, metadata: dict = None) -> str
 
     # Add training/test split line if metadata available
     training_end = _get_training_end_month(metadata)
-    if training_end and training_end in months:
-        split_idx = months.index(training_end) + 0.5
-        ax.axvline(split_idx, color="#e74c3c", lw=2, ls="--", alpha=0.7, label="Training data end")
+    if training_end:
+        if training_end in months:
+            split_idx = months.index(training_end) + 0.5
+            ax.axvline(split_idx, color="#e74c3c", lw=2, ls="--", alpha=0.7, label="Training data end")
+        elif training_end > months[-1] if months else False:
+            # Training end is beyond backtest data - show at the right edge
+            # Position line slightly past the last data point to make it visible
+            split_idx = len(months) + 0.3
+            ax.axvline(split_idx, color="#e74c3c", lw=2.5, ls="--", alpha=0.8, label=f"Training data end ({training_end})")
 
     ax.set_xticks(list(xs)); ax.set_xticklabels(months, rotation=45, ha="right", fontsize=8)
     ax.set_ylabel("Hours observed")
