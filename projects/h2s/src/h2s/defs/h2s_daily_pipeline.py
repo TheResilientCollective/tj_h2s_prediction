@@ -37,6 +37,7 @@ from h2s.constants import (
     WIND_COL,
     classify_risk,
 )
+from h2s.forecasting.recursive import VariantModels, run_products
 
 ENV_LABEL = os.environ.get("ENV_LABEL", "add_ENV_LABEL").upper()
 _KEY = lambda name: dg.AssetKey(["h2s", name])
@@ -472,33 +473,53 @@ def daily_station_forecasts(
             if col not in sfc.columns:
                 sfc[col] = 0.0
 
-        X = sfc[feature_cols].fillna(0).values
+        sfc[feature_cols] = sfc[feature_cols].fillna(0.0)
 
-        reg = station_models['regression']
-        clf5 = station_models.get('clf_5ppb')
-        clf10 = station_models.get('clf_10ppb')
+        # Recursive engine — identical to the products pipeline (h2s_products):
+        # predict hour by hour, feeding each prediction back through the H2S
+        # lag/rolling features. run_products overwrites the five autoregressive
+        # columns per lead; _engineer_forecast_features above still supplies the
+        # exogenous features (wind rolls, cyclicals, flow, interactions). This
+        # replaces the previous decay-heuristic single-shot predict, so the daily
+        # forecast now matches the cascade/products and the Phase-5 store.
+        h2s_history = ss['H2S'].tail(24).tolist() if len(ss) > 0 else [last_state['h2s']]
+        models = VariantModels(
+            regression=station_models['regression'],
+            clf_5ppb=station_models.get('clf_5ppb'),
+            clf_10ppb=station_models.get('clf_10ppb'),
+            clf_30ppb=station_models.get('clf_30ppb'),
+        )
+        product_rows = run_products(sfc, h2s_history, models, list(feature_cols))
+        sfc_by_lead = {i + 1: sfc.iloc[i] for i in range(len(sfc))}
 
-        h2s_pred = np.clip(reg.predict(X), 0, None)
-        prob_5 = clf5.predict_proba(X)[:, 1] * 100 if clf5 else np.zeros(len(X))
-        prob_10 = clf10.predict_proba(X)[:, 1] * 100 if clf10 else np.zeros(len(X))
-
-        for i in range(len(sfc)):
-            is_night = bool(sfc['is_night'].iloc[i])
-            wd = float(sfc[WIND_COL].iloc[i]) if WIND_COL in sfc.columns else 0.0
+        for _, prow in product_rows.iterrows():
+            row = sfc_by_lead.get(int(prow['lead_hour']))
+            if row is None:
+                continue
+            is_night = bool(row['is_night'])
+            wd = float(row[WIND_COL]) if WIND_COL in row.index else 0.0
             aligned = _find_aligned_source(site, wd, is_night)
 
+            h2s_pred = float(prow['h2s_pred'])
+            p5 = float(prow['p5']) if pd.notna(prow['p5']) else 0.0
+            p10 = float(prow['p10']) if pd.notna(prow['p10']) else 0.0
+            p30 = float(prow['p30']) if pd.notna(prow['p30']) else 0.0
+
             results.append({
-                'time': sfc['time'].iloc[i],
+                'time': prow['time'],
                 'station': site,
-                'h2s_pred': round(float(h2s_pred[i]), 1),
-                'prob_5': round(float(prob_5[i]), 1),
-                'prob_10': round(float(prob_10[i]), 1),
-                'risk': classify_risk(prob_5[i] / 100, prob_10[i] / 100, h2s_pred[i]),
-                'wind_speed': round(float(sfc.get(SPEED_COL, pd.Series([0])).iloc[i]), 1),
+                'lead_hour': int(prow['lead_hour']),
+                'product': prow['product'],
+                'h2s_pred': round(h2s_pred, 1),
+                'prob_5': round(p5 * 100, 1),
+                'prob_10': round(p10 * 100, 1),
+                'prob_30': round(p30 * 100, 1),
+                'risk': classify_risk(p5, p10, h2s_pred, p30),
+                'wind_speed': round(float(row[SPEED_COL]) if SPEED_COL in row.index else 0.0, 1),
                 'wind_dir': round(float(wd)),
-                'temp': round(float(sfc['temperature_2m'].iloc[i]) if 'temperature_2m' in sfc.columns else 0, 1),
-                'tide': round(float(sfc['tide_height'].iloc[i]) if 'tide_height' in sfc.columns else 0, 2),
-                'flow': round(float(sfc[FLOW_COL].iloc[i]) if FLOW_COL in sfc.columns else 2.0, 2),
+                'temp': round(float(row['temperature_2m']) if 'temperature_2m' in row.index else 0.0, 1),
+                'tide': round(float(row['tide_height']) if 'tide_height' in row.index else 0.0, 2),
+                'flow': round(float(row[FLOW_COL]) if FLOW_COL in row.index else 2.0, 2),
                 'is_night': is_night,
                 'aligned_source': aligned,
                 'model_version': station_models.get('_model_version', 'unversioned'),
@@ -896,6 +917,7 @@ def daily_summary_json(
                 'max_h2s': round(float(sf['h2s_pred'].max()), 1),
                 'max_prob_5': round(float(sf['prob_5'].max()), 1),
                 'max_prob_10': round(float(sf['prob_10'].max()), 1),
+                'max_prob_30': round(float(sf['prob_30'].max()), 1) if 'prob_30' in sf.columns else 0.0,
                 'hours_orange': int(risk_counts.get('ORANGE', 0)),
                 'hours_yellow_high': int(risk_counts.get('YELLOW_HIGH', 0)),
                 'hours_yellow_low': int(risk_counts.get('YELLOW_LOW', 0)),
