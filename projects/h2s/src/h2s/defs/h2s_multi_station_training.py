@@ -646,9 +646,8 @@ def station_model_archive(
     partitions_def=STATION_PARTITIONS,
     required_resource_keys={"s3"},
     kinds={"python", "s3"},
-    description="Manual approval gate → upload station models to S3 production path",
+    description="Manual approval gate → copy archived station models to S3 production path",
     ins={
-        "per_station_trained_models": dg.AssetIn(key=_KEY("per_station_trained_models")),
         "station_model_archive": dg.AssetIn(key=_KEY("station_model_archive")),
     },
     config_schema={
@@ -657,32 +656,32 @@ def station_model_archive(
             default_value=True,
             description=(
                 "Default True: running station_deployment_job IS the approval — "
-                "models are uploaded to S3. Set to False for a dry run that "
-                "loads + validates the trained models without writing to S3."
+                "models are copied to S3. Set to False for a dry run that "
+                "validates without writing to S3."
             ),
         ),
     },
 )
 def station_model_deployment(
     context: dg.AssetExecutionContext,
-    per_station_trained_models: dict,
     station_model_archive: dict,
 ) -> dict:
-    """Upload trained station models to S3 (default) or dry-run.
+    """Copy archived station models to S3 production path (default) or dry-run.
 
-    By default, running station_deployment_job uploads the trained models to
-    S3 — the act of launching the job IS the approval. Pass
+    By default, running station_deployment_job copies the archived models to
+    S3 production — the act of launching the job IS the approval. Pass
     `approve_deployment=False` in the asset config to do a dry run that
-    validates the upstream models without writing to S3 (returns
-    `{"status": "dry_run", ...}`).
+    validates without writing to S3 (returns `{"status": "dry_run", ...}`).
 
-    Models are written to: tijuana/forecast/models/stations/{station_key}/{task}.pkl
+    Uses server-side S3 copy (no download/upload round trip) from the archive
+    to the production path. Models are written to:
+      tijuana/forecast/models/stations/{station_key}/{task}.pkl
 
-    Both Evidence (33-feat, the production default — no suffix) and Lean
-    (19-feat, suffix `_lean`) variants are uploaded each cycle. Schema files
-    `features.json` and `features_lean.json` describe each variant's column
-    order so a consumer can load `regression{_lean}.pkl` + `features{_lean}.json`
-    and produce inferences end-to-end.
+    Both Evidence (33-feat, the production default — suffix `_evidence`) and Lean
+    (19-feat, suffix `_lean`) variants are deployed each cycle. Schema files
+    `features_evidence.json` and `features_lean.json` describe each variant's
+    column order so a consumer can load `regression_evidence.pkl` +
+    `features_evidence.json` and produce inferences end-to-end.
     """
     partition = context.partition_key
     site_name = STATION_PARTITION_MAP[partition]
@@ -690,53 +689,40 @@ def station_model_deployment(
     approved = context.op_config["approve_deployment"]
 
     station_key = STATIONS[site_name]['key']
-    base_path = f"{STATION_MODELS_S3_BASE}/{station_key}"
+    archive_prefix = station_model_archive.get("archive_prefix")
+    prod_base = f"{STATION_MODELS_S3_BASE}/{station_key}"
 
     if not approved:
         context.log.warning(
             f"Dry-run for {site_name} (approve_deployment=False). "
-            f"Skipping S3 upload."
+            f"Skipping S3 copy."
         )
         return {"status": "dry_run", "station": site_name}
 
-    context.log.info(f"Deploying models for {site_name} to S3: {base_path}")
+    context.log.info(f"Deploying models for {site_name} to S3: {prod_base}")
 
-    # Upload each variant's pickles (Evidence's filenames are unsuffixed,
-    # Lean's carry `_lean`). The dict already contains both sets keyed
-    # appropriately by per_station_trained_models.
-    uploaded: dict[str, str] = {}
-    for task, model in per_station_trained_models.items():
-        s3_path = f"{base_path}/{task}.pkl"
-        s3.putFile(pickle.dumps(model), s3_path, bucket=s3.S3_BUCKET,
-                   content_type='application/octet-stream')
-        context.log.info(f"  ✓ Uploaded {task} → {s3_path}")
-        uploaded[task] = s3_path
-
-    # Write per-variant feature schema files (used by inference to match
-    # the variant's column order).
-    feature_files: dict[str, str] = {}
-    for variant, features in _VARIANTS.items():
-        suffix = f"_{variant}"
-        feat_path = f"{base_path}/features{suffix}.json"
-        s3.putFile(
-            json.dumps(features, indent=2).encode('utf-8'),
-            feat_path,
-            bucket=s3.S3_BUCKET,
-            content_type='application/json',
-        )
-        context.log.info(f"  ✓ Uploaded features{suffix}.json ({len(features)} features)")
-        feature_files[variant] = feat_path
+    # Server-side copy from archive to production (no download/upload round trip;
+    # content-type preserved). A missing source raises → refuse the partial deployment.
+    copied: list[str] = []
+    for name in _station_artifact_names():
+        try:
+            s3.copyFile(f"{archive_prefix}/{name}", f"{prod_base}/{name}")
+        except Exception as e:
+            raise dg.Failure(
+                f"Archive is missing {name} — refusing partial deployment: {e}"
+            )
+        copied.append(name)
+        context.log.info(f"  ✓ {name}")
 
     # Deployment metadata describes both variants under `variants` keys so
     # downstream consumers can pick either path without guessing filenames.
     variants_meta: dict[str, dict] = {}
     for variant, features in _VARIANTS.items():
-        suffix = f"_{variant}"
         variants_meta[variant] = {
-            'features_path': feature_files[variant],
+            'features_path': f"{prod_base}/features_{variant}.json",
             'n_features': len(features),
-            'models': {task: uploaded[f"{task}{suffix}"]
-                       for task in ('regression', 'clf_5ppb', 'clf_10ppb', 'clf_30ppb')},
+            'models': {task: f"{prod_base}/{task}_{variant}.pkl"
+                       for task in _TASKS},
         }
 
     model_version = station_model_archive.get("model_version", "unversioned")
@@ -745,10 +731,10 @@ def station_model_deployment(
         'station': site_name,
         'partition': partition,
         'model_version': model_version,
-        'archive_prefix': station_model_archive.get("archive_prefix"),
+        'archive_prefix': archive_prefix,
         'variants': variants_meta,
     }
-    meta_path = f"{base_path}/deployment_metadata.json"
+    meta_path = f"{prod_base}/deployment_metadata.json"
     s3.putFile(
         json.dumps(meta, indent=2).encode('utf-8'),
         meta_path,
@@ -760,12 +746,12 @@ def station_model_deployment(
         "status": "deployed",
         "station": site_name,
         "model_version": model_version,
-        "models_uploaded": list(uploaded.keys()),
+        "models_copied": copied,
         "variants": list(_VARIANTS.keys()),
-        "s3_base_path": base_path,
+        "s3_base_path": prod_base,
     })
     return {"status": "deployed", "station": site_name, "model_version": model_version,
-            "models": uploaded, "variants": list(_VARIANTS.keys())}
+            "models_copied": copied, "variants": list(_VARIANTS.keys())}
 
 
 # ==============================================================================
