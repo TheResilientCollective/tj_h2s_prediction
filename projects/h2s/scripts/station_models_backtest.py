@@ -24,8 +24,8 @@ Metrics per (station, variant), monthly + overall:
 Produces:
   records.parquet                       — raw prediction vs actual rows
   index.html                            — all stations × variants overview
-  <STATION>_<variant>.html              — per (station, variant) detail + monthly
-  <STATION>_<variant>_monthly/<YYYY-MM>.html  (optional drill-down)
+  <STATION>_<variant>.html              — per (station, variant) detail + monthly summary + month tabs
+  <STATION>_<variant>_monthly/<YYYY-MM>.html  — individual month detail pages (clickable from summary)
 
 Usage (S3 deployed models — requires env vars from .env):
     cd projects/h2s
@@ -339,12 +339,70 @@ def _chart_mae_by_month(monthly: dict) -> str:
     return _fig_to_b64(fig)
 
 
+def _chart_category_recall_by_month(monthly: dict) -> str:
+    months = [m for m in sorted(monthly) if m != "ALL"]
+    green_recall = [monthly[m]["per_class"]["green"]["recall"] for m in months]
+    yellow_recall = [monthly[m]["per_class"]["yellow"]["recall"] for m in months]
+    orange_recall = [monthly[m]["per_class"]["orange"]["recall"] for m in months]
+    xs = np.arange(len(months))
+    fig, ax = plt.subplots(figsize=(11, 4))
+    ax.plot(xs, green_recall, color=_C["green"], marker="o", lw=1.8, label="Green recall")
+    ax.plot(xs, yellow_recall, color=_C["yellow"], marker="s", lw=1.8, label="Yellow recall")
+    ax.plot(xs, orange_recall, color=_C["orange"], marker="^", lw=1.8, label="Orange recall")
+    ax.set_xticks(list(xs)); ax.set_xticklabels(months, rotation=45, ha="right", fontsize=8)
+    ax.set_ylim(0, 1.05)
+    ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1.0, decimals=0))
+    ax.set_title("Monthly category detection rates (3-class classification)", fontsize=11)
+    ax.legend(fontsize=8, ncol=3); ax.grid(axis="y", lw=0.4, alpha=0.5)
+    fig.tight_layout()
+    return _fig_to_b64(fig)
+
+
+def _chart_category_precision_by_month(monthly: dict) -> str:
+    months = [m for m in sorted(monthly) if m != "ALL"]
+    green_prec = [monthly[m]["per_class"]["green"]["precision"] for m in months]
+    yellow_prec = [monthly[m]["per_class"]["yellow"]["precision"] for m in months]
+    orange_prec = [monthly[m]["per_class"]["orange"]["precision"] for m in months]
+    xs = np.arange(len(months))
+    fig, ax = plt.subplots(figsize=(11, 4))
+    ax.plot(xs, green_prec, color=_C["green"], marker="o", lw=1.8, label="Green precision")
+    ax.plot(xs, yellow_prec, color=_C["yellow"], marker="s", lw=1.8, label="Yellow precision")
+    ax.plot(xs, orange_prec, color=_C["orange"], marker="^", lw=1.8, label="Orange precision")
+    ax.set_xticks(list(xs)); ax.set_xticklabels(months, rotation=45, ha="right", fontsize=8)
+    ax.set_ylim(0, 1.05)
+    ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1.0, decimals=0))
+    ax.set_title("Monthly false alarm rates by category", fontsize=11)
+    ax.legend(fontsize=8, ncol=3); ax.grid(axis="y", lw=0.4, alpha=0.5)
+    fig.tight_layout()
+    return _fig_to_b64(fig)
+
+
+def _chart_category_volume_by_month(monthly: dict) -> str:
+    months = [m for m in sorted(monthly) if m != "ALL"]
+    green_n = [monthly[m]["per_class"]["green"]["n"] for m in months]
+    yellow_n = [monthly[m]["per_class"]["yellow"]["n"] for m in months]
+    orange_n = [monthly[m]["per_class"]["orange"]["n"] for m in months]
+    xs = np.arange(len(months))
+    fig, ax = plt.subplots(figsize=(11, 4))
+    ax.bar(xs - 0.25, green_n, width=0.25, color=_C["green"], alpha=0.75, label="Green hours")
+    ax.bar(xs, yellow_n, width=0.25, color=_C["yellow"], alpha=0.75, label="Yellow hours")
+    ax.bar(xs + 0.25, orange_n, width=0.25, color=_C["orange"], alpha=0.75, label="Orange hours")
+    ax.set_xticks(list(xs)); ax.set_xticklabels(months, rotation=45, ha="right", fontsize=8)
+    ax.set_ylabel("Hours observed")
+    ax.set_title("Monthly distribution of observed H2S categories", fontsize=11)
+    ax.legend(fontsize=8, ncol=3); ax.grid(axis="y", lw=0.4, alpha=0.5)
+    fig.tight_layout()
+    return _fig_to_b64(fig)
+
+
 def _chart_confusion(m: dict, title: str) -> str:
     cm = np.array(m["confusion_matrix"], dtype=float)
     labels = ["Green", "Yellow", "Orange"]
     fig, ax = plt.subplots(figsize=(5, 4))
     totals = cm.sum(axis=1, keepdims=True)
-    norm = np.where(totals > 0, np.divide(cm, totals, where=totals > 0), 0.0)
+    norm = np.zeros_like(cm)
+    mask = totals.ravel() > 0
+    norm[mask] = cm[mask] / totals[mask]
     im = ax.imshow(norm, cmap="Blues", vmin=0, vmax=1)
     ax.set_xticks([0, 1, 2]); ax.set_yticks([0, 1, 2])
     ax.set_xticklabels(labels, fontsize=9); ax.set_yticklabels(labels, fontsize=9)
@@ -402,8 +460,14 @@ tr:hover td { background: #f0f4ff; }
 .nav { background: #fff; padding: 10px 24px; display: flex; gap: 14px; flex-wrap: wrap; border-bottom: 1px solid #ddd; font-size: 0.85em; }
 .nav a { color: #2563eb; text-decoration: none; }
 .nav a:hover { text-decoration: underline; }
+.month-tabs { background: #fff; padding: 0 24px; display: flex; gap: 4px; border-bottom: 1px solid #ddd; font-size: 0.85em; margin-bottom: 12px; }
+.month-tab { padding: 10px 14px; cursor: pointer; text-decoration: none; color: #2563eb; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.month-tab:hover { background: #f8fafc; }
+.month-tab.active { color: #fff; background: #1a2233; border-bottom-color: #1a2233; }
 .badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:0.72em; font-weight:600; }
 .ev { background:#dbeafe; color:#1e40af; } .ln { background:#ede9fe; color:#5b21b6; }
+.month-link { color: #2563eb; text-decoration: none; cursor: pointer; }
+.month-link:hover { text-decoration: underline; }
 """
 
 
@@ -443,15 +507,20 @@ def _threshold_table(m: dict) -> str:
       <tbody>{rows}</tbody></table>"""
 
 
-def _monthly_table(monthly: dict, months: list[str]) -> str:
+def _monthly_table(monthly: dict, months: list[str], station: str = None, variant: str = None) -> str:
     head = ("<tr><th>Month</th><th>n</th><th>Spearman</th><th>MAE</th>"
             "<th>recall@5</th><th>recall@8</th><th>recall@10</th>"
             "<th>recall@30</th><th>recall@100</th><th>FAR</th></tr>")
     rows = ""
     for m in months:
         mm = monthly[m]
+        if station and variant:
+            station_clean = station.replace(' ', '_').replace('-', '')
+            month_link = f"<a href='{station_clean}_{variant}_monthly/{m}.html' class='month-link'>{m}</a>"
+        else:
+            month_link = m
         rows += (
-            f"<tr><td><b>{m}</b></td><td>{mm['n']:,}</td>"
+            f"<tr><td><b>{month_link}</b></td><td>{mm['n']:,}</td>"
             f"<td class='{_color_cell(mm['spearman'])}'>{_num(mm['spearman'])}</td>"
             f"<td>{_num(mm['mae'], '{:.1f}')}</td>"
             f"<td class='{_color_cell(mm['mag'][5]['recall'])}'>{_pct(mm['mag'][5]['recall'])}</td>"
@@ -464,19 +533,51 @@ def _monthly_table(monthly: dict, months: list[str]) -> str:
     return f"<table><thead>{head}</thead><tbody>{rows}</tbody></table>"
 
 
+def build_month_page(station: str, variant: str, month: str, month_data: pd.DataFrame, metrics: dict) -> str:
+    """Build detail page for a single month."""
+    vlabel = "Evidence (33 feat)" if variant == "evidence" else "Lean (19 feat)"
+    page_title = f"{station} — {vlabel} — {month}"
+    rng = f"{month_data['time'].min().strftime('%Y-%m-%d')} – {month_data['time'].max().strftime('%Y-%m-%d')}"
+    station_clean = station.replace(' ', '_').replace('-', '')
+    return f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Backtest — {page_title}</title><style>{_CSS}</style></head><body>
+<div class="header"><h1>{page_title}</h1>
+<p>{rng} · {metrics['n']:,} hours</p></div>
+<div class="nav"><a href="../{station_clean}_{variant}.html">← Back to {station}</a></div>
+<div class="content">
+  <div class="section"><h2>Monthly metrics — {month}</h2>{_cards(metrics)}
+    <div class="chart-row">
+      <img src="data:image/png;base64,{_chart_confusion(metrics, 'Confusion matrix')}" style="max-width:380px">
+      <img src="data:image/png;base64,{_chart_scatter(month_data, 'Predicted vs actual H2S')}" style="max-width:430px">
+    </div>
+    <h3>Threshold detection — magnitude cut vs classifier probability</h3>
+    {_threshold_table(metrics)}
+  </div>
+</div></body></html>"""
+
+
 def build_station_page(station: str, variant: str, records: pd.DataFrame, monthly: dict) -> str:
     overall = monthly["ALL"]
     months = [m for m in sorted(monthly) if m != "ALL"]
     rng = f"{records['time'].min().strftime('%Y-%m-%d')} – {records['time'].max().strftime('%Y-%m-%d')}"
     vlabel = "Evidence (33 feat)" if variant == "evidence" else "Lean (19 feat)"
+
+    month_tabs = '<div class="month-tabs">'
+    month_tabs += '<a href="#overall" class="month-tab active">Overall</a>'
+    for m in months:
+        month_tabs += f'<a href="#{m}" class="month-tab">{m}</a>'
+    month_tabs += '</div>'
+
     return f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Backtest — {station} / {variant}</title><style>{_CSS}</style></head><body>
 <div class="header"><h1>{station} — {vlabel}</h1>
 <p>Per-station model backtest (oracle one-step inputs) · {rng} · {overall['n']:,} hours</p></div>
 <div class="nav"><a href="index.html">↑ All stations</a></div>
+{month_tabs}
 <div class="content">
-  <div class="section"><h2>Overall</h2>{_cards(overall)}
+  <div class="section"><h2 id="overall">Overall</h2>{_cards(overall)}
     <div class="chart-row">
       <img src="data:image/png;base64,{_chart_confusion(overall, 'Confusion matrix (category from regression)')}" style="max-width:380px">
       <img src="data:image/png;base64,{_chart_scatter(records, 'Predicted vs actual H2S')}" style="max-width:430px">
@@ -484,11 +585,16 @@ def build_station_page(station: str, variant: str, records: pd.DataFrame, monthl
     <h3>Threshold detection — magnitude cut vs classifier probability</h3>
     {_threshold_table(overall)}
   </div>
-  <div class="section"><h2>Monthly skill</h2>
+  <div class="section"><h2>Monthly skill trends</h2>
     <img src="data:image/png;base64,{_chart_spearman_recall_by_month(monthly)}" style="width:100%">
     <img src="data:image/png;base64,{_chart_mae_by_month(monthly)}" style="width:100%">
+    <img src="data:image/png;base64,{_chart_category_recall_by_month(monthly)}" style="width:100%">
+    <img src="data:image/png;base64,{_chart_category_precision_by_month(monthly)}" style="width:100%">
+    <img src="data:image/png;base64,{_chart_category_volume_by_month(monthly)}" style="width:100%">
   </div>
-  <div class="section"><h2>Monthly summary</h2>{_monthly_table(monthly, months)}</div>
+  <div class="section"><h2>Monthly summary</h2>
+    <p style="font-size:0.85em;color:#555;">Click on a month to see detailed metrics for that month.</p>
+    {_monthly_table(monthly, months, station, variant)}</div>
 </div></body></html>"""
 
 
@@ -538,10 +644,27 @@ def generate_reports(records: pd.DataFrame, output_dir: Path) -> None:
     summaries = []
     for (station, variant), sub in records.groupby(["station", "variant"]):
         monthly = monthly_metrics(sub)
-        page = f"{station.replace(' ', '_').replace('-', '')}_{variant}.html"
+        station_clean = station.replace(' ', '_').replace('-', '')
+        page = f"{station_clean}_{variant}.html"
+
+        # Generate individual month detail pages
+        month_dir = output_dir / f"{station_clean}_{variant}_monthly"
+        month_dir.mkdir(parents=True, exist_ok=True)
+        months = [m for m in sorted(monthly) if m != "ALL"]
+        for month in months:
+            month_records = sub[sub["month"] == month]
+            month_metrics = compute_metrics(month_records)
+            month_page = f"{month}.html"
+            (month_dir / month_page).write_text(
+                build_month_page(station, variant, month, month_records, month_metrics),
+                encoding="utf-8")
+
+        # Generate main station page
         (output_dir / page).write_text(
             build_station_page(station, variant, sub, monthly), encoding="utf-8")
         print(f"  {page}")
+        for month in months:
+            print(f"    → {month}.html")
         summaries.append({"station": station, "variant": variant,
                           "page": page, "overall": monthly["ALL"]})
     summaries.sort(key=lambda s: (s["station"], s["variant"]))
