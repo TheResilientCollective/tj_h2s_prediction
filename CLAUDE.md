@@ -102,15 +102,14 @@ operate on prod.
 ```bash
 cd projects/h2s
 
-# 1. Per-station models — trains, writes the promotable archive, AND deploys.
-#    Repeat for all three stations.
-for P in nestor_bes san_ysidro ib_civic_ctr; do
-  uv run dg launch --job station_model_training_job --partition $P
-  uv run dg launch --job station_deployment_job     --partition $P
-done
+# 1. Per-station models — trains all three stations against shared training data,
+#    writes the promotable archive, AND deploys. Run in one batch to use a single
+#    training snapshot across all stations.
+uv run dg launch --job station_model_training_job --partition san_ysidro,nestor_bes,ib_civic_ctr
+uv run dg launch --job station_model_deployment_job --partition san_ysidro,nestor_bes,ib_civic_ctr
 
 # 2. Forecast products (nowcast / nearcast / forecast, all stations × variants)
-uv run dg launch --job products_forecast_job
+uv run dg launch --job station_forecast_job
 
 # 3. Accuracy / skill stats (rebuild from ALL stored product runs)
 uv run dg launch --job forecast_validation_rebuild_job
@@ -143,16 +142,16 @@ uv sync
 cp .env.example .env   # fill in S3 credentials
 
 # 1. Train + deploy per-station daily models — the model-bootstrap path
-#    (repeat per partition: nestor_bes / san_ysidro / ib_civic_ctr).
+#    (all three stations at once, sharing one training snapshot).
 #    This also writes the immutable archive that promote_station_models_job reads.
-uv run dg launch --job station_model_training_job --partition nestor_bes
-uv run dg launch --job station_deployment_job --partition nestor_bes
+uv run dg launch --job station_model_training_job --partition san_ysidro,nestor_bes,ib_civic_ctr
+uv run dg launch --job station_model_deployment_job --partition san_ysidro,nestor_bes,ib_civic_ctr
 
 # 2. Run hourly forecast pipeline
 uv run dg launch --job forecast_prediction_job
 
 # 3. Run daily analysis (source attribution + station forecasts + dashboard)
-uv run dg launch --job forecast_analysis_job
+uv run dg launch --job station_forecast_analysis_job
 ```
 
 The per-station training pipeline (`station_model_training_job` →
@@ -177,27 +176,26 @@ No approval gate is required — `station_deployment_job` acts as the explicit a
 ```bash
 cd projects/h2s
 
-# 1. Train per-station models (partitioned: san_ysidro, nestor_bes, ib_civic_ctr)
-#    Runs multi_station_training_data → per_station_trained_models →
+# 1. Train per-station models (all three stations at once, sharing one training data snapshot)
+#    Runs multi_station_training_data (once) → per_station_trained_models (per station) →
 #    station_training_report → station_model_archive
 #    The archive asset writes an IMMUTABLE version to
 #    models/archive/stations/{KEY}/{version}/ and posts a new-vs-production
 #    comparison to Slack with a promote/review recommendation.
-uv run dg launch --job station_model_training_job --partition <station>
-# Repeat for each of nestor_bes / san_ysidro / ib_civic_ctr.
+uv run dg launch --job station_model_training_job --partition san_ysidro,nestor_bes,ib_civic_ctr
 
 # 2. Review training metrics in Dagster UI (station_training_report asset
-#    metadata) and/or the Slack promotion report.
+#    metadata) and/or the Slack promotion report for each station.
 
-# 3. Deploy to S3 (this IS the approval — running this job means you approve)
-uv run dg launch --job station_deployment_job --partition <station>
-# Repeat per partition. Default uploads to S3; pass approve_deployment=False
-# in the run config for a dry run that validates without writing to S3:
-#   uv run dg launch --job station_deployment_job --partition nestor_bes \
+# 3. Deploy to S3 (this IS the approval — running this job means you approve all three)
+uv run dg launch --job station_model_deployment_job --partition san_ysidro,nestor_bes,ib_civic_ctr
+# Default uploads to S3; pass approve_deployment=False in the run config
+# for a dry run that validates without writing to S3:
+#   uv run dg launch --job station_model_deployment_job --partition san_ysidro,nestor_bes,ib_civic_ctr \
 #     --config-json '{"ops":{"h2s__station_model_deployment":{"config":{"approve_deployment":false}}}}'
 
 # 4. Run daily analysis — it will re-load fresh models from S3
-uv run dg launch --job forecast_analysis_job
+uv run dg launch --job station_forecast_analysis_job
 ```
 
 **Important:** `station_model_training_job` stores models in Dagster's IO only
@@ -245,7 +243,7 @@ uv run dg launch --job dispersion_inversion_job
 
 # Nowcast/nearcast/forecast products: 24 leads × 3 stations × 2 variants,
 # stored to tijuana/forecast/products/run_ts=.../products.parquet (+ latest mirror).
-uv run dg launch --job products_forecast_job
+uv run dg launch --job station_forecast_job
 
 # Tier 1–3 forecast cascade: runs products, then alerts the ops Slack channel
 # when a tier's product probability clears its cutoff (auto-runs every 6h).
@@ -258,7 +256,7 @@ uv run dg launch --job forecast_validation_rebuild_job
 
 ### The Forecast Products (nowcast / nearcast / forecast)
 
-`products_forecast_job` runs the recursive engine (`h2s/forecasting/recursive.py`)
+`station_forecast_job` runs the recursive engine (`h2s/forecasting/recursive.py`)
 for every station × variant:
 
 One recursive pass produces all three products — they are window slices of
@@ -280,7 +278,7 @@ probabilities, never errors.
 
 ### Forecast Cascade + Alerting
 
-`cascade_alerts_job` (every 6h, RUNNING) runs `products_forecast_job` then
+`cascade_alerts_job` (every 6h, RUNNING) runs `station_forecast_job` then
 evaluates the Tier 1–3 cascade at NESTOR-BES off the **Evidence** product
 probabilities — Tier 1 P(>5) in nowcast, Tier 2 P(>10) in nearcast, Tier 3
 P(>30) in forecast — and posts an escalating report to the ops Slack channel

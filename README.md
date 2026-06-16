@@ -112,13 +112,11 @@ legacy monthly training pipeline (`monthly_model_training_job` →
 cd projects/h2s   # prefix with S3_BUCKET=resilentpublic for prod
 
 # 1. Per-station models — trains, writes the promotable archive, AND deploys.
-for P in nestor_bes san_ysidro ib_civic_ctr; do
-  uv run dg launch --job multi_station_training_job --partition $P
-  uv run dg launch --job station_deployment_job     --partition $P
-done
+uv run dg launch --job station_model_training_job --partition san_ysidro,nestor_bes,ib_civic_ctr
+uv run dg launch --job station_model_deployment_job --partition san_ysidro,nestor_bes,ib_civic_ctr
 
 # 2. Forecast products (nowcast / nearcast / forecast)
-uv run dg launch --job products_forecast_job
+uv run dg launch --job station_forecast_job
 
 # 3. Accuracy / skill stats (rebuild from all stored product runs)
 uv run dg launch --job forecast_validation_rebuild_job

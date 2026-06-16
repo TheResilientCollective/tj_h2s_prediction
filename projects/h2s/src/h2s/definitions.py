@@ -113,7 +113,7 @@ def defs():
     from h2s.defs.h2s_products_pipeline import (
         products_model_artifacts,
         h2s_products,
-        products_forecast_job,
+        station_forecast_job,
     )
 
     # Import forecast validation store + accuracy reporting (Phase 5)
@@ -267,7 +267,7 @@ def defs():
             station_model_deployment_job,
             station_model_promotion_job,
             # Products job
-            products_forecast_job,
+            station_forecast_job,
             # Forecast validation store + rebuild (Phase 5)
             forecast_validation_rebuild_job,
             # Station forecast analysis job
