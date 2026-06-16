@@ -50,7 +50,10 @@ def make_s3() -> S3Resource:
 
 def check_metrics(store: AccuracyStore, day: date) -> dict[str, Any] | None:
     """Read and validate metrics for a date. Returns metrics if usable, None otherwise."""
-    m = store.read_day_metrics(day)
+    # Try daily_station pipeline first (per-station models), then fall back to legacy root
+    m = store.read_day_metrics(day, pipeline="daily_station")
+    if m is None:
+        m = store.read_day_metrics(day)
     if m is None:
         return None
 

@@ -242,11 +242,16 @@ def hindcast_predictions(predictor, day_obs: pd.DataFrame) -> pd.DataFrame | Non
 # ---------------------------------------------------------------------------
 
 def load_station_models(s3: S3Resource) -> dict:
-    """Load per-station models (regression + clf_5ppb + clf_10ppb) from S3."""
+    """Load per-station models (regression + clf_5ppb + clf_10ppb) from S3.
+
+    Tries suffixed variant names first (evidence/lean), then falls back to
+    un-suffixed legacy names for backwards compatibility.
+    """
     import pickle
 
     artifacts = {}
     tasks = ["regression", "clf_5ppb", "clf_10ppb"]
+    variants = ["evidence", "lean"]
 
     for site_name, info in STATIONS.items():
         station_key = info["key"]
@@ -254,16 +259,40 @@ def load_station_models(s3: S3Resource) -> dict:
         station_models = {}
 
         for task in tasks:
-            s3_path = f"{base_path}/{task}.pkl"
-            try:
-                model_bytes = s3.getFile(path=s3_path, bucket=s3.S3_BUCKET)
-                station_models[task] = pickle.loads(model_bytes)
-            except Exception as e:
-                print(f"    Warning: {station_key}/{task}: {e}")
+            model = None
+            # Try suffixed variant names first (current deployment)
+            for variant in variants:
+                s3_path = f"{base_path}/{task}_{variant}.pkl"
+                try:
+                    model_bytes = s3.getFile(path=s3_path, bucket=s3.S3_BUCKET)
+                    model = pickle.loads(model_bytes)
+                    break
+                except Exception:
+                    pass
 
-        # Load feature list
+            # Fall back to un-suffixed legacy name
+            if model is None:
+                s3_path = f"{base_path}/{task}.pkl"
+                try:
+                    model_bytes = s3.getFile(path=s3_path, bucket=s3.S3_BUCKET)
+                    model = pickle.loads(model_bytes)
+                except Exception as e:
+                    print(f"    Warning: {station_key}/{task}: {e}")
+
+            if model is not None:
+                station_models[task] = model
+
+        # Load feature list (try variants first, then legacy)
         try:
-            feat_bytes = s3.getFile(path=f"{base_path}/features.json", bucket=s3.S3_BUCKET)
+            feat_bytes = None
+            for variant in variants:
+                try:
+                    feat_bytes = s3.getFile(path=f"{base_path}/features_{variant}.json", bucket=s3.S3_BUCKET)
+                    break
+                except Exception:
+                    pass
+            if feat_bytes is None:
+                feat_bytes = s3.getFile(path=f"{base_path}/features.json", bucket=s3.S3_BUCKET)
             station_models["_feature_cols"] = json.loads(feat_bytes.decode("utf-8"))
         except Exception:
             pass
