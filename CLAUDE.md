@@ -112,7 +112,7 @@ uv run dg launch --job station_model_deployment_job --partition san_ysidro,nesto
 uv run dg launch --job station_forecast_job
 
 # 3. Accuracy / skill stats (rebuild from ALL stored product runs)
-uv run dg launch --job forecast_validation_rebuild_job
+uv run dg launch --job station_forecast_validation_rebuild_job
 
 # Optional: products + Tier 1–3 cascade Slack alerts in one job
 uv run dg launch --job cascade_alerts_job
@@ -250,7 +250,7 @@ uv run dg launch --job station_forecast_job
 uv run dg launch --job cascade_alerts_job
 
 # Forecast validation store + per-lead-hour skill curves (rebuild from ALL runs):
-uv run dg launch --job forecast_validation_rebuild_job
+uv run dg launch --job station_forecast_validation_rebuild_job
 # (forecast_validation_job is the recent-window daily variant; schedule STOPPED)
 ```
 
@@ -292,7 +292,7 @@ gate + sigmoid-score `tiered_alerts` system. The observation tiers
 
 ### Forecast Validation Store + Skill Curves
 
-`forecast_validation_rebuild_job` joins every stored product row to the H2S
+`station_forecast_validation_rebuild_job` joins every stored product row to the H2S
 actually measured at its target hour and writes:
 
 - a consolidated, **rebuildable** parquet at

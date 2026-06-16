@@ -121,7 +121,7 @@ def defs():
         forecast_validation_store,
         forecast_skill_report,
         forecast_validation_job,
-        forecast_validation_rebuild_job,
+        station_forecast_validation_rebuild_job,
         forecast_validation_schedule,
     )
 
@@ -269,7 +269,7 @@ def defs():
             # Products job
             station_forecast_job,
             # Forecast validation store + rebuild (Phase 5)
-            forecast_validation_rebuild_job,
+            station_forecast_validation_rebuild_job,
             # Station forecast analysis job
             station_forecast_analysis_job,
             # Dispersion jobs

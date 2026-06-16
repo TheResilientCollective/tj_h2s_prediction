@@ -119,7 +119,7 @@ uv run dg launch --job station_model_deployment_job --partition san_ysidro,nesto
 uv run dg launch --job station_forecast_job
 
 # 3. Accuracy / skill stats (rebuild from all stored product runs)
-uv run dg launch --job forecast_validation_rebuild_job
+uv run dg launch --job station_forecast_validation_rebuild_job
 
 # Optional: products + Tier 1–3 cascade Slack alerts
 uv run dg launch --job cascade_alerts_job

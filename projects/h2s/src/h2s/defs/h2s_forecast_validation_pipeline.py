@@ -7,7 +7,7 @@ actually measured at each target hour, writes one consolidated — and fully
 
 Rebuildable by construction: every build recomputes from the immutable product
 runs under ``PRODUCTS_PATH`` (idempotent). The daily job uses a recent window;
-``forecast_validation_rebuild_job`` passes ``max_age_days=None`` to recompute
+``station_forecast_validation_rebuild_job`` passes ``max_age_days=None`` to recompute
 the whole history from scratch.
 
   forecast_validation_store → forecast_skill_report
@@ -239,8 +239,8 @@ forecast_validation_job = dg.define_asset_job(
     tags={"environment": "production", "pipeline": "forecast_validation"},
 )
 
-forecast_validation_rebuild_job = dg.define_asset_job(
-    name="forecast_validation_rebuild_job",
+station_forecast_validation_rebuild_job = dg.define_asset_job(
+    name="station_forecast_validation_rebuild_job",
     selection=dg.AssetSelection.assets(forecast_validation_store, forecast_skill_report),
     config={"ops": {"h2s__forecast_validation_store": {"config": {"max_age_days": None}}}},
     description="Full rebuild of the validation store + skill curves from ALL stored product runs",
