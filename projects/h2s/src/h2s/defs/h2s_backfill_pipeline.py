@@ -1297,10 +1297,20 @@ def _build_comparison_index_html(all_results: list[dict]) -> str:
     group_name="h2s_backfill",
     required_resource_keys={"s3"},
     kinds={"python", "s3"},
+    # Declare a graph dependency on the partitioned asset so Dagster schedules
+    # this after station_backtest_results completes within the same job run.
+    # AllPartitionsMapping is the correct mapping for unpartitioned → partitioned.
+    deps=[
+        dg.AssetDep(
+            asset=_KEY("station_backtest_results"),
+            partition_mapping=dg.AllPartitionMapping(),
+        )
+    ],
     description=(
         "Scan all monthly backtest_results.json files in S3, generate "
         "cross-month comparison table with best-value highlighting, and "
-        "upload to tijuana/forecast/backtest/index.html."
+        "upload to tijuana/forecast/backtest/index.html. "
+        "Runs automatically at the end of station_backfill_training_job."
     ),
 )
 def backtest_comparison_index(context: AssetExecutionContext) -> str:
@@ -1359,14 +1369,16 @@ def backtest_comparison_index(context: AssetExecutionContext) -> str:
 station_backfill_training_job = dg.define_asset_job(
     name="station_backfill_training_job",
     description=(
-        "Monthly walk-forward: train per-station models on pre-cutoff data "
-        "and evaluate OOS. Run with a specific monthly partition to backfill "
-        "or let the schedule handle the current month."
+        "Monthly walk-forward: train per-station models on pre-cutoff data, "
+        "evaluate OOS, and rebuild the cross-month comparison index. "
+        "backtest_comparison_index runs last (unpartitioned) after the partitioned "
+        "assets complete for the given month."
     ),
     selection=dg.AssetSelection.assets(
         backfill_training_data,
         backfill_station_models,
         station_backtest_results,
+        backtest_comparison_index,
     ),
     partitions_def=BACKFILL_MONTHLY_PARTITIONS,
     tags={"environment": "production", "pipeline": "h2s_backfill"},
@@ -1375,8 +1387,9 @@ station_backfill_training_job = dg.define_asset_job(
 station_backtest_index_job = dg.define_asset_job(
     name="station_backtest_index_job",
     description=(
-        "Rebuild the cross-month comparison index from all stored S3 "
-        "backtest_results.json files. Run after backfilling multiple months."
+        "Manually rebuild the cross-month comparison index from all stored S3 "
+        "backtest_results.json files. Useful for regenerating the index without "
+        "re-running training (e.g. after a styling change)."
     ),
     selection=dg.AssetSelection.assets(backtest_comparison_index),
     tags={"environment": "production", "pipeline": "h2s_backfill"},
