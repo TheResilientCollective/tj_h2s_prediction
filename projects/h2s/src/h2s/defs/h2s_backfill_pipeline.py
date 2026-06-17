@@ -1691,7 +1691,7 @@ station_backfill_training_job = dg.define_asset_job(
         backtest_comparison_index,
     ),
     partitions_def=BACKFILL_MONTHLY_PARTITIONS,
-    tags={"environment": "production", "pipeline": "h2s_backfill"},
+    tags={"environment": "production", "pipeline": "h2s_backfill","modeltrainer": "true"},
 )
 
 station_backtest_index_job = dg.define_asset_job(

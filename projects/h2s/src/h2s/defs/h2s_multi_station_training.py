@@ -872,7 +872,7 @@ station_model_training_job = dg.define_asset_job(
         station_model_archive,
     ),
     partitions_def=STATION_PARTITIONS,
-    tags={"environment": "production", "pipeline": "h2s_multi_station_training"},
+    tags={"environment": "production", "pipeline": "h2s_multi_station_training", "modeltrainer": "true"},
 )
 
 station_model_deployment_job = dg.define_asset_job(
