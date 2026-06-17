@@ -1286,18 +1286,268 @@ def _build_comparison_index_html(all_results: list[dict]) -> str:
   {lead_html}
   {months_section}
   <div class="section">
-    <h2>All months × stations × variants</h2>
+    <h2>All stations × months × variants</h2>
     <p style="font-size:0.84em;color:#555;">
       <b>Dark cells</b> highlight the best value in each column across all runs.
       ↑ = higher is better, ↓ = lower is better.
       recall@8 targets the resident-complaint band (~8 ppb).
       Features use observed H2S lags (oracle one-step), so these are upper-bound
       skill given good inputs — not the recursive multi-step forecast.
+      <a href="guide.html" style="margin-left:8px;">→ Column guide for health &amp; air quality staff</a>
     </p>
     <div style="overflow-x:auto;">
       <table><thead>{head}</thead><tbody>{table_rows_html}</tbody></table>
     </div>
   </div>
+</div></body></html>"""
+
+
+_GUIDE_CSS = _CSS + """
+.guide-section { background:#fff; border-radius:8px; padding:24px 28px;
+    margin-bottom:20px; box-shadow:0 1px 4px rgba(0,0,0,.07); }
+.guide-section h2 { margin:0 0 14px; font-size:1.1em; color:#1a2233;
+    border-bottom:2px solid #eee; padding-bottom:8px; }
+.guide-section h3 { font-size:0.97em; color:#1a2233; margin:18px 0 6px; }
+.guide-section p, .guide-section li { font-size:0.89em; line-height:1.7; color:#333; }
+.guide-section ul { margin:6px 0 10px 20px; padding:0; }
+.col-table { border-collapse:collapse; width:100%; font-size:0.85em; margin-top:10px; }
+.col-table th { background:#1a2233; color:#fff; padding:8px 11px; text-align:left; }
+.col-table td { padding:7px 11px; border-bottom:1px solid #eee; vertical-align:top; }
+.col-table tr:hover td { background:#f0f4ff; }
+.col-table td:first-child { font-weight:600; white-space:nowrap; }
+.col-table td:nth-child(2) { color:#555; font-size:0.9em; white-space:nowrap; }
+.thresh-table { border-collapse:collapse; width:100%; font-size:0.86em; margin-top:8px; }
+.thresh-table th { background:#1a2233; color:#fff; padding:7px 10px; text-align:left; }
+.thresh-table td { padding:6px 10px; border-bottom:1px solid #eee; }
+.thresh-table .g { background:#d5f5e3; color:#196f3d; font-weight:600; }
+.thresh-table .y { background:#fef9e7; color:#7d6608; font-weight:600; }
+.thresh-table .o { background:#fadbd8; color:#922b21; font-weight:600; }
+.callout { background:#f0f4ff; border-left:4px solid #2563eb; padding:12px 16px;
+    border-radius:4px; margin:14px 0; font-size:0.87em; line-height:1.65; }
+.callout b { color:#1a2233; }
+"""
+
+
+def _build_guide_html() -> str:
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>H2S Backfill Backtest — Column Guide</title>
+<style>{_GUIDE_CSS}</style></head><body>
+<div class="header">
+  <h1>H2S Backfill Backtest — Column Guide</h1>
+  <p>For county health epidemiology and air quality staff · Generated {now_str}</p>
+</div>
+<div class="nav"><a href="index.html">↑ Back to comparison index</a></div>
+<div class="content">
+
+  <div class="guide-section">
+    <h2>What is this table?</h2>
+    <p>
+      Each row summarises how well one monthly H2S prediction model performed on
+      observations it had never seen during training. The models are evaluated
+      using a <b>walk-forward backtest</b>: a model trained on all data
+      <em>before</em> a cutoff date is scored on the weeks and months
+      <em>after</em> that date. This mirrors real operational use — the model
+      could not have memorised future observations.
+    </p>
+    <p>
+      Three monitoring stations are covered (IB Civic Center, Nestor/BES,
+      San Ysidro). For each station a new model is trained every month, and each
+      monthly model appears as two rows: <span class="badge ev">evidence</span>
+      (full 33-feature set including meteorology, tides, flow, and H2S history)
+      and <span class="badge ln">lean</span> (19 features, a reduced set that
+      tends to generalise better when training data are sparse).
+    </p>
+    <div class="callout">
+      <b>Key take-away for health staff:</b> focus on
+      <b>recall@8</b> and <b>recall@30</b> (did the model flag the event?) and
+      <b>FAR</b> (how often did it cry wolf?). Spearman and MAE describe
+      magnitude accuracy; Balanced Accuracy summarises three-class classification.
+    </div>
+  </div>
+
+  <div class="guide-section">
+    <h2>H2S health thresholds used in this report</h2>
+    <table class="thresh-table">
+      <thead><tr>
+        <th>Threshold</th><th>Level</th><th>Health / regulatory context</th>
+      </tr></thead>
+      <tbody>
+        <tr><td class="g">5 ppb</td><td>Odour detection</td>
+          <td>Typical odour threshold for sensitive individuals; CARB 1-hr reference.</td></tr>
+        <tr><td class="y">8 ppb</td><td>Resident complaint band</td>
+          <td>Empirical threshold above which community complaint rates increase markedly
+          in the Tijuana River Valley. Used as the primary operational detection target
+          in this report.</td></tr>
+        <tr><td class="y">10 ppb</td><td>SDAPCD Action Level</td>
+          <td>San Diego APCD nuisance / odour complaint threshold; triggers
+          enhanced monitoring review.</td></tr>
+        <tr><td class="o">30 ppb</td><td>Alert level</td>
+          <td>Potential respiratory irritant for sensitive populations; triggers
+          proactive public notification in the county protocol. Corresponds to the
+          model's "orange" classification.</td></tr>
+        <tr><td class="o">100 ppb</td><td>Acute hazard</td>
+          <td>OEHHA acute REL; short-term exposure at this level can cause eye and
+          airway irritation. Rare in ambient monitoring but included for
+          completeness.</td></tr>
+      </tbody>
+    </table>
+    <p style="margin-top:10px;">
+      The three model classes map as follows: <b>Green</b> = H2S &lt; 5 ppb (background),
+      <b>Yellow</b> = 5–30 ppb (caution / nuisance), <b>Orange</b> = ≥ 30 ppb (alert).
+    </p>
+  </div>
+
+  <div class="guide-section">
+    <h2>Column definitions</h2>
+    <table class="col-table">
+      <thead><tr>
+        <th>Column</th><th>Units / range</th><th>What it means</th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td>Station</td><td>—</td>
+          <td>The monitoring station whose observations are used for training and
+          evaluation. Links to the detailed station report for that month.</td>
+        </tr>
+        <tr>
+          <td>Month</td><td>YYYY-MM</td>
+          <td>The training cutoff month. A model labelled 2026-03 was trained on
+          all available data up to 28 February 2026 and evaluated on March and
+          later observations.</td>
+        </tr>
+        <tr>
+          <td>Cutoff</td><td>Date</td>
+          <td>Exact date before which training data were used. No observations
+          on or after this date influenced model parameters.</td>
+        </tr>
+        <tr>
+          <td>Variant</td><td>evidence / lean</td>
+          <td><b>Evidence</b> uses 33 predictors including the full meteorological
+          and lagged-H2S feature set; it tends to score higher when data are
+          plentiful. <b>Lean</b> uses 19 predictors and may generalise better
+          for early months with limited training data.</td>
+        </tr>
+        <tr>
+          <td>n OOS</td><td>Hours</td>
+          <td>Number of post-cutoff hourly observations used for evaluation.
+          Larger samples give more reliable metric estimates.</td>
+        </tr>
+        <tr>
+          <td>Spearman ↑</td><td>−1 to 1</td>
+          <td>Rank correlation between predicted and observed H2S. A value of
+          1.0 means the model always ranks hours correctly from cleanest to most
+          polluted; 0 means no better than chance. Values above 0.6 are
+          considered good; above 0.75 excellent. Does not penalise bias in
+          predicted magnitude.</td>
+        </tr>
+        <tr>
+          <td>MAE ↓</td><td>ppb</td>
+          <td>Mean Absolute Error — the average gap between the predicted and
+          observed H2S concentration in parts per billion. Lower is better.
+          An MAE of 5 ppb means predictions are off by 5 ppb on average;
+          interpret relative to the operational threshold of interest (e.g. 30 ppb).</td>
+        </tr>
+        <tr>
+          <td>recall@5 ↑</td><td>0 – 100 %</td>
+          <td>Of all hours when measured H2S was ≥ 5 ppb, what fraction did
+          the model's continuous prediction also reach ≥ 5 ppb? This is
+          <b>sensitivity</b> at the odour-detection threshold. A value of 80%
+          means 1 in 5 odour events was missed.</td>
+        </tr>
+        <tr>
+          <td>recall@8 ↑</td><td>0 – 100 %</td>
+          <td>Detection rate at the resident-complaint threshold. This is the
+          primary metric for community health protection in the Tijuana River
+          Valley context. Higher values reduce missed events that generate
+          complaints and health impacts.</td>
+        </tr>
+        <tr>
+          <td>recall@10 ↑</td><td>0 – 100 %</td>
+          <td>Detection rate at the SDAPCD 10 ppb action level.</td>
+        </tr>
+        <tr>
+          <td>recall@30 ↑</td><td>0 – 100 %</td>
+          <td>Detection rate at the 30 ppb alert threshold. Most critical for
+          triggering public health notifications. A value of 70% means 3 in 10
+          orange-level events were not flagged in advance.</td>
+        </tr>
+        <tr>
+          <td>Bal. Acc ↑</td><td>0 – 100 %</td>
+          <td>Balanced accuracy across all three classes (green / yellow / orange).
+          Averaged so that rare orange events are not overwhelmed by the large
+          number of green hours. Values above 70% are operationally useful;
+          above 80% are strong.</td>
+        </tr>
+        <tr>
+          <td>FAR ↓</td><td>0 – 100 %</td>
+          <td><b>False Alarm Rate</b> for orange events specifically: of all
+          hours the model predicted as orange (≥ 30 ppb), what fraction were
+          actually below 30 ppb? A FAR of 10% means 1 in 10 orange alerts
+          would be a false alarm. Lower values build operational trust and
+          reduce notification fatigue.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="guide-section">
+    <h2>Reading the colour coding</h2>
+    <ul>
+      <li><b>Dark navy cells</b> mark the single best value in each column across
+      all station-month-variant combinations shown. Use these to identify which
+      model vintage and station combination is performing best for a given
+      metric.</li>
+      <li><span style="background:#d5f5e3;padding:1px 5px;border-radius:3px;
+        color:#196f3d;font-weight:600;">Green</span> cells in per-month detail
+        pages indicate performance above 75% on that metric;
+        <span style="background:#fef9e7;padding:1px 5px;border-radius:3px;
+        color:#7d6608;font-weight:600;">yellow</span> 50–75%; and
+        <span style="background:#fadbd8;padding:1px 5px;border-radius:3px;
+        color:#922b21;font-weight:600;">red</span> below 50%.</li>
+    </ul>
+  </div>
+
+  <div class="guide-section">
+    <h2>Important limitations</h2>
+    <ul>
+      <li><b>Oracle inputs:</b> The recall and Spearman metrics are computed
+      using the model's regression output when fed <em>observed</em> H2S lagged
+      values (lag 1 h, 3 h, 6 h) as inputs. In real operational use, those
+      lagged values would themselves be recent observations — which are generally
+      available in near-real-time — so this closely approximates the nowcast
+      use case but does not represent multi-step ahead forecast skill.</li>
+      <li><b>Station coverage:</b> Not all stations have equal record lengths.
+      Early months (e.g. 2026-01) may show higher uncertainty because fewer
+      out-of-sample hours are available for evaluation.</li>
+      <li><b>Class imbalance:</b> Orange events (≥ 30 ppb) are rare. Metrics
+      such as Balanced Accuracy explicitly correct for this, but recall@30 can
+      appear volatile when n OOS orange hours is small (&lt; 20).</li>
+      <li><b>Walk-forward vs. cross-validation:</b> Walk-forward backtesting
+      is deliberately pessimistic — the model always sees less data than it
+      would in full production. This makes the reported metrics a
+      <em>lower bound</em> on expected operational performance.</li>
+    </ul>
+  </div>
+
+  <div class="guide-section">
+    <h2>Suggested questions to ask of this report</h2>
+    <ul>
+      <li>Is recall@8 consistently above 70% for Nestor/BES across recent months?
+      If not, the model may be missing a meaningful fraction of community-impact
+      events.</li>
+      <li>Is FAR trending upward for any station? Increasing false alarms erode
+      trust with response partners and the public.</li>
+      <li>Does the Evidence variant consistently outperform Lean, or does Lean
+      sometimes win? If Lean wins for early months, consider whether additional
+      weather-dependent features add noise when training data are sparse.</li>
+      <li>Are there months where Spearman drops sharply? This may indicate a
+      meteorological regime shift (e.g. seasonal wind pattern change) that the
+      model has not yet learned from.</li>
+    </ul>
+  </div>
+
 </div></body></html>"""
 
 
@@ -1362,8 +1612,14 @@ def backtest_comparison_index(context: AssetExecutionContext) -> str:
     s3.putFile(html.encode("utf-8"), index_path,
                bucket=s3.S3_BUCKET, content_type="text/html")
 
+    guide_html = _build_guide_html()
+    guide_path = f"{BACKTEST_RESULTS_BASE}/guide.html"
+    s3.putFile(guide_html.encode("utf-8"), guide_path,
+               bucket=s3.S3_BUCKET, content_type="text/html")
+
     index_url = s3.publicUrl(index_path)
     context.log.info(f"✓ Uploaded comparison index → {index_path}")
+    context.log.info(f"✓ Uploaded column guide → {guide_path}")
     context.add_output_metadata({
         "n_monthly_results": len(all_results),
         "months": sorted(r["month_key"] for r in all_results),
