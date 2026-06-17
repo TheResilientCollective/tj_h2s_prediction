@@ -1163,6 +1163,14 @@ def _build_comparison_index_html(all_results: list[dict]) -> str:
             return "best" if abs(val - bv) < tol else ""
         return "best" if abs(val - bv) < tol else ""
 
+    # Sort station → month ascending → variant (evidence before lean)
+    variant_order = {"evidence": 0, "lean": 1}
+    rows.sort(key=lambda r: (
+        r["station_name"],
+        r["month_key"],
+        variant_order.get(r["variant"], 99),
+    ))
+
     # Build table rows
     table_rows_html = ""
     for r in rows:
@@ -1172,9 +1180,9 @@ def _build_comparison_index_html(all_results: list[dict]) -> str:
         month_href = f"{r['month_key']}/index.html"
         table_rows_html += (
             f"<tr>"
+            f"<td><a href='{detail_href}'>{r['station_name']}</a></td>"
             f"<td><a href='{month_href}'>{r['month_key']}</a></td>"
             f"<td><small>{r['cutoff_date']}</small></td>"
-            f"<td><a href='{detail_href}'>{r['station_name']}</a></td>"
             f"<td><span class='badge {badge}'>{r['variant']}</span></td>"
             f"<td>{r['n_oos']:,}</td>"
             f"<td class='{_cls('spearman', r['spearman'])}'>{_num(r['spearman'])}</td>"
@@ -1190,7 +1198,7 @@ def _build_comparison_index_html(all_results: list[dict]) -> str:
 
     head = (
         "<tr>"
-        "<th>Month</th><th>Cutoff</th><th>Station</th><th>Variant</th>"
+        "<th>Station</th><th>Month</th><th>Cutoff</th><th>Variant</th>"
         "<th>n OOS</th><th>Spearman ↑</th><th>MAE ↓</th>"
         "<th>recall@5 ↑</th><th>recall@8 ↑</th><th>recall@10 ↑</th>"
         "<th>recall@30 ↑</th><th>Bal.Acc ↑</th><th>FAR ↓</th>"
