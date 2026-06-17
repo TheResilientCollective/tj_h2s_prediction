@@ -318,6 +318,7 @@ def backfill_training_data(context: AssetExecutionContext) -> pd.DataFrame:
         "archive_metadata.json (algorithm_choices + artifacts). No features_{variant}.json — "
         "features are already inside training_report.json."
     ),
+    op_tags={"modeltrainer": "true"},
     config_schema={
         "ensemble_margin": dg.Field(float, default_value=0.01),
     },
