@@ -184,6 +184,7 @@ def _compute_metrics(df: pd.DataFrame) -> dict:
             "recall": float(r["recall"]) if r["recall"] is not None else None,
             "precision": float(r["precision"]) if r["precision"] is not None else None,
             "n_pos": int(r["n_positives"]),
+            "n_predicted": int(r["n_predicted_positive"]),
         }
     for k in _PROB_THRESHOLDS:
         m["prob"][str(k)] = _prob_call(df, k)
@@ -573,6 +574,43 @@ def _chart_category_recall(monthly: dict) -> str:
     return _fig_to_b64(fig)
 
 
+def _chart_yellow_detection(monthly: dict) -> str:
+    """Recall and precision at ≥5 ppb and ≥10 ppb (yellow-level) by month."""
+    months = [m for m in sorted(monthly) if m != "ALL"]
+    if not months:
+        return ""
+    xs = np.arange(len(months))
+    fig, axes = plt.subplots(1, 2, figsize=(14, 4), sharey=False)
+
+    for ax, k, label, color in [
+        (axes[0], "5", "≥5 ppb (odour threshold)", "#f39c12"),
+        (axes[1], "10", "≥10 ppb (SDAPCD action level)", "#e67e22"),
+    ]:
+        recalls = [monthly[m]["mag"][k]["recall"] for m in months]
+        precs = [monthly[m]["mag"][k]["precision"] for m in months]
+        obs = [monthly[m]["mag"][k]["n_pos"] for m in months]
+        pred = [monthly[m]["mag"][k].get("n_predicted", 0) for m in months]
+
+        ax.plot(xs, recalls, color=color, marker="o", lw=1.8, label="Recall")
+        ax.plot(xs, precs, color="#2980b9", marker="s", lw=1.8, ls="--", label="Precision")
+        ax2 = ax.twinx()
+        ax2.bar(xs - 0.2, obs, width=0.35, alpha=0.3, color=color, label="Observed hours")
+        ax2.bar(xs + 0.2, pred, width=0.35, alpha=0.3, color="#2980b9", label="Predicted hours")
+        ax2.set_ylabel("Hours", fontsize=8)
+        ax.set_xticks(list(xs))
+        ax.set_xticklabels(months, rotation=45, ha="right", fontsize=8)
+        ax.set_ylim(0, 1.05)
+        ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1.0, decimals=0))
+        ax.set_title(f"Yellow detection — {label}", fontsize=10)
+        h1, l1 = ax.get_legend_handles_labels()
+        h2, l2 = ax2.get_legend_handles_labels()
+        ax.legend(h1 + h2, l1 + l2, fontsize=7, ncol=2)
+        ax.grid(axis="y", lw=0.4, alpha=0.5)
+
+    fig.tight_layout()
+    return _fig_to_b64(fig)
+
+
 def _chart_confusion(m: dict, title: str) -> str:
     cm = np.array(m["confusion_matrix"], dtype=float)
     labels = ["Green", "Yellow", "Orange"]
@@ -713,9 +751,11 @@ def _threshold_table(m: dict) -> str:
         sk = str(k)
         mag = m["mag"][sk]
         prob = m["prob"].get(sk, {"recall": None, "precision": None, "n": 0})
+        n_pred = mag.get("n_predicted", 0)
         rows += (
             f"<tr><td>≥{k} ppb</td>"
             f"<td>{mag['n_pos']:,}</td>"
+            f"<td>{n_pred:,}</td>"
             f"<td class='{_color_cell(mag['recall'])}'>{_pct(mag['recall'])}</td>"
             f"<td class='{_color_cell(mag['precision'])}'>{_pct(mag['precision'])}</td>"
             f"<td class='{_color_cell(prob['recall'])}'>{_pct(prob['recall'])}</td>"
@@ -724,7 +764,7 @@ def _threshold_table(m: dict) -> str:
         )
     return (
         "<table><thead><tr>"
-        "<th>Threshold</th><th>Observed events</th>"
+        "<th>Threshold</th><th>Observed hours</th><th>Predicted hours</th>"
         "<th>Recall (magnitude)</th><th>Precision (magnitude)</th>"
         "<th>Recall (P&gt;0.5)</th><th>Precision (P&gt;0.5)</th>"
         f"</tr></thead><tbody>{rows}</tbody></table>"
@@ -810,6 +850,7 @@ def _build_station_html(
       <img src="data:image/png;base64,{_chart_spearman_recall(monthly)}" style="width:100%">
       <img src="data:image/png;base64,{_chart_mae(monthly)}" style="width:100%">
       <img src="data:image/png;base64,{_chart_category_recall(monthly)}" style="width:100%">
+      <img src="data:image/png;base64,{_chart_yellow_detection(monthly)}" style="width:100%">
     </div>"""
 
     monthly_table_html = ""
