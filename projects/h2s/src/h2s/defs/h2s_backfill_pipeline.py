@@ -538,11 +538,14 @@ def _chart_mae(monthly: dict) -> str:
     ax2 = ax.twinx()
     ax2.plot(xs, [monthly[m]["per_class"]["orange"]["n"] for m in months],
              color=_C["orange"], marker="D", lw=1.6, label="Observed orange hours")
+    ax2.plot(xs, [monthly[m]["mag"]["30"].get("n_predicted", 0) for m in months],
+             color=_C["orange"], marker="^", lw=1.6, ls="--", alpha=0.7,
+             label="Predicted orange hours")
     ax.set_xticks(list(xs))
     ax.set_xticklabels(months, rotation=45, ha="right", fontsize=8)
     ax.set_ylabel("MAE (ppb)")
     ax2.set_ylabel("Orange hours")
-    ax.set_title("Monthly MAE vs observed orange-event volume", fontsize=11)
+    ax.set_title("Monthly MAE vs orange-event volume (observed vs predicted)", fontsize=11)
     h1, l1 = ax.get_legend_handles_labels()
     h2, l2 = ax2.get_legend_handles_labels()
     ax.legend(h1 + h2, l1 + l2, fontsize=8)
