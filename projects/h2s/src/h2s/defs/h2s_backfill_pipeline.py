@@ -9,9 +9,11 @@ H2S lag features at the boundary are computed from real observations, not NaN.
 Only the pre-cutoff rows are used for model training.
 
 S3 paths:
-  Backfill models:
-    tijuana/forecast/models/backfill/{month_key}/{station_key}/{task}_{variant}.pkl
-    tijuana/forecast/models/backfill/{month_key}/{station_key}/features_{variant}.json
+  Backfill model archives (same root as production archive, backfill_ prefix):
+    STATION_MODELS_ARCHIVE_BASE/{station_key}/backfill_{month_key}_{version_tag}/
+      {task}_{variant}.pkl          — model pickle (regression/clf_5ppb/clf_10ppb/clf_30ppb)
+      training_report.json          — in-sample val metrics + feature lists per variant
+      archive_metadata.json         — version tag, backfill flags, algorithm_choices, artifacts
   Backtest results:
     tijuana/forecast/backtest/{month_key}/backtest_results.json
     tijuana/forecast/backtest/{month_key}/{station_key}_{variant}.html
@@ -41,17 +43,19 @@ import numpy as np
 import pandas as pd
 
 from h2s.constants import (
-    BACKFILL_MODELS_BASE,
     BACKTEST_RESULTS_BASE,
     MODEL_FEATURES,
     MODEL_FEATURES_LEAN,
     OBS_DATA_PATH,
+    STATION_MODELS_ARCHIVE_BASE,
     STATIONS,
     TRAINING_SNAPSHOTS_PATH,
 )
 from h2s.training.calibration_eval import recall_at_threshold, spearman_rank
 from h2s.training.multi_station_trainer import (
     TRAIN_FRACTION,
+    eval_classifier,
+    eval_regressor,
     prepare_multi_station_features,
     train_and_select,
 )
@@ -81,6 +85,31 @@ _PROB_COL = {5: "p5", 10: "p10", 30: "p30"}
 
 _GREEN_MAX = 5.0
 _ORANGE_MIN = 30.0
+
+
+# ============================================================================
+# Version-tag + importance helpers
+# ============================================================================
+
+def _git_short_sha() -> str:
+    import subprocess
+    try:
+        return (subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL, text=True,
+        ).strip()[:7] or "unknown")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return os.environ.get("GIT_SHA", "unknown")[:7] or "unknown"
+
+
+def _importance_for_features(model, feature_names: list, top_n: int = 10) -> dict:
+    """Feature importance dict keyed by the variant's own column list."""
+    imp = getattr(model, "feature_importances_", None)
+    if imp is None:
+        return {}
+    imp = np.asarray(imp)
+    idx = np.argsort(imp)[::-1][:top_n]
+    return {feature_names[i]: round(float(imp[i]), 4) for i in idx if i < len(feature_names)}
 
 
 # ============================================================================
@@ -281,7 +310,14 @@ def backfill_training_data(context: AssetExecutionContext) -> pd.DataFrame:
     kinds={"python", "ml", "s3"},
     partitions_def=BACKFILL_MONTHLY_PARTITIONS,
     ins={"backfill_training_data": dg.AssetIn(key=_KEY("backfill_training_data"))},
-    description="Train Evidence + Lean models for all 3 stations using only pre-cutoff data. Uploads models to S3 backfill path.",
+    description=(
+        "Train Evidence + Lean models for all 3 stations using only pre-cutoff data. "
+        "Archives under STATION_MODELS_ARCHIVE_BASE with backfill_{month_key}_{version_tag} "
+        "prefix — same root as production, distinguished by the backfill_ prefix. "
+        "Writes training_report.json (val metrics + feature lists) and a merged "
+        "archive_metadata.json (algorithm_choices + artifacts). No features_{variant}.json — "
+        "features are already inside training_report.json."
+    ),
     config_schema={
         "ensemble_margin": dg.Field(float, default_value=0.01),
     },
@@ -290,7 +326,7 @@ def backfill_station_models(
     context: AssetExecutionContext,
     backfill_training_data: pd.DataFrame,
 ) -> dict:
-    """Train all stations × variants × tasks on pre-cutoff data; upload to S3.
+    """Train all stations × variants × tasks on pre-cutoff data; archive to S3.
 
     Returns metadata dict (not the models themselves) with S3 paths so that
     station_backtest_results can load them directly.
@@ -307,8 +343,11 @@ def backfill_station_models(
         f"{pretrain_df['site_name'].nunique()} stations)"
     )
 
+    now = datetime.now(timezone.utc)
+    now_str = now.strftime("%Y%m%dT%H%M%SZ")
+    sha = _git_short_sha()
+
     station_meta: dict[str, dict] = {}
-    all_choices: dict[str, dict] = {}
 
     for station_name, info in STATIONS.items():
         station_key = info["key"]
@@ -325,57 +364,112 @@ def backfill_station_models(
             f"  {station_name}: {len(sdf):,} rows (train: {split:,}, val: {len(sdf)-split:,})"
         )
 
-        s3_base = f"{BACKFILL_MODELS_BASE}/{month_key}/{station_key}"
-        station_paths: dict[str, str] = {}
-        choices: dict[str, dict] = {}
+        # One version tag per station (distinct timestamp-sha per station run)
+        version_tag = f"backfill_{month_key}_{now_str}-{sha}"
+        s3_base = f"{STATION_MODELS_ARCHIVE_BASE}/{station_key}/{version_tag}"
+
+        tasks_metrics: dict[str, dict] = {}
+        algorithm_choices: dict[str, dict] = {}
+
+        # Shared label arrays for val scoring
+        y_cont = sdf["H2S"].values
+        y_5 = sdf["exceed_5"].values
+        y_10 = sdf["exceed_10"].values
+        y_30 = sdf["exceed_30"].values
 
         for variant, features in _VARIANTS.items():
+            X = sdf[features].values
+            Xte = X[split:]
+
             variant_results = _train_one_variant_local(
                 context.log, sdf, features, split, ensemble_margin, variant
             )
-            choices[variant] = {task: choice
-                                 for task, (_, choice) in variant_results.items()}
 
-            for task, (model, _) in variant_results.items():
-                pkl_path = f"{s3_base}/{task}_{variant}.pkl"
-                s3.putFile(pickle.dumps(model), pkl_path,
-                           bucket=s3.S3_BUCKET,
-                           content_type="application/octet-stream")
-                station_paths[f"{task}_{variant}"] = pkl_path
+            variant_metrics: dict[str, dict] = {}
+            variant_choices: dict[str, str] = {}
+            for task_base, yte in [
+                ("regression", y_cont[split:]),
+                ("clf_5ppb",   y_5[split:]),
+                ("clf_10ppb",  y_10[split:]),
+                ("clf_30ppb",  y_30[split:]),
+            ]:
+                model, choice = variant_results[task_base]
+                m = (eval_regressor(model, Xte, yte) if task_base == "regression"
+                     else eval_classifier(model, Xte, yte))
+                variant_metrics[task_base] = {
+                    **m,
+                    "feature_importance": _importance_for_features(model, features),
+                }
+                variant_choices[task_base] = choice
 
-            feat_path = f"{s3_base}/features_{variant}.json"
-            s3.putFile(json.dumps(features).encode(),
-                       feat_path, bucket=s3.S3_BUCKET,
-                       content_type="application/json")
-            station_paths[f"features_{variant}"] = feat_path
+                s3.putFile(
+                    pickle.dumps(model),
+                    f"{s3_base}/{task_base}_{variant}.pkl",
+                    bucket=s3.S3_BUCKET,
+                    content_type="application/octet-stream",
+                )
 
-        # Write station-level metadata
-        meta_path = f"{s3_base}/backfill_metadata.json"
-        meta_blob = {
+            tasks_metrics[variant] = variant_metrics
+            algorithm_choices[variant] = variant_choices
+
+        # training_report.json — matches production format; adds backfill extras
+        training_report = {
+            "generated_at": now.isoformat(),
+            "station": station_name,
+            "station_key": station_key,
+            "is_backfill": True,
             "month_key": month_key,
             "cutoff_date": cutoff.isoformat(),
+            "n_records": int(len(sdf)),
+            "n_train": int(split),
+            "n_val": int(len(sdf) - split),
+            "features": {v: feats for v, feats in _VARIANTS.items()},
+            "ensemble_margin": ensemble_margin,
+            "tasks": tasks_metrics,
+        }
+        s3.putFile(
+            json.dumps(training_report, indent=2, default=str).encode(),
+            f"{s3_base}/training_report.json",
+            bucket=s3.S3_BUCKET,
+            content_type="application/json",
+        )
+
+        # archive_metadata.json — merged: artifacts + algorithm_choices + backfill fields
+        artifacts = (
+            [f"{task}_{variant}.pkl" for variant in _VARIANTS for task in _TASKS]
+            + ["training_report.json", "archive_metadata.json"]
+        )
+        archive_meta = {
+            "model_version": version_tag,
+            "is_backfill": True,
+            "month_key": month_key,
+            "cutoff_date": cutoff.isoformat(),
+            "archived_at": now.isoformat(),
+            "git_sha": sha,
             "station": station_name,
             "station_key": station_key,
             "n_pretrain": int(len(sdf)),
             "n_train": int(split),
             "n_val": int(len(sdf) - split),
-            "algorithm_choices": choices,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "algorithm_choices": algorithm_choices,
+            "artifacts": artifacts,
         }
-        s3.putFile(json.dumps(meta_blob, indent=2).encode(),
-                   meta_path, bucket=s3.S3_BUCKET,
-                   content_type="application/json")
+        s3.putFile(
+            json.dumps(archive_meta, indent=2).encode(),
+            f"{s3_base}/archive_metadata.json",
+            bucket=s3.S3_BUCKET,
+            content_type="application/json",
+        )
 
         station_meta[station_key] = {
             "station_name": station_name,
             "s3_base": s3_base,
+            "version_tag": version_tag,
             "n_pretrain": int(len(sdf)),
             "n_train": int(split),
             "n_val": int(len(sdf) - split),
-            "algorithm_choices": choices,
-            "paths": station_paths,
+            "algorithm_choices": algorithm_choices,
         }
-        all_choices[station_key] = choices
         context.log.info(f"  ✓ {station_name} → {s3_base}")
 
     context.add_output_metadata({

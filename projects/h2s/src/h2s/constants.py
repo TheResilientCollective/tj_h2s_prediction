@@ -26,8 +26,8 @@ VALIDATION_PATH = 'tijuana/forecast/validation'
 STATION_MODELS_S3_BASE = 'tijuana/forecast/models/stations'
 TRAINING_SNAPSHOTS_PATH = 'tijuana/forecast/training_snapshots'
 
-# Walk-forward backfill paths
-BACKFILL_MODELS_BASE = 'tijuana/forecast/models/backfill'
+# Walk-forward backfill paths — models archived under STATION_MODELS_ARCHIVE_BASE
+# with a backfill_{month_key}_{version_tag} prefix.
 BACKTEST_RESULTS_BASE = 'tijuana/forecast/backtest'
 
 # Immutable per-station model versions. Every training run archives to
