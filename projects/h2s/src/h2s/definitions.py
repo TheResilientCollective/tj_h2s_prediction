@@ -164,6 +164,16 @@ def defs():
         daily_station_validation_report,
     )
 
+    # Import backfill pipeline assets + jobs
+    from h2s.defs.h2s_backfill_pipeline import (
+        backfill_training_data,
+        backfill_station_models,
+        station_backtest_results,
+        backtest_comparison_index,
+        station_backfill_training_job,
+        station_backtest_index_job,
+    )
+
     # Import schedules and jobs
     from h2s.defs.h2s_schedules import (
         monthly_data_extraction_job,
@@ -179,6 +189,7 @@ def defs():
         station_forecast_validation_schedule,
         station_model_training_schedule,
         station_forecast_analysis_schedule,
+        station_backfill_schedule,
         dispersion_inversion_job,
         dispersion_forecast_job,
         dispersion_hysplit_execution_job,
@@ -251,6 +262,11 @@ def defs():
             cascade_alert_dispatcher,
             # Observed >10 ppb Alert-Performance machine (yellow tier)
             h2s_alert_performance_dispatcher,
+            # Walk-forward backfill pipeline
+            backfill_training_data,
+            backfill_station_models,
+            station_backtest_results,
+            backtest_comparison_index,
         ],
         jobs=[
             # Prediction jobs
@@ -288,6 +304,9 @@ def defs():
             h2s_alert_performance_job,
             # Validation jobs
             daily_station_validation_job,
+            # Walk-forward backfill jobs
+            station_backfill_training_job,
+            station_backtest_index_job,
         ],
         schedules=[
             forecast_prediction_schedule,
@@ -305,6 +324,8 @@ def defs():
             daily_station_validation_schedule,
             # Forecast cascade pre-alert schedule
             cascade_alerts_schedule,
+            # Walk-forward backfill schedule
+            station_backfill_schedule,
         ],
         sensors=[slack_on_run_failure, h2s_alert_sensor, apcd_sensor_watch_sensor,
                  h2s_alert_performance_sensor],

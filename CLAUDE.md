@@ -558,7 +558,8 @@ s3://test/
 │   │   │   └── training_report.json             # metrics for both variants
 │   │   └── archive/stations/{station_key}/{version_tag}/  # immutable version history
 │   │       └── (same artifact set + archive_metadata.json; version_tag =
-│   │            YYYYMMDDTHHMMSSZ-{gitsha}, never overwritten)
+│   │            YYYYMMDDTHHMMSSZ-{gitsha} for production,
+│   │            backfill_{month_key}_{timestamp}-{sha} for backfill; never overwritten)
 │   └── output/YYYY-MM-DD_HH/                   # Timestamped hourly predictions
 ├── tijuana/dispersion/
 │   ├── lagrangian/
@@ -584,6 +585,22 @@ s3://test/
 ```
 
 ### Key Design Decisions
+
+**`algorithm_choices` field in `archive_metadata.json`**
+
+Every archived model version (production and backfill) carries an `algorithm_choices` field
+documenting which algorithm `train_and_select()` auto-selected per task/variant. See
+`docs/ALGORITHM_CHOICES.md` for the full schema, selection logic, and code examples.
+
+**Backfill archive layout** (same root as production, `backfill_` prefix in version tag):
+```
+STATION_MODELS_ARCHIVE_BASE/{station_key}/backfill_{month_key}_{timestamp}-{sha}/
+  {task}_{variant}.pkl       — model pickle (8 files: 4 tasks × 2 variants)
+  training_report.json       — in-sample val metrics, feature lists per variant, is_backfill: true
+  archive_metadata.json      — version tag, algorithm_choices, artifacts list, backfill metadata
+```
+`features_{variant}.json` is NOT written separately — the feature lists are inside `training_report.json`
+under `"features": {"evidence": [...], "lean": [...]}`.
 
 **Why JSON instead of pickle for preprocessing?**
 - S3-friendly (human-readable, portable, secure)

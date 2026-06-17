@@ -59,12 +59,12 @@ class S3Resource(ResourceWithS3Configuration):
             return f"http://{url}"
 
     def listPath(
-        self, path="orgs", recusrsive=True, bucket=None
+        self, path="orgs", recursive=False, bucket=None
     ) -> Iterator[minio.datatypes.Object]:
         """List objects at a given path."""
         if bucket is None:
             bucket = self.S3_BUCKET
-        result = self.getClient().list_objects(bucket, path)
+        result = self.getClient().list_objects(bucket, path, recursive=recursive)
         return result
 
     def publicUrl(self, path="test", bucket=None):

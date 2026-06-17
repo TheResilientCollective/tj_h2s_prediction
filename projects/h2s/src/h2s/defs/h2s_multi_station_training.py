@@ -318,6 +318,7 @@ def _train_one_variant(
     kinds={"python", "ml"},
     description="Auto-trained Evidence (33 feat) + Lean (19 feat) models per station",
     ins={"multi_station_training_data": dg.AssetIn(key=_KEY("multi_station_training_data"))},
+    tags={"environment": "production", "modeltrainer": "true"},
     config_schema={
         "ensemble_margin": dg.Field(
             float,
