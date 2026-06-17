@@ -691,3 +691,40 @@ def daily_station_validation_schedule(context: dg.ScheduleEvaluationContext):
         partition_key=yesterday_utc,
         run_key=f"daily_station_validation_{yesterday_utc}",
     )
+
+
+# ============================================================================
+# SCHEDULE 13: Monthly backfill training + backtest (2 AM on 2nd of month)
+# Offset from station_model_training_schedule (1st of month at 2 AM) to avoid
+# overlap. Starts STOPPED — run station_backfill_training_job --partition
+# YYYY-MM-DD to backfill historical months, then enable.
+# ============================================================================
+
+from h2s.defs.h2s_backfill_pipeline import (  # noqa: E402
+    BACKFILL_MONTHLY_PARTITIONS,
+    station_backfill_training_job,
+    station_backtest_index_job,
+)
+
+
+@dg.schedule(
+    job=station_backfill_training_job,
+    cron_schedule="0 2 2 * *",
+    description=(
+        "Monthly walk-forward backfill: train on pre-cutoff data, evaluate OOS "
+        "(2nd of month at 2 AM UTC — day after station_model_training_schedule)"
+    ),
+    default_status=dg.DefaultScheduleStatus.STOPPED,
+    tags={"environment": "production", "schedule_type": "backfill_training"},
+)
+def station_backfill_schedule(context: dg.ScheduleEvaluationContext):
+    """Train the previous month's backfill models and evaluate OOS."""
+    prev_month = (
+        context.scheduled_execution_time.replace(day=1) - timedelta(days=1)
+    ).replace(day=1)
+    partition_key = prev_month.strftime("%Y-%m-%d")
+    return dg.RunRequest(
+        partition_key=partition_key,
+        run_key=f"backfill_{partition_key}",
+        tags={"backfill_month": partition_key},
+    )
