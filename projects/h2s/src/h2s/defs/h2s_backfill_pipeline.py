@@ -1322,7 +1322,8 @@ def backtest_comparison_index(context: AssetExecutionContext) -> str:
     try:
         objects = list(s3.listPath(
             path=f"{BACKTEST_RESULTS_BASE}/",
-            bucket=s3.S3_BUCKET
+            bucket=s3.S3_BUCKET,
+            recursive=True,
         ))
     except Exception as e:
         context.log.warning(f"Could not list S3 objects: {e}")
