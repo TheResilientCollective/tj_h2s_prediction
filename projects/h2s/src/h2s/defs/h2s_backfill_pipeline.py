@@ -671,6 +671,16 @@ tr:hover td { background: #f0f4ff; }
 .lead-card { background: #fff; border-radius: 8px; padding: 16px 20px;
     box-shadow: 0 1px 4px rgba(0,0,0,.07); border-left: 4px solid #2563eb; }
 .lead-card h3 { margin: 0 0 10px; font-size: 0.95em; color: #1a2233; }
+.months-grid { display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(175px, 1fr));
+    gap: 11px; margin-bottom: 8px; }
+.month-card { background: #f8fafc; border: 1px solid #dde3ee; border-radius: 7px;
+    padding: 13px 16px; transition: box-shadow .15s; }
+.month-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,.10); }
+.month-card a { font-size: 1.05em; font-weight: 700; color: #2563eb;
+    text-decoration: none; }
+.month-card a:hover { text-decoration: underline; }
+.month-card .meta { font-size: 0.78em; color: #666; margin-top: 5px; line-height: 1.6; }
 """
 
 
@@ -1224,6 +1234,36 @@ def _build_comparison_index_html(all_results: list[dict]) -> str:
             f'</p></div>'
         )
 
+    # Monthly directory — one card per available month, most recent first
+    months_seen = sorted({r["month_key"] for r in all_results}, reverse=True)
+    month_cards_html = ""
+    for mk in months_seen:
+        res = next((r for r in all_results if r["month_key"] == mk), {})
+        cutoff_d = res.get("cutoff_date", "")[:10]
+        n_stations = len(res.get("stations", {}))
+        # Gather evidence Spearman per station for the card subtitle
+        ev_stats = []
+        for sdata in res.get("stations", {}).values():
+            ev = sdata.get("variants", {}).get("evidence", {})
+            sp = ev.get("oos_metrics", {}).get("spearman")
+            if sp is not None and not (isinstance(sp, float) and np.isnan(sp)):
+                ev_stats.append(f"{_num(sp)}")
+        sp_label = " / ".join(ev_stats) if ev_stats else "—"
+        month_cards_html += (
+            f'<div class="month-card">'
+            f'<a href="{mk}/index.html">{mk}</a>'
+            f'<div class="meta">'
+            f'Cutoff: {cutoff_d}<br>'
+            f'{n_stations} station{"s" if n_stations != 1 else ""}<br>'
+            f'Spearman: {sp_label}'
+            f'</div></div>'
+        )
+    months_section = (
+        f'<div class="section"><h2>Monthly Reports</h2>'
+        f'<div class="months-grid">{month_cards_html}</div>'
+        f'</div>'
+    ) if months_seen else ""
+
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     return f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1235,6 +1275,7 @@ def _build_comparison_index_html(all_results: list[dict]) -> str:
 </div>
 <div class="content">
   {lead_html}
+  {months_section}
   <div class="section">
     <h2>All months × stations × variants</h2>
     <p style="font-size:0.84em;color:#555;">
