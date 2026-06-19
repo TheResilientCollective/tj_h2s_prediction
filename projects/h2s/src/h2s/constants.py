@@ -136,7 +136,7 @@ H2S_THRESHOLD_HIGH = 30  # ppb — yellow_high / orange boundary
 PROB_5_CAUTION = 0.25
 PROB_5_ALERT = 0.5
 PROB_10_ALERT = 0.5
-PROB_30_ALERT = 0.35  # p(H2S>30ppb) threshold to trigger ORANGE (legacy hourly path)
+PROB_30_ALERT = 0.25  # p(H2S>30ppb) threshold to trigger ORANGE (lowered for better sensitivity)
 
 # ==============================================================================
 # Forecast Products (docs/feature/rename_workplan.md)
