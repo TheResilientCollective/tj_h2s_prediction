@@ -55,7 +55,7 @@ from h2s.constants import (
 from h2s.resources.minio import S3Resource
 from h2s.training.validation import calculate_metrics, calculate_false_alarm_rate
 
-OBS_DATA_PATH = "latest/tijuana/forecast_data/modeldata_h2s.parquet"
+OBS_DATA_PATH = "latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet"
 
 
 def make_s3() -> S3Resource:
@@ -485,6 +485,15 @@ def load_all_observations(s3: S3Resource, station_filter: list[str] | None = Non
     public_bucket = os.environ.get("PUBLIC_BUCKET", s3.S3_BUCKET)
     obs_url = s3.publicUrl(path=OBS_DATA_PATH, bucket=public_bucket)
     all_obs = pd.read_parquet(obs_url)
+
+    # Filter to only actually measured observations (not interpolated/filled)
+    if "h2s_measured" in all_obs.columns:
+        all_obs = all_obs[all_obs["h2s_measured"] == True].copy()  # noqa: E712
+
+    # Clip H2S to valid range (consistent with validation pipeline)
+    if "H2S" in all_obs.columns:
+        all_obs = all_obs[all_obs["H2S"] <= 500].copy()
+        all_obs["H2S"] = all_obs["H2S"].clip(lower=0)
 
     # Keep known stations
     known_names = set()
