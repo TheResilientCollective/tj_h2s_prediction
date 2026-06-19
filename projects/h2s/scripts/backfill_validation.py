@@ -354,10 +354,20 @@ def daily_station_hindcast(
 
         import numpy as np
 
+        # Preserve real precomputed lag features from observation parquet
+        # (they reflect actual H2S history, not synthetic decay)
+        real_lag_cols = ["h2s_lag_1h", "h2s_lag_3h", "h2s_lag_6h",
+                          "h2s_rolling_6h", "h2s_rolling_24h"]
+        preserved = {col: sfc[col].copy() for col in real_lag_cols if col in sfc.columns}
+
         try:
             sfc = _engineer_forecast_features(sfc, last_state)
         except Exception:
             continue
+
+        # Restore real lag values (overwriting the synthetic decay from _engineer_forecast_features)
+        for col, real_vals in preserved.items():
+            sfc[col] = real_vals.values
 
         # Fill missing features with 0
         for col in feature_cols:
