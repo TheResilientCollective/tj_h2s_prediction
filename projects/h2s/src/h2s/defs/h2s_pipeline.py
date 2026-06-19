@@ -1351,21 +1351,32 @@ def monthly_performance_viz(context: dg.AssetExecutionContext) -> None:
     # Sort by date (oldest first for trends)
     metrics_list.sort(key=lambda x: x['date_obj'])
 
+    # Filter out days with no matched observations (class_metrics will be None)
+    valid_metrics = [m for m in metrics_list if m.get('class_metrics') is not None and m.get('confusion_matrix') is not None]
+
+    if not valid_metrics:
+        raise ValueError(
+            f"No valid metrics found in last 30 days (all {len(metrics_list)} loaded days have zero matches). "
+            f"Unable to generate performance dashboard. Check that observations are being recorded."
+        )
+
+    context.log.info(f"Using {len(valid_metrics)} days with data (skipped {len(metrics_list) - len(valid_metrics)} days with no matches)")
+
     # Extract data for plots
-    dates = [m['date_obj'] for m in metrics_list]
-    balanced_acc = [m['balanced_accuracy'] for m in metrics_list]
+    dates = [m['date_obj'] for m in valid_metrics]
+    balanced_acc = [m['balanced_accuracy'] for m in valid_metrics]
 
     # Per-class recall
-    orange_recall = [m['class_metrics']['orange']['recall'] for m in metrics_list]
-    yellow_recall = [m['class_metrics']['yellow']['recall'] for m in metrics_list]
-    green_recall = [m['class_metrics']['green']['recall'] for m in metrics_list]
+    orange_recall = [m['class_metrics']['orange']['recall'] for m in valid_metrics]
+    yellow_recall = [m['class_metrics']['yellow']['recall'] for m in valid_metrics]
+    green_recall = [m['class_metrics']['green']['recall'] for m in valid_metrics]
 
-    false_alarm_rate = [m.get('false_alarm_rate', 0) for m in metrics_list]
+    false_alarm_rate = [m.get('false_alarm_rate', 0) for m in valid_metrics]
 
     # Aggregate confusion matrix (sum counts)
     # Handle days where not all 3 classes were present (e.g., 2x2 matrix)
     cm_sum = np.zeros((3, 3))
-    for m in metrics_list:
+    for m in valid_metrics:
         cm = np.array(m['confusion_matrix'])
         if cm.shape == (3, 3):
             cm_sum += cm
