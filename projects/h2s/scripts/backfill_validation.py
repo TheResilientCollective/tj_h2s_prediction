@@ -374,7 +374,12 @@ def daily_station_hindcast(
         h2s_pred = np.clip(reg.predict(X), 0, None)
         prob_5 = clf5.predict_proba(X)[:, 1] * 100 if clf5 else np.zeros(len(X))
         prob_10 = clf10.predict_proba(X)[:, 1] * 100 if clf10 else np.zeros(len(X))
-        prob_30 = clf30.predict_proba(X)[:, 1] * 100 if clf30 else np.zeros(len(X))
+
+        # Only use clf_30ppb for NESTOR (main site); fall back to 2-class for others
+        if station_key == "NESTOR__BES":
+            prob_30 = clf30.predict_proba(X)[:, 1] * 100 if clf30 else np.zeros(len(X))
+        else:
+            prob_30 = np.zeros(len(X))  # Force fallback to prob_10 logic for other sites
 
         for i in range(len(sfc)):
             risk = classify_risk(prob_5[i] / 100, prob_10[i] / 100, h2s_pred[i], prob_30[i] / 100)
