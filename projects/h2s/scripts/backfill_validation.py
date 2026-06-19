@@ -369,13 +369,15 @@ def daily_station_hindcast(
         reg = models["regression"]
         clf5 = models.get("clf_5ppb")
         clf10 = models.get("clf_10ppb")
+        clf30 = models.get("clf_30ppb")
 
         h2s_pred = np.clip(reg.predict(X), 0, None)
         prob_5 = clf5.predict_proba(X)[:, 1] * 100 if clf5 else np.zeros(len(X))
         prob_10 = clf10.predict_proba(X)[:, 1] * 100 if clf10 else np.zeros(len(X))
+        prob_30 = clf30.predict_proba(X)[:, 1] * 100 if clf30 else np.zeros(len(X))
 
         for i in range(len(sfc)):
-            risk = classify_risk(prob_5[i] / 100, prob_10[i] / 100, h2s_pred[i])
+            risk = classify_risk(prob_5[i] / 100, prob_10[i] / 100, h2s_pred[i], prob_30[i] / 100)
             results.append({
                 "time": sfc["time"].iloc[i],
                 "station": site_name,
