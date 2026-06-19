@@ -157,11 +157,10 @@ def generate_predictions(station_models, all_obs):
         prob_5 = clf5.predict_proba(X)[:, 1] if clf5 else np.zeros(len(X))
         prob_10 = clf10.predict_proba(X)[:, 1] if clf10 else np.zeros(len(X))
 
-        # Only use clf_30ppb for NESTOR (main site)
-        if station_key == "NESTOR__BES":
-            prob_30 = clf30.predict_proba(X)[:, 1] if clf30 else np.zeros(len(X))
-        else:
-            prob_30 = np.zeros(len(X))
+        # Experiment C: use clf_30ppb for ALL stations (NESTOR-only guard removed)
+        # so we can probe whether a lower threshold recovers recall on the
+        # high-AUC SAN_YSIDRO / IB_CIVIC_CTR models.
+        prob_30 = clf30.predict_proba(X)[:, 1] if clf30 else np.zeros(len(X))
 
         for i in range(len(sfc)):
             results.append({
@@ -215,6 +214,89 @@ def evaluate_threshold(preds_df, prob_30_alert):
     }
 
 
+# Acceptance gate (per the retrain brief): usable orange detection at deploy.
+GATE_RECALL = 0.50
+GATE_FAR = 0.10
+DEPLOY_THRESHOLD = 0.25
+
+
+def sweep_station(preds_df, thresholds, label):
+    """Run the threshold sweep for one already-filtered prediction frame.
+
+    Prints a per-threshold table and returns the list of result dicts.
+    """
+    n_orange = int((preds_df["H2S_actual"] >= 30).sum())
+    n_total = len(preds_df)
+    print("\n" + "=" * 100)
+    print(f"STATION: {label}   (n={n_total} matched, orange actuals={n_orange})")
+    print("=" * 100)
+
+    if n_total == 0 or n_orange == 0:
+        print("  No data / no orange actuals for this station — cannot evaluate recall.")
+        return []
+
+    print(f"{'Thresh':<8} {'BA':<8} {'OrangeR':<10} {'OrangeP':<10} {'YellowR':<10} "
+          f"{'GreenR':<10} {'FAR':<8} {'TP/FP/FN':<15} {'GATE':<6}")
+    print("-" * 100)
+
+    results = []
+    for thresh in thresholds:
+        r = evaluate_threshold(preds_df, thresh)
+        cm = r["confusion_matrix"]
+        tp = cm[2, 2]
+        fp = cm[0, 2] + cm[1, 2]
+        fn = cm[2, 0] + cm[2, 1]
+        passes = r["orange_recall"] >= GATE_RECALL and r["false_alarm_rate"] <= GATE_FAR
+        gate = "PASS" if passes else ""
+        marker = " <-- deploy" if abs(thresh - DEPLOY_THRESHOLD) < 1e-9 else ""
+        print(f"{thresh:<8.2f} {r['balanced_accuracy']:<8.3f} {r['orange_recall']:<10.3f} "
+              f"{r['orange_precision']:<10.3f} {r['yellow_recall']:<10.3f} {r['green_recall']:<10.3f} "
+              f"{r['false_alarm_rate']:<8.3f} {tp}/{fp}/{fn:<11} {gate:<6}{marker}")
+        r["_passes_gate"] = passes
+        results.append(r)
+    return results
+
+
+def summarize_station(label, results):
+    """Print the gate verdict for one station and return a one-line summary dict."""
+    if not results:
+        print(f"  {label}: NO DATA")
+        return {"station": label, "verdict": "NO DATA"}
+
+    at_deploy = next((r for r in results if abs(r["threshold"] - DEPLOY_THRESHOLD) < 1e-9), None)
+    passing = [r for r in results if r["_passes_gate"]]
+
+    # The formal acceptance gate is at the *single global* deploy threshold (0.25).
+    deploy_verdict = "PASS" if (at_deploy and at_deploy["_passes_gate"]) else "FAIL"
+
+    print(f"\n  {label}:")
+    if at_deploy:
+        print(f"    @ deploy threshold {DEPLOY_THRESHOLD}: recall={at_deploy['orange_recall']:.3f} "
+              f"FAR={at_deploy['false_alarm_rate']:.3f}  -> ACCEPTANCE GATE {deploy_verdict}")
+    if passing:
+        # A lower per-station threshold may rescue recall (Experiment C escape hatch,
+        # but per-station thresholds are out-of-scope for deployment).
+        best = max(passing, key=lambda r: r["orange_recall"])
+        passing_thresholds = ", ".join("%.2f" % r["threshold"] for r in passing)
+        print(f"    gate passes at thresholds: {passing_thresholds}  (requires per-station threshold)")
+        print(f"    best gate-passing: threshold={best['threshold']:.2f} "
+              f"recall={best['orange_recall']:.3f} FAR={best['false_alarm_rate']:.3f}")
+        rescued = True
+    else:
+        best_recall = max(results, key=lambda r: r["orange_recall"])
+        print(f"    no threshold satisfies recall>={GATE_RECALL} AND FAR<={GATE_FAR}.")
+        print(f"    best recall seen: {best_recall['orange_recall']:.3f} "
+              f"@ threshold={best_recall['threshold']:.2f} (FAR={best_recall['false_alarm_rate']:.3f})")
+        rescued = False
+    return {
+        "station": label,
+        "deploy_verdict": deploy_verdict,
+        "rescued_by_lower_threshold": rescued,
+        "deploy_recall": at_deploy["orange_recall"] if at_deploy else None,
+        "deploy_far": at_deploy["false_alarm_rate"] if at_deploy else None,
+    }
+
+
 def main():
     s3 = make_s3()
     print(f"Loading models from {s3.S3_BUCKET}...")
@@ -229,51 +311,40 @@ def main():
     preds_df = generate_predictions(station_models, all_obs)
     print(f"  {len(preds_df)} predictions\n")
 
-    # Test thresholds
-    thresholds = [0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.60, 0.70]
+    thresholds = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.60, 0.70]
 
-    print("=" * 95)
-    print(f"{'Thresh':<8} {'BA':<8} {'OrangeR':<10} {'OrangeP':<10} {'YellowR':<10} {'GreenR':<10} {'FAR':<8} {'TP/FP/FN':<15}")
-    print("=" * 95)
+    # Per-station sweeps (Experiment C). Stations of interest first.
+    station_order = ["SAN_YSIDRO", "IB_CIVIC_CTR", "NESTOR__BES"]
+    present = list(preds_df["station"].unique())
+    ordered = [s for s in station_order if s in present] + \
+              [s for s in present if s not in station_order]
 
-    results = []
-    for thresh in thresholds:
-        r = evaluate_threshold(preds_df, thresh)
-        cm = r["confusion_matrix"]
-        # Orange: TP=cm[2,2], FP=cm[0,2]+cm[1,2], FN=cm[2,0]+cm[2,1]
-        tp = cm[2, 2]
-        fp = cm[0, 2] + cm[1, 2]
-        fn = cm[2, 0] + cm[2, 1]
-        print(f"{thresh:<8.2f} {r['balanced_accuracy']:<8.3f} {r['orange_recall']:<10.3f} "
-              f"{r['orange_precision']:<10.3f} {r['yellow_recall']:<10.3f} {r['green_recall']:<10.3f} "
-              f"{r['false_alarm_rate']:<8.3f} {tp}/{fp}/{fn}")
-        results.append(r)
+    summaries = []
+    for station in ordered:
+        sub = preds_df[preds_df["station"] == station].copy()
+        results = sweep_station(sub, thresholds, station)
+        summaries.append((station, results))
 
-    print("=" * 95)
-    print("\nBest by Balanced Accuracy:")
-    best_ba = max(results, key=lambda r: r["balanced_accuracy"])
-    print(f"  Threshold: {best_ba['threshold']}, BA: {best_ba['balanced_accuracy']:.3f}, "
-          f"Orange Recall: {best_ba['orange_recall']:.3f}, FAR: {best_ba['false_alarm_rate']:.3f}")
+    # Also the aggregate (all stations) for reference / parity with old script.
+    agg_results = sweep_station(preds_df.copy(), thresholds, "ALL STATIONS (aggregate)")
 
-    print("\nBest by F1-like (recall × precision):")
-    best_f1 = max(results, key=lambda r: r["orange_recall"] * r["orange_precision"])
-    print(f"  Threshold: {best_f1['threshold']}, BA: {best_f1['balanced_accuracy']:.3f}, "
-          f"Orange Recall: {best_f1['orange_recall']:.3f}, FAR: {best_f1['false_alarm_rate']:.3f}")
+    # ---- Verdicts against the acceptance gate ----
+    print("\n" + "=" * 100)
+    print(f"ACCEPTANCE GATE: orange recall >= {GATE_RECALL} AND FAR <= {GATE_FAR} "
+          f"(deploy threshold PROB_30_ALERT = {DEPLOY_THRESHOLD})")
+    print("=" * 100)
+    verdicts = [summarize_station(st, res) for st, res in summaries]
+    summarize_station("ALL STATIONS (aggregate)", agg_results)
 
-    # Confusion matrices for best thresholds
-    print("\nConfusion matrices (Pred: Green | Yellow | Orange):")
-    for r in [best_ba, best_f1]:
-        if r is best_ba and r is best_f1:
-            label = "Best BA & F1"
-        elif r is best_ba:
-            label = "Best BA"
-        else:
-            label = "Best F1"
-        cm = r["confusion_matrix"]
-        print(f"\n{label} (threshold={r['threshold']}):")
-        for i, row in enumerate(cm):
-            actual = ['Green', 'Yellow', 'Orange'][i]
-            print(f"  Actual {actual:<6}: {row[0]:<6} {row[1]:<6} {row[2]:<6}")
+    print("\n" + "=" * 100)
+    print("SUMMARY")
+    print("=" * 100)
+    for v in verdicts:
+        dr = f"{v['deploy_recall']:.3f}" if v.get("deploy_recall") is not None else "n/a"
+        df_ = f"{v['deploy_far']:.3f}" if v.get("deploy_far") is not None else "n/a"
+        rescue = "lower-threshold rescue available" if v.get("rescued_by_lower_threshold") else "no rescue"
+        print(f"  {v['station']:<16} gate@0.25={v['deploy_verdict']:<5} "
+              f"(recall={dr} FAR={df_})  [{rescue}]")
 
 
 if __name__ == "__main__":
