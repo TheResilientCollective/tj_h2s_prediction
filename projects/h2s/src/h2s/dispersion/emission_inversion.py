@@ -127,6 +127,22 @@ class InversionConfig:
     # None / np.inf to disable.
     q_required_max_g_s: float = 500.0
 
+    # Phase 3: per-sensor row weighting + optional additive bias term
+    #
+    # sensor_row_weight="equal_mass": each active sensor contributes equal
+    #   total weight to the NNLS objective regardless of how many timesteps
+    #   it has signal.  This prevents a sensor that happens to be noisy or
+    #   simply has more qualifying rows from dominating the Q estimate.
+    #   "none" leaves all rows with unit weight (legacy behaviour).
+    #
+    # fit_sensor_bias=True: appends one non-negative per-sensor offset b_s to
+    #   the unknowns (extra NNLS columns, no L1 penalty).  Useful to absorb
+    #   local micro-environment error at a sensor (e.g. SY pocket).  The bias
+    #   is reported separately under "sensor_bias_ppb" and excluded from Q.
+    #   Enable cautiously — a large bias masks genuine geometry error.
+    sensor_row_weight: str  = "equal_mass"  # "equal_mass" | "none"
+    fit_sensor_bias: bool   = False
+
 
 # ---------------------------------------------------------------------------
 # Channel grid construction
@@ -293,6 +309,7 @@ def solve_nnls(
     A: np.ndarray,
     C_obs: np.ndarray,
     cfg: InversionConfig,
+    n_unregularized: int = 0,
 ) -> np.ndarray:
     """Solve Q ≥ 0 : argmin ‖A·Q − C_obs‖² + λ₁‖Q‖² + λ_s‖D·Q‖² via NNLS.
 
@@ -308,31 +325,40 @@ def solve_nnls(
 
     Parameters
     ----------
-    A : (n_rows, n_segments) ndarray
+    A : (n_rows, n_cols) ndarray
         Sensitivity rows from one or more (sensor, timestep) events stacked.
     C_obs : (n_rows,) ndarray
         Observed ppb at matching rows (background already subtracted).
     cfg : InversionConfig
+    n_unregularized : int
+        Number of rightmost columns exempt from L1 and smoothness
+        regularisation (Phase 3 bias columns).  Default 0 → all columns
+        are regularised (legacy behaviour).
 
     Returns
     -------
-    Q : (n_segments,) ndarray, units g/s, all non-negative.
+    Q : (n_cols,) ndarray, units g/s, all non-negative.
     """
-    n_seg = A.shape[1]
+    n_col = A.shape[1]
+    n_reg = n_col - n_unregularized        # columns that get L1 penalty
     col_scale = np.maximum(A.max(axis=0), 1e-8)
     A_scaled = A / col_scale[np.newaxis, :]
 
-    l1_block = cfg.lambda_l1 * np.eye(n_seg)
-    blocks = [A_scaled, l1_block]
-    rhs = [C_obs, np.zeros(n_seg)]
+    # L1 penalty applies only to the regularised columns
+    l1_block = np.zeros((n_col, n_col))
+    if n_reg > 0:
+        l1_block[:n_reg, :n_reg] = cfg.lambda_l1 * np.eye(n_reg)
 
-    if cfg.lambda_smooth > 0 and n_seg > 1:
-        D = np.zeros((n_seg - 1, n_seg))
-        for i in range(n_seg - 1):
+    blocks = [A_scaled, l1_block]
+    rhs = [C_obs, np.zeros(n_col)]
+
+    if cfg.lambda_smooth > 0 and n_reg > 1:
+        D = np.zeros((n_reg - 1, n_col))
+        for i in range(n_reg - 1):
             D[i, i] = 1.0
             D[i, i + 1] = -1.0
         blocks.append(cfg.lambda_smooth * D)
-        rhs.append(np.zeros(n_seg - 1))
+        rhs.append(np.zeros(n_reg - 1))
 
     A_aug = np.vstack(blocks)
     b_aug = np.concatenate(rhs)
@@ -1264,6 +1290,7 @@ def batch_inversion_from_geometry(
             "Q_by_source":    {sid: 0.0 for sid in sids},
             "Q_total_g_s":    0.0,
             "active_sources": [],
+            "sensor_bias_ppb": {},
             "n_events":       0,
             "n_rows":         0,
             "sensor_rmse_ppb":       {},
@@ -1272,15 +1299,55 @@ def batch_inversion_from_geometry(
             "reason": "no_rows",
         }
 
-    A_stack = np.vstack(rows_A)
-    C_stack = np.array(rows_C, dtype=float)
+    # --- Phase 3: equal-mass per-sensor row weighting ---
+    # Compute unweighted stacks first (needed for RMSE after solve).
+    A_stack_unw = np.vstack(rows_A)
+    C_stack_unw = np.array(rows_C, dtype=float)
 
-    Q = solve_nnls(A_stack, C_stack, cfg)
-    C_pred_stack = A_stack @ Q
+    if cfg.sensor_row_weight == "equal_mass":
+        sensor_counts: dict[str, int] = {}
+        for meta in row_meta:
+            sensor_counts[meta["sensor"]] = sensor_counts.get(meta["sensor"], 0) + 1
+        n_active_sensors = len(sensor_counts)
+        w = np.array(
+            [1.0 / (sensor_counts[meta["sensor"]] * n_active_sensors) for meta in row_meta],
+            dtype=float,
+        )
+        w_sqrt = np.sqrt(w)
+    else:
+        w_sqrt = np.ones(len(row_meta), dtype=float)
 
-    # Per-sensor reconstruction RMSE
+    A_stack = A_stack_unw * w_sqrt[:, np.newaxis]
+    C_stack = C_stack_unw * w_sqrt
+
+    # --- Phase 3: optional per-sensor additive bias columns ---
+    bias_sensor_names: list[str] = []
+    n_bias_cols = 0
+    if cfg.fit_sensor_bias:
+        bias_sensor_names = sorted({meta["sensor"] for meta in row_meta})
+        n_bias_cols = len(bias_sensor_names)
+        bias_indicator = np.zeros((len(row_meta), n_bias_cols), dtype=float)
+        for i, meta in enumerate(row_meta):
+            j = bias_sensor_names.index(meta["sensor"])
+            bias_indicator[i, j] = w_sqrt[i]  # apply same row weight
+        A_stack = np.hstack([A_stack, bias_indicator])
+
+    Q_full = solve_nnls(A_stack, C_stack, cfg, n_unregularized=n_bias_cols)
+    Q = Q_full[:n_sources]
+    bias_vals = Q_full[n_sources:] if n_bias_cols > 0 else np.zeros(0)
+
+    # Unweighted per-row predictions for RMSE and per_event_predictions
+    if n_bias_cols > 0:
+        bias_per_row = np.array(
+            [float(bias_vals[bias_sensor_names.index(m["sensor"])]) for m in row_meta]
+        )
+        C_pred_unw = A_stack_unw @ Q + bias_per_row
+    else:
+        C_pred_unw = A_stack_unw @ Q
+
+    # Per-sensor reconstruction RMSE (unweighted residuals)
     by_sensor: dict[str, list] = {}
-    for meta, c_obs, c_pred in zip(row_meta, C_stack, C_pred_stack):
+    for meta, c_obs, c_pred in zip(row_meta, C_stack_unw, C_pred_unw):
         by_sensor.setdefault(meta["sensor"], []).append((float(c_obs), float(c_pred)))
     sensor_rmse = {
         sname: round(float(np.sqrt(np.mean([(o - p) ** 2 for o, p in pairs]))), 2)
@@ -1303,6 +1370,11 @@ def batch_inversion_from_geometry(
 
     Q_by_source = {sid: round(float(Q[j]), 3) for j, sid in enumerate(sids)}
 
+    sensor_bias_ppb = {
+        name: round(float(bias_vals[i]), 3)
+        for i, name in enumerate(bias_sensor_names)
+    }
+
     per_event_preds = [
         {
             "time":     str(meta["time"]),
@@ -1310,7 +1382,7 @@ def batch_inversion_from_geometry(
             "obs_ppb":  round(meta["C_obs_ppb"], 1),
             "pred_ppb": round(float(c_pred + cfg.background_ppb), 1),
         }
-        for meta, c_pred in zip(row_meta, C_pred_stack)
+        for meta, c_pred in zip(row_meta, C_pred_unw)
     ]
 
     n_events = len({str(m["time"]) for m in row_meta})
@@ -1321,6 +1393,7 @@ def batch_inversion_from_geometry(
         "Q_by_source":    Q_by_source,
         "Q_total_g_s":    round(Q_total, 1),
         "active_sources": active_sources,
+        "sensor_bias_ppb": sensor_bias_ppb,
         "n_events":       n_events,
         "n_events_skipped_geometry": sum(1 for e in per_event_sens if e.get("skipped")),
         "n_rows":         len(rows_C),

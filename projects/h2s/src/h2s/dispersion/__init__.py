@@ -51,6 +51,12 @@ from h2s.dispersion.emission_inversion import (
     calibration_loop_from_geometry,
     batch_inversion_from_geometry,
 )
+from h2s.dispersion.calibration_metrics import (
+    compute_dispersion_metrics,
+    compute_threshold_skill,
+    score_inversion_result,
+    loso_cross_validate,
+)
 
 __all__ = [
     "LagrangianConfig",
@@ -94,4 +100,9 @@ __all__ = [
     "project_footprint_to_sources",
     "calibration_loop_from_geometry",
     "batch_inversion_from_geometry",
+    # Phase 3 — skill metrics + LOSO cross-validation
+    "compute_dispersion_metrics",
+    "compute_threshold_skill",
+    "score_inversion_result",
+    "loso_cross_validate",
 ]
