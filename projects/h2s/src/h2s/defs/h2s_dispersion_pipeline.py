@@ -68,6 +68,11 @@ from h2s.dispersion import (
     footprint_to_grid_data,
     run_inversion_window,
     source_attribution,
+    # Phase 4 — geometry-aware forward model + inversion
+    load_source_geometry,
+    run_forward_model_from_geometry,
+    run_forward_model_gridded_from_geometry,
+    batch_inversion_from_geometry,
 )
 from h2s.dispersion.gaussian import (
     run_forward_model_from_Q_field,
@@ -88,6 +93,7 @@ from h2s.dispersion.grid_config import (
     VIZ_BOUNDS,
 )
 from h2s.utils import store_assets
+from h2s.dispersion.emission_inversion import InversionConfig as _PhysicsInvCfg
 
 # Zone groupings: candidate source names → east / west / south
 _ZONE_MAP = {
@@ -138,6 +144,72 @@ class ForwardForecastConfig(dg.Config):
     # via per-cell max (captures worst-case ppb per bucket). Set equal to
     # cadence_minutes to disable aggregation.
     animation_cadence_minutes: int = 60
+
+
+class EmissionInversionConfig(dg.Config):
+    """Geometry-aware NNLS inversion options for emission_rate_inversion.
+
+    When use_geometry_nnls=True the asset loads obs data, builds event dicts
+    from the configured date window, and runs batch_inversion_from_geometry to
+    produce per-source Q values (one per named source in source_geometry.toml).
+    Results are written as emission_rates_by_geometry_g_s in the S3 payload
+    alongside the existing backward-compat zone/source keys.
+    """
+    use_geometry_nnls: bool = False
+    date_start: str = "2026-02-01"
+    date_end: str = "2026-04-01"
+    h2s_threshold_ppb: float = 30.0
+    max_events: int = 0       # 0 = all qualifying events
+    gauss_meandering_deg: float = 20.0
+    lambda_l1: float = 0.3
+    background_ppb: float = 1.0
+
+
+def _build_geometry_events(
+    df: pd.DataFrame,
+    date_start: str,
+    date_end: str,
+    h2s_threshold_ppb: float,
+    max_events: int = 0,
+) -> list[dict]:
+    """Pivot long-format obs DataFrame into event dicts for batch_inversion_from_geometry.
+
+    Parameters
+    ----------
+    df : long-format obs with columns: time (tz-aware), site_name, H2S, and met
+         fields (wind_speed_10m, wind_direction_10m, is_night, ...).
+    date_start, date_end : date strings (inclusive) — matched against df["time"].
+    h2s_threshold_ppb : events where ANY sensor's H2S meets or exceeds this qualify.
+    max_events : cap on number of events returned (0 = all).
+
+    Returns
+    -------
+    List of dicts, each with: "time", "h2s_obs", "met_row".
+    """
+    mask = (
+        (df["time"] >= date_start)
+        & (df["time"] <= date_end)
+        & (df["H2S"] >= h2s_threshold_ppb)
+        & df["H2S"].notna()
+    )
+    qualifying_times = df.loc[mask, "time"].drop_duplicates().sort_values()
+    if max_events > 0:
+        qualifying_times = qualifying_times.tail(max_events)
+
+    events: list[dict] = []
+    for ts in qualifying_times:
+        time_rows = df[df["time"] == ts]
+        h2s_obs: dict[str, float] = {}
+        for _, row in time_rows.iterrows():
+            sname = row.get("site_name", "")
+            val = row.get("H2S", float("nan"))
+            if sname and not pd.isna(val):
+                h2s_obs[str(sname)] = float(val)
+        if not h2s_obs:
+            continue
+        events.append({"time": ts, "h2s_obs": h2s_obs, "met_row": time_rows.iloc[0]})
+
+    return events
 
 
 # ==============================================================================
@@ -301,7 +373,10 @@ def lagrangian_source_attribution(
         )
     },
 )
-def emission_rate_inversion(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
+def emission_rate_inversion(
+    context: dg.AssetExecutionContext,
+    config: EmissionInversionConfig,
+) -> dg.MaterializeResult:
     log = context.log
     s3 = context.resources.s3
 
@@ -349,11 +424,65 @@ def emission_rate_inversion(context: dg.AssetExecutionContext) -> dg.Materialize
 
     log.info(f"Zone emission rates: {zone_rates} g/s  (method={method})")
 
+    # --- Phase 4: geometry-aware NNLS inversion ---
+    geom_payload: dict = {}
+    if config.use_geometry_nnls:
+        try:
+            log.info("Running geometry-aware NNLS inversion...")
+            obs_url = s3.publicUrl(OBS_DATA_PATH)
+            obs_df = pd.read_parquet(obs_url)
+            obs_df["time"] = pd.to_datetime(obs_df["time"], utc=True).dt.tz_convert(
+                "America/Los_Angeles"
+            )
+            events = _build_geometry_events(
+                obs_df,
+                date_start=config.date_start,
+                date_end=config.date_end,
+                h2s_threshold_ppb=config.h2s_threshold_ppb,
+                max_events=config.max_events,
+            )
+            log.info(f"Geometry NNLS: {len(events)} qualifying events")
+            specs = load_source_geometry()
+            physics_cfg = _PhysicsInvCfg(
+                gauss_meandering_deg=config.gauss_meandering_deg,
+                lambda_l1=config.lambda_l1,
+                background_ppb=config.background_ppb,
+            )
+            batch_result = batch_inversion_from_geometry(events, specs, physics_cfg)
+            geom_q_by_source = batch_result["Q_by_source"]
+
+            geom_zone_rates: dict[str, float] = {"east": 0.0, "west": 0.0, "south": 0.0}
+            for sid, q in geom_q_by_source.items():
+                spec = specs.get(sid)
+                if spec is not None and spec.zone in geom_zone_rates:
+                    geom_zone_rates[spec.zone] = round(geom_zone_rates[spec.zone] + q, 2)
+
+            geom_payload = {
+                "emission_rates_by_geometry_g_s": geom_q_by_source,
+                "emission_rates_by_geometry_zone_g_s": geom_zone_rates,
+                "geometry_inversion_meta": {
+                    "n_events":        batch_result.get("n_events", 0),
+                    "n_rows":          batch_result.get("n_rows", 0),
+                    "Q_total_g_s":     batch_result.get("Q_total_g_s", 0.0),
+                    "active_sources":  batch_result.get("active_sources", []),
+                    "sensor_rmse_ppb": batch_result.get("sensor_rmse_ppb", {}),
+                    "sensor_bias_ppb": batch_result.get("sensor_bias_ppb", {}),
+                },
+            }
+            method = "geometry_nnls"
+            log.info(
+                f"Geometry NNLS complete: Q_total={batch_result.get('Q_total_g_s')} g/s, "
+                f"zone rollup={geom_zone_rates}"
+            )
+        except Exception as e:
+            log.error(f"Geometry NNLS failed: {e} — skipping geometry rates")
+
     payload = {
         "emission_rates_g_s": zone_rates,
         "emission_rates_per_source_g_s": source_rates,
         "timestamp": pd.Timestamp.utcnow().isoformat(),
         "method": method,
+        **geom_payload,
     }
     s3.putFile(
         json.dumps(payload, indent=2).encode(),
@@ -362,15 +491,21 @@ def emission_rate_inversion(context: dg.AssetExecutionContext) -> dg.Materialize
     )
     log.info(f"Uploaded emission rates → {EMISSION_RATES_PATH}")
 
-    return dg.MaterializeResult(metadata={
+    result_meta: dict = {
         "east_g_s":  dg.MetadataValue.float(float(zone_rates["east"])),
         "west_g_s":  dg.MetadataValue.float(float(zone_rates["west"])),
         "south_g_s": dg.MetadataValue.float(float(zone_rates["south"])),
         "n_sources": dg.MetadataValue.int(len(source_rates)),
         "method":    dg.MetadataValue.text(method),
         "s3_path":   dg.MetadataValue.text(EMISSION_RATES_PATH),
-    },
-    value=json.dumps(payload, indent=2)
+    }
+    if geom_payload:
+        gmeta = geom_payload["geometry_inversion_meta"]
+        result_meta["geom_Q_total_g_s"] = dg.MetadataValue.float(float(gmeta["Q_total_g_s"]))
+        result_meta["geom_n_events"]    = dg.MetadataValue.int(int(gmeta["n_events"]))
+    return dg.MaterializeResult(
+        metadata=result_meta,
+        value=json.dumps(payload, indent=2),
     )
 
 
@@ -637,13 +772,35 @@ def gaussian_forward_forecast(
             fc_df["is_night"] = ((utc_h < 6) | (utc_h >= 20)).astype(int)
             log.warning("is_night derived from hour (UTC < 6 or >= 20) — no day_night column found")
 
-    # Load emission rates
+    # Load emission rates — prefer geometry NNLS when available (Phase 4)
+    use_geometry = False
+    geom_specs = None
+    source_q_g_s: dict[str, float] = {}
+    rates_method = "calibrated_default"
     try:
         rates_bytes = s3.getFile(EMISSION_RATES_PATH)
         rates_data = json.loads(rates_bytes)
-        emission_rates = rates_data["emission_rates_g_s"]
         rates_method = rates_data.get("method", "unknown")
-        log.info(f"Using inverted emission rates: {emission_rates} g/s (method={rates_method})")
+
+        geom_by_source = rates_data.get("emission_rates_by_geometry_g_s", {})
+        if geom_by_source:
+            source_q_g_s = {k: float(v) for k, v in geom_by_source.items()}
+            geom_specs = load_source_geometry()
+            # Zone rollup — used for backward-compat metadata + 3-zone viz
+            emission_rates: dict[str, float] = {"east": 0.0, "west": 0.0, "south": 0.0}
+            for sid, q in source_q_g_s.items():
+                spec = geom_specs.get(sid)
+                if spec is not None and spec.zone in emission_rates:
+                    emission_rates[spec.zone] = round(emission_rates[spec.zone] + q, 2)
+            use_geometry = True
+            rates_method = "geometry_nnls"
+            log.info(
+                f"Using geometry NNLS rates ({len(source_q_g_s)} sources), "
+                f"zone rollup={emission_rates} g/s"
+            )
+        else:
+            emission_rates = rates_data["emission_rates_g_s"]
+            log.info(f"Using inverted emission rates: {emission_rates} g/s (method={rates_method})")
     except Exception as e:
         emission_rates = dict(DISPERSION_DEFAULT_EMISSION_RATES_GS)
         log.warning(f"Could not load emission rates ({e}) — using calibrated defaults: {emission_rates} g/s")
@@ -651,12 +808,18 @@ def gaussian_forward_forecast(
     start_time = fc_df["time"].min()
     log.info(
         f"Running Gaussian forward: start={start_time}, hours={config.forecast_hours}, "
-        f"cadence={config.cadence_minutes}min"
+        f"cadence={config.cadence_minutes}min, geometry={use_geometry}"
     )
-    result = run_forward_model(
-        fc_df, emission_rates, start_time, config.forecast_hours,
-        cadence_minutes=config.cadence_minutes,
-    )
+    if use_geometry and geom_specs is not None:
+        result = run_forward_model_from_geometry(
+            fc_df, geom_specs, source_q_g_s, start_time, config.forecast_hours,
+            cadence_minutes=config.cadence_minutes,
+        )
+    else:
+        result = run_forward_model(
+            fc_df, emission_rates, start_time, config.forecast_hours,
+            cadence_minutes=config.cadence_minutes,
+        )
 
     # Compute per-sensor peaks (ignoring NaN)
     peaks = {}
@@ -674,10 +837,16 @@ def gaussian_forward_forecast(
 
     # --- GeoDemic-compatible grid output ---
     log.info("Generating gridded forward forecast (GeoDemic GridData format)")
-    grid_frames = run_forward_model_gridded(
-        fc_df, emission_rates, start_time, config.forecast_hours,
-        cadence_minutes=config.cadence_minutes,
-    )
+    if use_geometry and geom_specs is not None:
+        grid_frames = run_forward_model_gridded_from_geometry(
+            fc_df, geom_specs, source_q_g_s, start_time, config.forecast_hours,
+            cadence_minutes=config.cadence_minutes,
+        )
+    else:
+        grid_frames = run_forward_model_gridded(
+            fc_df, emission_rates, start_time, config.forecast_hours,
+            cadence_minutes=config.cadence_minutes,
+        )
 
     # Aggregate 15-min frames into hourly (or configured cadence) per-cell max.
     # Each output frame cell = max ppb seen in that hour → operationally the
