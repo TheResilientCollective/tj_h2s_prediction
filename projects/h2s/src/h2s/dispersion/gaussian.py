@@ -888,6 +888,242 @@ def run_forward_model_gridded_from_Q_field(
     return frames
 
 
+def run_forward_model_from_geometry(
+    df: pd.DataFrame,
+    specs: "dict[str, SourceSpec]",
+    source_q_g_s: dict[str, float],
+    start_time: pd.Timestamp,
+    hours: int = 72,
+    ref_sensor: str = "NESTOR - BES",
+    cadence_minutes: int = 60,
+) -> ForwardModelResult:
+    """Run Gaussian plume forward model from named source geometry.
+
+    The single entry point for the geometry-aware dispersion pipeline.  Each
+    source's Q is distributed across its sub-points according to
+    ``sub_point.weight``, so lines and polygons automatically spread emission
+    over their physical extent without changing the total Q:
+
+        Q_sub = source_q_g_s[source_id] * sub_point.weight   (Σweight = 1)
+
+    Args:
+        df: Met DataFrame with ``time``, ``site_name``, ``wind_speed_10m``,
+            ``wind_direction_10m``, ``temperature_2m``, ``is_night`` columns.
+        specs: Output of :func:`h2s.dispersion.geometry.load_source_geometry`.
+        source_q_g_s: ``{source_id: Q g/s}``.  Sources absent or with Q ≤ 0
+            are skipped.
+        start_time: Forecast start (tz-aware).
+        hours: Forecast duration in hours.
+        ref_sensor: Fallback sensor name for met when per-sensor row is missing.
+        cadence_minutes: Timestep between forecast frames.
+
+    Returns:
+        :class:`ForwardModelResult` with per-sensor ppb timeseries and metadata
+        listing the active sources and their geometry type / sub-point count.
+    """
+    from h2s.dispersion.geometry import SourceSpec  # local import avoids circular dep
+
+    n_steps = int(hours * 60 / cadence_minutes)
+    times = pd.date_range(start_time, periods=n_steps, freq=f"{cadence_minutes}min")
+    concentrations = {sname: [] for sname in SENSORS}
+
+    # Pre-expand: (lat, lon, q_sub_g_s) for all active sub-points across all sources.
+    # Done once — geometry is static across the forecast window.
+    active: list[tuple[float, float, float]] = []
+    for source_id, spec in specs.items():
+        q = source_q_g_s.get(source_id, 0.0)
+        if q <= 0:
+            continue
+        for sp in spec.sub_points:
+            active.append((sp.lat, sp.lon, q * sp.weight))
+
+    for t in times:
+        for sensor_name, sensor_coords in SENSORS.items():
+            row = df[(df["time"] == t) & (df["site_name"] == sensor_name)]
+            if row.empty:
+                row = df[(df["time"] == t) & (df["site_name"] == ref_sensor)]
+            if row.empty:
+                concentrations[sensor_name].append(np.nan)
+                continue
+
+            ws      = float(row["wind_speed_10m"].iloc[0])
+            wd_deg  = float(row["wind_direction_10m"].iloc[0])
+            temp_c  = float(row["temperature_2m"].iloc[0])
+            is_night = bool(row["is_night"].iloc[0])
+
+            wd_rad = np.radians(wd_deg)
+            u = -ws * np.sin(wd_rad)
+            v = -ws * np.cos(wd_rad)
+            stab = stability_class(ws, is_night)
+
+            total_ug_m3 = sum(
+                gaussian_plume_concentration(
+                    source_lat=lat, source_lon=lon,
+                    emission_rate_g_s=q_sub,
+                    receptor_lat=sensor_coords["lat"],
+                    receptor_lon=sensor_coords["lon"],
+                    wind_u=u, wind_v=v,
+                    stab=stab,
+                )
+                for lat, lon, q_sub in active
+            )
+            concentrations[sensor_name].append(
+                round(float(ug_m3_to_ppb(total_ug_m3, temp_c)), 3)
+            )
+
+    source_meta = {
+        sid: {
+            "geometry":     spec.geometry,
+            "zone":         spec.zone,
+            "n_sub_points": spec.n_sub_points,
+            "q_g_s":        source_q_g_s.get(sid, 0.0),
+        }
+        for sid, spec in specs.items()
+    }
+
+    return ForwardModelResult(
+        times=list(times),
+        concentrations=concentrations,
+        emission_rates_g_s=dict(source_q_g_s),
+        metadata={
+            "model": "Gaussian plume (Pasquill-Gifford, Slade 1968, geometry-based)",
+            "start_time":       str(start_time),
+            "hours":            hours,
+            "cadence_minutes":  cadence_minutes,
+            "n_active_subpts":  len(active),
+            "sources":          source_meta,
+        },
+    )
+
+
+def run_forward_model_gridded_from_geometry(
+    df: pd.DataFrame,
+    specs: "dict[str, SourceSpec]",
+    source_q_g_s: dict[str, float],
+    start_time: pd.Timestamp,
+    hours: int = 72,
+    ref_sensor: str = "NESTOR - BES",
+    baseline_scale: float = GRID_BASELINE_SCALE,
+    ppb_clip: float = GRID_PPB_CLIP,
+    cadence_minutes: int = 60,
+) -> list[dict]:
+    """Gridded forward forecast from named source geometry.
+
+    Mirrors :func:`run_forward_model_from_geometry` but returns per-frame
+    GeoDemic GridData dicts (same format as the existing ``*_gridded_*``
+    functions) for upload to S3 and consumption by the HeatMapLayer.
+
+    Runtime scales with ``n_sub_points × grid_cells × n_timesteps``.  A 72 h
+    forecast with ~60 sub-points and 120×160 grid ≈ 10 s on a single core;
+    raise ``discretize_spacing_m`` in ``source_geometry.toml`` if too slow.
+
+    Args:
+        df: Met DataFrame (same format as :func:`run_forward_model_from_geometry`).
+        specs: Output of :func:`h2s.dispersion.geometry.load_source_geometry`.
+        source_q_g_s: ``{source_id: Q g/s}``.
+        start_time: Forecast start (tz-aware).
+        hours: Forecast duration in hours.
+        ref_sensor: Fallback sensor for met.
+        baseline_scale: Scale applied to all Q before grid evaluation (see
+            :data:`GRID_BASELINE_SCALE`).
+        ppb_clip: Per-cell ppb ceiling (see :data:`GRID_PPB_CLIP`).
+        cadence_minutes: Timestep between frames.
+
+    Returns:
+        List of GridData dicts, one per forecast frame.
+    """
+    from h2s.dispersion.geometry import SourceSpec  # local import avoids circular dep
+    from h2s.dispersion.grid_config import (
+        GRID_BOUNDS, GRID_LAT_CENTERS, GRID_LON_CENTERS,
+        GRID_NROWS, GRID_NCOLS, GRID_RESOLUTION_METERS,
+    )
+
+    n_steps = int(hours * 60 / cadence_minutes)
+    times = pd.date_range(start_time, periods=n_steps, freq=f"{cadence_minutes}min")
+
+    lon_mesh, lat_mesh = np.meshgrid(GRID_LON_CENTERS, GRID_LAT_CENTERS)
+    sensor_coords = [(s["lat"], s["lon"]) for s in SENSORS.values()]
+
+    # Pre-expand sub-points (static geometry)
+    active: list[tuple[float, float, float]] = []
+    for source_id, spec in specs.items():
+        q = source_q_g_s.get(source_id, 0.0)
+        if q <= 0:
+            continue
+        for sp in spec.sub_points:
+            active.append((sp.lat, sp.lon, q * sp.weight))
+
+    frames: list[dict] = []
+
+    for hour_idx, t in enumerate(times):
+        forecast_lead_h = hour_idx * cadence_minutes / 60.0
+
+        row = df[(df["time"] == t) & (df["site_name"] == ref_sensor)]
+        if row.empty:
+            row = df[df["time"] == t]
+        if row.empty:
+            frames.append(_build_grid_data(
+                concentration_grid=np.zeros((GRID_NROWS, GRID_NCOLS)),
+                confidence_grid=np.full((GRID_NROWS, GRID_NCOLS), 0.1),
+                lat_centers=GRID_LAT_CENTERS,
+                lon_centers=GRID_LON_CENTERS,
+                bounds=GRID_BOUNDS,
+                resolution_meters=GRID_RESOLUTION_METERS,
+                metadata={"time": str(t), "frame_index": hour_idx, "status": "no_met"},
+            ))
+            continue
+
+        row = row.iloc[0]
+        ws       = float(row["wind_speed_10m"])
+        wd_deg   = float(row["wind_direction_10m"])
+        temp_c   = float(row.get("temperature_2m", 20.0))
+        is_night_val = bool(row.get("is_night", 0))
+
+        wd_rad  = np.radians(wd_deg)
+        wind_u  = -ws * np.sin(wd_rad)
+        wind_v  = -ws * np.cos(wd_rad)
+        stab    = stability_class(ws, is_night_val)
+
+        total_ppb = np.zeros((GRID_NROWS, GRID_NCOLS))
+        for lat, lon, q_sub in active:
+            conc_ug = _gaussian_plume_grid(
+                source_lat=lat, source_lon=lon,
+                emission_rate_g_s=q_sub * baseline_scale,
+                lat_grid=lat_mesh, lon_grid=lon_mesh,
+                wind_u=wind_u, wind_v=wind_v,
+                stab=stab,
+            )
+            total_ppb += _ug_grid_to_ppb(conc_ug, temp_c)
+
+        np.minimum(total_ppb, ppb_clip, out=total_ppb)
+        confidence = _confidence_from_distance(
+            lat_mesh, lon_mesh, sensor_coords, forecast_lead_h=forecast_lead_h
+        )
+
+        frames.append(_build_grid_data(
+            concentration_grid=np.round(total_ppb, 3),
+            confidence_grid=np.round(confidence, 3),
+            lat_centers=GRID_LAT_CENTERS,
+            lon_centers=GRID_LON_CENTERS,
+            bounds=GRID_BOUNDS,
+            resolution_meters=GRID_RESOLUTION_METERS,
+            metadata={
+                "time":              str(t),
+                "frame_index":       hour_idx,
+                "forecast_lead_h":   round(forecast_lead_h, 3),
+                "wind_speed_ms":     round(ws, 2),
+                "wind_direction_deg": round(wd_deg, 1),
+                "stability_class":   stab,
+                "n_active_subpts":   len(active),
+                "baseline_scale":    baseline_scale,
+                "ppb_clip":          ppb_clip,
+                "emission_rates_g_s": {k: float(v) for k, v in source_q_g_s.items() if v > 0},
+            },
+        ))
+
+    return frames
+
+
 def aggregate_grid_frames_max(
     frames: list[dict],
     source_cadence_minutes: int,
