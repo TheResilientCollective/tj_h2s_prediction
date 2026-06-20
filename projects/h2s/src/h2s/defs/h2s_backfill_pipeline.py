@@ -210,8 +210,14 @@ def _train_one_variant_local(
     split: int,
     ensemble_margin: float,
     variant_label: str,
+    enable_smote_clf_30ppb: bool = False,
 ) -> dict[str, tuple]:
-    """Train regression + clf_5ppb + clf_10ppb + clf_30ppb for one variant."""
+    """Train regression + clf_5ppb + clf_10ppb + clf_30ppb for one variant.
+
+    Returns dict[task → (model, choice, smote_applied)]. When
+    *enable_smote_clf_30ppb* is True, BorderlineSMOTE is applied to the
+    clf_30ppb train split only (sparse 30 ppb positives).
+    """
     X = sdf[features].values
     y_cont = sdf["H2S"].values
     y_5 = sdf["exceed_5"].values
@@ -226,12 +232,14 @@ def _train_one_variant_local(
         ("clf_10ppb",  y_10[:split],   y_10[split:]),
         ("clf_30ppb",  y_30[:split],   y_30[split:]),
     ]:
-        log.info(f"    [{variant_label}] {task}…")
-        model, choice, _ = train_and_select(
-            Xtr, Xte, ytr, yte, task, ensemble_margin=ensemble_margin
+        use_smote = enable_smote_clf_30ppb and task == "clf_30ppb"
+        log.info(f"    [{variant_label}] {task}…" + (" (SMOTE)" if use_smote else ""))
+        model, choice, metrics = train_and_select(
+            Xtr, Xte, ytr, yte, task, ensemble_margin=ensemble_margin,
+            use_smote_on_minority=use_smote,
         )
         log.info(f"      → {choice}")
-        result[task] = (model, choice)
+        result[task] = (model, choice, bool(metrics.get("smote_applied", False)))
     return result
 
 
@@ -322,6 +330,14 @@ def backfill_training_data(context: AssetExecutionContext) -> pd.DataFrame:
     tags={"environment": "production", "modeltrainer": "true"},
     config_schema={
         "ensemble_margin": dg.Field(float, default_value=0.01),
+        "enable_smote_clf_30ppb": dg.Field(
+            bool, default_value=True,
+            description=(
+                "Apply BorderlineSMOTE to oversample 30 ppb positives for the "
+                "clf_30ppb task only (sparse-positive stations). Other tasks "
+                "unchanged. Recorded in archive_metadata.json.smote_applied."
+            ),
+        ),
     },
 )
 def backfill_station_models(
@@ -337,6 +353,7 @@ def backfill_station_models(
     cutoff = pd.Timestamp(context.partition_key, tz="UTC")
     month_key = cutoff.strftime("%Y-%m")
     ensemble_margin = context.op_config["ensemble_margin"]
+    enable_smote = context.op_config["enable_smote_clf_30ppb"]
 
     pretrain_df = backfill_training_data[backfill_training_data["is_pretrain"]].copy()
     context.log.info(
@@ -372,6 +389,7 @@ def backfill_station_models(
 
         tasks_metrics: dict[str, dict] = {}
         algorithm_choices: dict[str, dict] = {}
+        smote_applied: dict[str, dict] = {}
 
         # Shared label arrays for val scoring
         y_cont = sdf["H2S"].values
@@ -384,18 +402,20 @@ def backfill_station_models(
             Xte = X[split:]
 
             variant_results = _train_one_variant_local(
-                context.log, sdf, features, split, ensemble_margin, variant
+                context.log, sdf, features, split, ensemble_margin, variant,
+                enable_smote_clf_30ppb=enable_smote,
             )
 
             variant_metrics: dict[str, dict] = {}
             variant_choices: dict[str, str] = {}
+            variant_smote: dict[str, bool] = {}
             for task_base, yte in [
                 ("regression", y_cont[split:]),
                 ("clf_5ppb",   y_5[split:]),
                 ("clf_10ppb",  y_10[split:]),
                 ("clf_30ppb",  y_30[split:]),
             ]:
-                model, choice = variant_results[task_base]
+                model, choice, smote_flag = variant_results[task_base]
                 m = (eval_regressor(model, Xte, yte) if task_base == "regression"
                      else eval_classifier(model, Xte, yte))
                 variant_metrics[task_base] = {
@@ -403,6 +423,7 @@ def backfill_station_models(
                     "feature_importance": _importance_for_features(model, features),
                 }
                 variant_choices[task_base] = choice
+                variant_smote[task_base] = smote_flag
 
                 s3.putFile(
                     pickle.dumps(model),
@@ -413,6 +434,7 @@ def backfill_station_models(
 
             tasks_metrics[variant] = variant_metrics
             algorithm_choices[variant] = variant_choices
+            smote_applied[variant] = variant_smote
 
         # training_report.json — matches production format; adds backfill extras
         training_report = {
@@ -427,6 +449,7 @@ def backfill_station_models(
             "n_val": int(len(sdf) - split),
             "features": {v: feats for v, feats in _VARIANTS.items()},
             "ensemble_margin": ensemble_margin,
+            "smote_applied": smote_applied,
             "tasks": tasks_metrics,
         }
         s3.putFile(
@@ -454,6 +477,7 @@ def backfill_station_models(
             "n_train": int(split),
             "n_val": int(len(sdf) - split),
             "algorithm_choices": algorithm_choices,
+            "smote_applied": smote_applied,
             "artifacts": artifacts,
         }
         s3.putFile(

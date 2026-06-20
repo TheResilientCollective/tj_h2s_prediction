@@ -255,11 +255,12 @@ def get_feature_importance(model, top_n=10):
 
 def train_and_select(X_train, X_test, y_train, y_test, task: str,
                      ensemble_margin: float | None = None,
-                     selection_metric: str | None = None):
+                     selection_metric: str | None = None,
+                     use_smote_on_minority: bool = False):
     """Train RF + XGBoost for one task, auto-select or ensemble.
 
     Args:
-        task: 'regression', 'clf_5ppb', or 'clf_10ppb'.
+        task: 'regression', 'clf_5ppb', 'clf_10ppb', or 'clf_30ppb'.
         ensemble_margin: Override default margin for ensembling. Interpreted
             in the units of the chosen ``selection_metric``.
         selection_metric: How to pick between RF and XGB on test set.
@@ -269,12 +270,20 @@ def train_and_select(X_train, X_test, y_train, y_test, task: str,
                 gaps in extreme recall.
             Classifier default: ``'auc'`` — backward-compat rank metric.
             Other regression options: ``'recall_100'``, ``'r2'``.
+        use_smote_on_minority: Classifier-only. When True, oversample the
+            positive (minority) class on the TRAIN split with BorderlineSMOTE
+            (``model_trainer.apply_smote``) before fitting RF/XGB. The test
+            split is never touched, so this does not leak. Ignored for
+            regression. Intended for sparse-positive tasks like ``clf_30ppb``
+            at low-base-rate stations. Because SMOTE balances the classes,
+            ``scale_pos_weight`` is recomputed on the resampled labels (≈1),
+            so SMOTE and class weighting don't stack.
 
     Returns:
         (best_model, choice_str, metrics_dict).
         ``metrics_dict`` always includes both RF and XGB eval dicts plus
         ``selection_metric``, ``selection_value_rf``, ``selection_value_xgb``,
-        and ``feature_importance``.
+        ``smote_applied``, and ``feature_importance``.
     """
     if task == 'regression':
         metric = selection_metric or 'recall_30'
@@ -325,6 +334,7 @@ def train_and_select(X_train, X_test, y_train, y_test, task: str,
             'selection_metric': metric,
             'selection_value_rf': float(s_rf),
             'selection_value_xgb': float(s_xgb) if s_xgb is not None else None,
+            'smote_applied': False,  # regression never oversamples
             'feature_importance': get_feature_importance(model),
         }
 
@@ -342,7 +352,22 @@ def train_and_select(X_train, X_test, y_train, y_test, task: str,
             )
         margin = ensemble_margin if ensemble_margin is not None else _DEFAULT_MARGINS['auc']
 
-        pos_rate = float(y_train.mean())
+        # Optionally oversample the positive minority on the TRAIN split only.
+        # apply_smote needs a DataFrame/Series; column names are immaterial here
+        # since RF/XGB are fit on the resampled arrays. Guarded so a degenerate
+        # single-class or empty train split silently skips (no oversampling).
+        smote_applied = False
+        y_train_arr = np.asarray(y_train)
+        if use_smote_on_minority and y_train_arr.size > 0 and np.unique(y_train_arr).size >= 2:
+            from h2s.training.model_trainer import apply_smote
+            X_df = pd.DataFrame(np.asarray(X_train))
+            y_ser = pd.Series(y_train_arr)
+            X_res, y_res = apply_smote(X_df, y_ser)
+            X_train = X_res.values
+            y_train = y_res.values
+            smote_applied = True
+
+        pos_rate = float(np.asarray(y_train).mean())
         scale_pos = (1 - pos_rate) / max(pos_rate, 0.01)
 
         rf = get_rf_classifier()
@@ -374,5 +399,6 @@ def train_and_select(X_train, X_test, y_train, y_test, task: str,
             'selection_metric': metric,
             'selection_value_rf': float(auc_rf),
             'selection_value_xgb': float(auc_xgb) if auc_xgb is not None else None,
+            'smote_applied': smote_applied,
             'feature_importance': get_feature_importance(model),
         }
