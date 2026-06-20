@@ -154,15 +154,37 @@ class EmissionInversionConfig(dg.Config):
     produce per-source Q values (one per named source in source_geometry.toml).
     Results are written as emission_rates_by_geometry_g_s in the S3 payload
     alongside the existing backward-compat zone/source keys.
+
+    Calibration flags
+    -----------------
+    fit_sensor_bias : bool
+        Add a non-negative per-sensor additive offset to the NNLS unknowns.
+        The bias absorbs the part of a sensor's signal that the geometry
+        cannot explain (e.g. IB's persistent local offset), so it doesn't
+        inflate Q for distant sources. Reported under sensor_bias_ppb.
+    require_anchor_sensor : str
+        When non-empty, only timesteps where this sensor's H2S ≥
+        h2s_threshold_ppb qualify as events. Set to "NESTOR - BES" to
+        exclude IB-only events from calibration.
+    anchor_wd_gate : bool
+        When require_anchor_sensor is set, solo-sensor events (exactly one
+        sensor above threshold, and it is NOT the anchor) are kept only when
+        wind direction is in [30, 270]° — i.e. coming FROM the
+        south/east/west quadrant rather than FROM the north/northwest.
+        This retains IB-solo events that are plausibly driven by a
+        south-zone source under southerly or easterly winds.
     """
     use_geometry_nnls: bool = False
     date_start: str = "2026-02-01"
     date_end: str = "2026-04-01"
     h2s_threshold_ppb: float = 30.0
-    max_events: int = 0       # 0 = all qualifying events
+    max_events: int = 0                # 0 = all qualifying events
     gauss_meandering_deg: float = 20.0
     lambda_l1: float = 0.3
     background_ppb: float = 1.0
+    fit_sensor_bias: bool = False
+    require_anchor_sensor: str = ""    # e.g. "NESTOR - BES"
+    anchor_wd_gate: bool = False
 
 
 def _build_geometry_events(
@@ -171,7 +193,9 @@ def _build_geometry_events(
     date_end: str,
     h2s_threshold_ppb: float,
     max_events: int = 0,
-) -> list[dict]:
+    require_anchor_sensor: str = "",
+    anchor_wd_gate: bool = False,
+) -> tuple[list[dict], dict[str, int]]:
     """Pivot long-format obs DataFrame into event dicts for batch_inversion_from_geometry.
 
     Parameters
@@ -181,10 +205,16 @@ def _build_geometry_events(
     date_start, date_end : date strings (inclusive) — matched against df["time"].
     h2s_threshold_ppb : events where ANY sensor's H2S meets or exceeds this qualify.
     max_events : cap on number of events returned (0 = all).
+    require_anchor_sensor : if non-empty, only timesteps where this sensor's
+        H2S ≥ h2s_threshold_ppb are kept.
+    anchor_wd_gate : when require_anchor_sensor is set, solo non-anchor events
+        are dropped unless wind_direction_10m ∈ [30, 270]° (FROM south/east,
+        plausible for sources south of IB pushing plume northward).
 
     Returns
     -------
-    List of dicts, each with: "time", "h2s_obs", "met_row".
+    (events, filter_counts) where filter_counts records how many timesteps were
+    dropped by each filter for diagnostic logging.
     """
     mask = (
         (df["time"] >= date_start)
@@ -193,10 +223,27 @@ def _build_geometry_events(
         & df["H2S"].notna()
     )
     qualifying_times = df.loc[mask, "time"].drop_duplicates().sort_values()
+
+    # Anchor filter: require the named sensor to be above threshold
+    n_dropped_anchor = 0
+    if require_anchor_sensor:
+        anchor_mask = (
+            (df["time"] >= date_start)
+            & (df["time"] <= date_end)
+            & (df["site_name"] == require_anchor_sensor)
+            & (df["H2S"] >= h2s_threshold_ppb)
+            & df["H2S"].notna()
+        )
+        anchor_times = set(df.loc[anchor_mask, "time"])
+        before = len(qualifying_times)
+        qualifying_times = qualifying_times[qualifying_times.isin(anchor_times)]
+        n_dropped_anchor = before - len(qualifying_times)
+
     if max_events > 0:
         qualifying_times = qualifying_times.tail(max_events)
 
     events: list[dict] = []
+    n_dropped_wd = 0
     for ts in qualifying_times:
         time_rows = df[df["time"] == ts]
         h2s_obs: dict[str, float] = {}
@@ -207,9 +254,27 @@ def _build_geometry_events(
                 h2s_obs[str(sname)] = float(val)
         if not h2s_obs:
             continue
+
+        # Wind-direction plausibility gate: solo non-anchor events are only
+        # kept when wind is FROM the southern/eastern quadrant [30, 270]°,
+        # consistent with a south-zone source pushing plume northward to IB.
+        if anchor_wd_gate and require_anchor_sensor:
+            sensors_above = [s for s, v in h2s_obs.items() if v >= h2s_threshold_ppb]
+            if len(sensors_above) == 1 and sensors_above[0] != require_anchor_sensor:
+                met_row = time_rows.iloc[0]
+                wd = float(met_row.get("wind_direction_10m", 180))
+                if not (30 <= wd <= 270):
+                    n_dropped_wd += 1
+                    continue
+
         events.append({"time": ts, "h2s_obs": h2s_obs, "met_row": time_rows.iloc[0]})
 
-    return events
+    filter_counts = {
+        "dropped_anchor_filter": n_dropped_anchor,
+        "dropped_wd_gate":       n_dropped_wd,
+        "events_kept":           len(events),
+    }
+    return events, filter_counts
 
 
 # ==============================================================================
@@ -434,19 +499,26 @@ def emission_rate_inversion(
             obs_df["time"] = pd.to_datetime(obs_df["time"], utc=True).dt.tz_convert(
                 "America/Los_Angeles"
             )
-            events = _build_geometry_events(
+            events, filter_counts = _build_geometry_events(
                 obs_df,
                 date_start=config.date_start,
                 date_end=config.date_end,
                 h2s_threshold_ppb=config.h2s_threshold_ppb,
                 max_events=config.max_events,
+                require_anchor_sensor=config.require_anchor_sensor,
+                anchor_wd_gate=config.anchor_wd_gate,
             )
-            log.info(f"Geometry NNLS: {len(events)} qualifying events")
+            log.info(
+                f"Geometry NNLS: {filter_counts['events_kept']} events kept "
+                f"(anchor_filter dropped {filter_counts['dropped_anchor_filter']}, "
+                f"wd_gate dropped {filter_counts['dropped_wd_gate']})"
+            )
             specs = load_source_geometry()
             physics_cfg = _PhysicsInvCfg(
                 gauss_meandering_deg=config.gauss_meandering_deg,
                 lambda_l1=config.lambda_l1,
                 background_ppb=config.background_ppb,
+                fit_sensor_bias=config.fit_sensor_bias,
             )
             batch_result = batch_inversion_from_geometry(events, specs, physics_cfg)
             geom_q_by_source = batch_result["Q_by_source"]
@@ -454,12 +526,16 @@ def emission_rate_inversion(
             geom_payload = {
                 "emission_rates_by_geometry_g_s": geom_q_by_source,
                 "geometry_inversion_meta": {
-                    "n_events":        batch_result.get("n_events", 0),
-                    "n_rows":          batch_result.get("n_rows", 0),
-                    "Q_total_g_s":     batch_result.get("Q_total_g_s", 0.0),
-                    "active_sources":  batch_result.get("active_sources", []),
-                    "sensor_rmse_ppb": batch_result.get("sensor_rmse_ppb", {}),
-                    "sensor_bias_ppb": batch_result.get("sensor_bias_ppb", {}),
+                    "n_events":              batch_result.get("n_events", 0),
+                    "n_rows":                batch_result.get("n_rows", 0),
+                    "Q_total_g_s":           batch_result.get("Q_total_g_s", 0.0),
+                    "active_sources":        batch_result.get("active_sources", []),
+                    "sensor_rmse_ppb":       batch_result.get("sensor_rmse_ppb", {}),
+                    "sensor_bias_ppb":       batch_result.get("sensor_bias_ppb", {}),
+                    "fit_sensor_bias":       config.fit_sensor_bias,
+                    "require_anchor_sensor": config.require_anchor_sensor,
+                    "anchor_wd_gate":        config.anchor_wd_gate,
+                    "filter_counts":         filter_counts,
                 },
             }
             method = "geometry_nnls"
