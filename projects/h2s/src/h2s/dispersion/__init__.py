@@ -23,6 +23,13 @@ from h2s.dispersion.gaussian import (
     SOURCES as DISPERSION_SOURCE_ZONES,
     CANDIDATE_SOURCES as DISPERSION_CANDIDATE_SOURCES,
 )
+from h2s.dispersion.geometry import (
+    SubPoint,
+    SourceSpec,
+    load_source_geometry,
+    all_sub_points,
+    zone_sub_points,
+)
 from h2s.dispersion.hysplit_controls import generate_hysplit_bundle
 from h2s.dispersion.emission_inversion import (
     CHANNEL_WAYPOINTS,
@@ -54,6 +61,12 @@ __all__ = [
     "DISPERSION_SENSORS",
     "DISPERSION_SOURCE_ZONES",
     "DISPERSION_CANDIDATE_SOURCES",
+    # Source geometry loader (Phase 0 calibration loop)
+    "SubPoint",
+    "SourceSpec",
+    "load_source_geometry",
+    "all_sub_points",
+    "zone_sub_points",
     "generate_hysplit_bundle",
     # Channel-snapped emission inversion
     "CHANNEL_WAYPOINTS",
