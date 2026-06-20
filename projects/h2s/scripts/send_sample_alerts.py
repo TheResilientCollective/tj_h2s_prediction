@@ -49,9 +49,41 @@ from h2s.defs.h2s_alert_system import (  # noqa: E402
     build_onset_message as obs_onset_message,
     build_summary_message as obs_summary_message,
 )
+from h2s.constants import STATIONS  # noqa: E402
+from h2s.predictor.visualizations import (  # noqa: E402
+    generate_forecast_digest_chart,
+    generate_forecast_hazard_chart,
+    generate_forecast_vs_measured_chart,
+    generate_skill_by_lead_chart,
+)
 
 # Fixed "now" so the sample reads the same every run (UTC).
 _NOW = pd.Timestamp("2026-04-06 04:00", tz="UTC")
+
+_SAMPLES_S3_BASE = "tijuana/forecast/samples"
+
+
+def _make_s3():
+    """Build an S3Resource from the environment (for chart upload). None if unset."""
+    from h2s.resources.minio import S3Resource
+
+    if not os.environ.get("S3_ACCESS_KEY"):
+        return None
+    return S3Resource(
+        S3_BUCKET=os.environ["S3_BUCKET"],
+        S3_ADDRESS=os.environ["S3_ADDRESS"],
+        S3_PORT=os.environ.get("S3_PORT", "443"),
+        S3_USE_SSL=os.environ.get("S3_USE_SSL", "true").lower() == "true",
+        S3_ACCESS_KEY=os.environ["S3_ACCESS_KEY"],
+        S3_SECRET_KEY=os.environ["S3_SECRET_KEY"],
+    )
+
+
+def _upload_chart(s3, buf, name: str) -> str:
+    """Upload a chart PNG to the samples prefix and return its public URL."""
+    path = f"{_SAMPLES_S3_BASE}/{name}.png"
+    s3.putFile(buf.getvalue(), path, bucket=s3.S3_BUCKET, content_type="image/png")
+    return s3.publicUrl(path=path, bucket=s3.S3_BUCKET)
 
 
 def _product_for_lead(lead: int) -> str:
@@ -110,11 +142,55 @@ def _cascade_products() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def cascade_message() -> tuple[str, list]:
+def cascade_message(image_url: str | None = None) -> tuple[str, list]:
     df = _cascade_products()
     result = evaluate_cascade(df, station=NB_SITE, variant="evidence")
     text = build_cascade_message(result, df, _NOW)
-    blocks = build_cascade_blocks(result, df, _NOW)
+    blocks = build_cascade_blocks(result, df, _NOW, image_url=image_url)
+    return text, blocks
+
+
+# ── digest + skill samples (Deliverables B & C) ─────────────────────────────────
+
+def digest_message(image_url: str | None = None) -> tuple[str, list]:
+    """All-station 24 h digest off the same rigged product frame."""
+    df = _cascade_products()
+    lines = [f"📊 *H2S 24 h Forecast Digest [SAMPLE]* — Evidence",
+             f"Forecast run: {_NOW.strftime('%Y-%m-%dT%H%MZ')}",
+             "─" * 40, "Per-station 24 h outlook (peak predicted H2S):"]
+    for site_name, info in STATIONS.items():
+        w = df[(df["station"] == site_name) & (df["variant"] == "evidence")]
+        peak = float(w["h2s_pred"].max()) if not w.empty else 0.0
+        word = "🔴 orange" if peak >= 30 else "🟡 yellow" if peak >= 5 else "🟢 green"
+        lines.append(f"  {info['short']:<3} {site_name:<13} peak {peak:>5.0f} ppb   {word}")
+    text = "\n".join(lines)
+    blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+    if image_url:
+        blocks.append({"type": "image", "image_url": image_url,
+                       "alt_text": "All-station 24 h hazard timelines + sparklines"})
+    return text, blocks
+
+
+def _sample_skill_curves() -> pd.DataFrame:
+    rows = []
+    for prod, (a, b) in [("nowcast", (1, 3)), ("nearcast", (4, 6)), ("forecast", (7, 24))]:
+        for v, dv in [("evidence", 0.0), ("lean", 0.05)]:
+            for lead in range(a, b + 1):
+                rows.append({"product": prod, "variant": v, "lead_hour": lead, "n": 60,
+                             "spearman": max(-0.05, 0.82 - lead * 0.03 - dv),
+                             "mae": 2 + lead * 0.6 + dv * 10,
+                             "prob_recall_30": max(0.0, 0.95 - lead * 0.035 - dv)})
+    return pd.DataFrame(rows)
+
+
+def skill_message(image_url: str | None = None) -> tuple[str, list]:
+    text = ("📈 *H2S Forecast Skill Scorecard [SAMPLE]*\n"
+            "Spearman ρ / MAE / P(>30) recall vs lead hour — Evidence vs Lean. "
+            "Magnitude skill decays with lead hour; the forecast tier is a risk ranking.")
+    blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+    if image_url:
+        blocks.append({"type": "image", "image_url": image_url,
+                       "alt_text": "Forecast skill vs lead hour"})
     return text, blocks
 
 
@@ -140,7 +216,7 @@ def _yellow_inputs():
     return obs, event_df, prods, event_start, event_end
 
 
-def yellow_messages() -> list[str]:
+def yellow_messages() -> tuple[list[str], pd.DataFrame]:
     obs, event_df, prods, ev_start, ev_end = _yellow_inputs()
     onset_row = _obs_row(14, 2.1, 86, 16.5, 20.6, 1.8, ev_start)
     prev_row = _obs_row(6, 3.6, 80, 17.0, 22.0, 1.9, ev_start - pd.Timedelta(hours=1))
@@ -150,7 +226,7 @@ def yellow_messages() -> list[str]:
     fva = forecast_vs_actual(prods, obs, ev_start, ev_end)
     summary = performance_summary(fva)
     closeout = build_closeout_message(event_df, hours, fva, summary, current_ppb=4.0)
-    return [onset, closeout]
+    return [onset, closeout], fva
 
 
 # ── legacy watch / critical sample ──────────────────────────────────────────────
@@ -178,23 +254,59 @@ def watch_messages() -> list[str]:
 def main() -> None:
     p = argparse.ArgumentParser(description="Preview present H2S alerts in Slack")
     p.add_argument("--dry-run", action="store_true", help="Print messages; do not post")
-    p.add_argument("--only", choices=["cascade", "yellow", "watch"], help="Post only one kind")
+    p.add_argument("--only", choices=["cascade", "digest", "skill", "yellow", "watch"],
+                   help="Post only one kind")
     p.add_argument("--channel", help="Override target channel")
+    p.add_argument("--no-charts", action="store_true",
+                   help="Skip chart render/upload; post text-only")
     args = p.parse_args()
 
     default_ch = os.environ.get("SLACK_CHANNEL", "#test")
     ops_ch = args.channel or os.environ.get("SLACK_CHANNEL_OPS", default_ch)
     obs_ch = args.channel or default_ch
 
-    cascade_text, cascade_blocks = cascade_message()
+    # Render + upload charts unless disabled. Each URL stays None on any failure,
+    # so the matching message degrades to text-only (mirrors production).
+    s3 = None if (args.no_charts or args.dry_run) else _make_s3()
+    cascade_url = digest_url = skill_url = fva_url = None
+    if s3 is not None:
+        df = _cascade_products()
+        try:
+            cascade_url = _upload_chart(
+                s3, generate_forecast_hazard_chart(df, NB_SITE, env_label="SAMPLE"), "cascade_nestor")
+            digest_url = _upload_chart(
+                s3, generate_forecast_digest_chart(df, list(STATIONS.keys()), env_label="SAMPLE"),
+                "forecast_digest")
+            skill_url = _upload_chart(
+                s3, generate_skill_by_lead_chart(_sample_skill_curves(), env_label="SAMPLE"),
+                "skill_scorecard")
+            _, fva = yellow_messages()
+            fva_url = _upload_chart(
+                s3, generate_forecast_vs_measured_chart(fva, env_label="SAMPLE"), "alert_performance")
+            print("✓ charts uploaded to S3 samples prefix")
+        except Exception as e:  # noqa: BLE001
+            print(f"⚠ chart upload failed ({e}); posting text-only")
+
+    cascade_text, cascade_blocks = cascade_message(cascade_url)
+    digest_text, digest_blocks = digest_message(digest_url)
+    skill_text, skill_blocks = skill_message(skill_url)
+
     # (channel, header, text, blocks)
     items: list[tuple[str, str, str, list | None]] = []
     if args.only in (None, "cascade"):
         items.append((ops_ch, "FORECAST CASCADE (Tiers 1–3)", cascade_text, cascade_blocks))
+    if args.only in (None, "digest"):
+        items.append((ops_ch, "DAILY FORECAST DIGEST", digest_text, digest_blocks))
+    if args.only in (None, "skill"):
+        items.append((ops_ch, "FORECAST SKILL SCORECARD", skill_text, skill_blocks))
     if args.only in (None, "yellow"):
-        y = yellow_messages()
-        items.append((obs_ch, "YELLOW ONSET (>10 ppb)", f"```{y[0]}```", None))
-        items.append((obs_ch, "ALERT-PERFORMANCE CLOSE-OUT", f"```{y[1]}```", None))
+        (y_onset, y_close), _ = yellow_messages()
+        items.append((obs_ch, "YELLOW ONSET (>10 ppb)", f"```{y_onset}```", None))
+        close_blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": f"```{y_close}```"}}]
+        if fva_url:
+            close_blocks.append({"type": "image", "image_url": fva_url,
+                                 "alt_text": "Forecast vs measured H2S over the event window"})
+        items.append((obs_ch, "ALERT-PERFORMANCE CLOSE-OUT", f"```{y_close}```", close_blocks))
     if args.only in (None, "watch"):
         for label, msg in zip(["WATCH ONSET", "CRITICAL ONSET", "WATCH SUMMARY"], watch_messages()):
             items.append((obs_ch, label, f"```{msg}```", None))
@@ -202,7 +314,7 @@ def main() -> None:
     if args.dry_run:
         for ch, header, text, _blocks in items:
             print(f"\n{'=' * 70}\n[{header}]  → would post to {ch}\n{'=' * 70}")
-            print(cascade_text if header.startswith("FORECAST") else text.strip("`"))
+            print(text.strip("`"))
         print(f"\n[dry-run] {len(items)} message(s) — nothing sent.")
         return
 
