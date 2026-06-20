@@ -451,15 +451,8 @@ def emission_rate_inversion(
             batch_result = batch_inversion_from_geometry(events, specs, physics_cfg)
             geom_q_by_source = batch_result["Q_by_source"]
 
-            geom_zone_rates: dict[str, float] = {"east": 0.0, "west": 0.0, "south": 0.0}
-            for sid, q in geom_q_by_source.items():
-                spec = specs.get(sid)
-                if spec is not None and spec.zone in geom_zone_rates:
-                    geom_zone_rates[spec.zone] = round(geom_zone_rates[spec.zone] + q, 2)
-
             geom_payload = {
                 "emission_rates_by_geometry_g_s": geom_q_by_source,
-                "emission_rates_by_geometry_zone_g_s": geom_zone_rates,
                 "geometry_inversion_meta": {
                     "n_events":        batch_result.get("n_events", 0),
                     "n_rows":          batch_result.get("n_rows", 0),
@@ -472,7 +465,7 @@ def emission_rate_inversion(
             method = "geometry_nnls"
             log.info(
                 f"Geometry NNLS complete: Q_total={batch_result.get('Q_total_g_s')} g/s, "
-                f"zone rollup={geom_zone_rates}"
+                f"{len([v for v in geom_q_by_source.values() if v > 0.5])} active sources"
             )
         except Exception as e:
             log.error(f"Geometry NNLS failed: {e} — skipping geometry rates")
@@ -786,17 +779,11 @@ def gaussian_forward_forecast(
         if geom_by_source:
             source_q_g_s = {k: float(v) for k, v in geom_by_source.items()}
             geom_specs = load_source_geometry()
-            # Zone rollup — used for backward-compat metadata + 3-zone viz
-            emission_rates: dict[str, float] = {"east": 0.0, "west": 0.0, "south": 0.0}
-            for sid, q in source_q_g_s.items():
-                spec = geom_specs.get(sid)
-                if spec is not None and spec.zone in emission_rates:
-                    emission_rates[spec.zone] = round(emission_rates[spec.zone] + q, 2)
             use_geometry = True
             rates_method = "geometry_nnls"
             log.info(
-                f"Using geometry NNLS rates ({len(source_q_g_s)} sources), "
-                f"zone rollup={emission_rates} g/s"
+                f"Using geometry NNLS rates: {len(source_q_g_s)} sources, "
+                f"Q_total={sum(source_q_g_s.values()):.1f} g/s"
             )
         else:
             emission_rates = rates_data["emission_rates_g_s"]
@@ -869,6 +856,7 @@ def gaussian_forward_forecast(
         s3.putFile(first_frame_json.encode(), path=grid_versioned, content_type="application/json")
         log.info(f"Uploaded grid (first-bucket max) → {DISPERSION_FORWARD_GRID_LATEST_PATH}")
 
+    payload_rates = source_q_g_s if use_geometry else {k: float(v) for k, v in emission_rates.items()}
     animation_payload = {
         "forecast_start": str(start_time),
         "n_frames": len(animation_frames),
@@ -876,7 +864,7 @@ def gaussian_forward_forecast(
         "source_cadence_minutes": config.cadence_minutes,
         "aggregation": "max",
         "forecast_hours": config.forecast_hours,
-        "emission_rates_g_s": {k: float(v) for k, v in emission_rates.items()},
+        "emission_rates_g_s": payload_rates,
         "frames": animation_frames,
     }
     frames_json = json.dumps(animation_payload)
@@ -893,9 +881,10 @@ def gaussian_forward_forecast(
     # 1. Concentration heatmap (first bucket, per-cell max over the hour)
     heatmap_path = "n/a"
     if animation_frames:
+        model_label = "geometry" if use_geometry else "3-zone"
         heatmap_buf = generate_concentration_heatmap(
             animation_frames[0],
-            title="H2S Concentration Forecast (3-source model, hourly max)",
+            title=f"H2S Concentration Forecast ({model_label} model, hourly max)",
             vmax=100.0,
             bounds=VIZ_BOUNDS,
         )
@@ -903,22 +892,30 @@ def gaussian_forward_forecast(
         s3.putFile(heatmap_buf.getvalue(), path=heatmap_path, content_type="image/png")
         log.info(f"Uploaded heatmap → {heatmap_path}")
 
-    # 2. Source emission map (3 zones)
+    # 2. Source emission map
+    if use_geometry:
+        viz_sources = CANDIDATE_SOURCES
+        viz_rates   = {k: float(v) for k, v in source_q_g_s.items() if v > 0}
+        viz_title   = f"H2S Source Emission Rates (geometry model, {len(viz_rates)} active)"
+    else:
+        viz_sources = SOURCES
+        viz_rates   = {k: float(v) for k, v in emission_rates.items()}
+        viz_title   = "H2S Source Emission Rates (3-zone model)"
     source_map_buf = generate_source_emission_map(
-        SOURCES,
-        emission_rates,
+        viz_sources,
+        viz_rates,
         sensors=SENSORS,
-        title="H2S Source Emission Rates (3-zone model)",
+        title=viz_title,
         bounds=VIZ_BOUNDS,
     )
     source_map_path = DISPERSION_VIZ_SOURCE_MAP_COARSE_PATH.format(date_str=date_str)
     s3.putFile(source_map_buf.getvalue(), path=source_map_path, content_type="image/png")
-    log.info(f"Uploaded source map (3-zone) → {source_map_path}")
+    log.info(f"Uploaded source map → {source_map_path}")
 
     # 3. Peak concentration timeseries
     timeseries_buf = generate_peak_concentration_timeseries(
         result,
-        title="Peak H2S Forecast (3-source model)",
+        title=f"Peak H2S Forecast ({'geometry' if use_geometry else '3-zone'} model)",
     )
     timeseries_path = DISPERSION_VIZ_TIMESERIES_COARSE_PATH.format(date_str=date_str)
     s3.putFile(timeseries_buf.getvalue(), path=timeseries_path, content_type="image/png")
@@ -927,13 +924,14 @@ def gaussian_forward_forecast(
     return dg.MaterializeResult(metadata={
         "forecast_start":    dg.MetadataValue.text(str(start_time)),
         "forecast_hours":    dg.MetadataValue.int(config.forecast_hours),
+        "rates_method":      dg.MetadataValue.text(rates_method),
         "peak_ppb_NB":       dg.MetadataValue.float(float(peaks.get("NESTOR - BES", 0.0))),
         "peak_ppb_IB":       dg.MetadataValue.float(float(peaks.get("IB CIVIC CTR", 0.0))),
         "peak_ppb_SY":       dg.MetadataValue.float(float(peaks.get("SAN YSIDRO", 0.0))),
         "grid_peak_ppb":     dg.MetadataValue.float(float(grid_peak_ppb)),
         "grid_shape":        dg.MetadataValue.text(f"{GRID_NROWS}x{GRID_NCOLS}"),
         "grid_n_frames":     dg.MetadataValue.int(len(animation_frames)),
-        "emission_rates_g_s": dg.MetadataValue.json({k: float(v) for k, v in emission_rates.items()}),
+        "emission_rates_g_s": dg.MetadataValue.json(payload_rates),
         "s3_path":           dg.MetadataValue.text(versioned_path),
         "s3_grid_latest":    dg.MetadataValue.text(DISPERSION_FORWARD_GRID_LATEST_PATH),
         "viz_heatmap":       dg.MetadataValue.text(heatmap_path),
