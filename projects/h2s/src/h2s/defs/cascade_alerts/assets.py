@@ -16,11 +16,17 @@ import os
 import dagster as dg
 import pandas as pd
 
+from h2s.constants import PRODUCTS_PATH
+from h2s.predictor.visualizations import generate_forecast_hazard_chart
+
 from .cascade import NB_SITE, TIER_ORDER, TRIGGER_VARIANT, evaluate_cascade
 from .messages import build_cascade_blocks, build_cascade_message
 from .state import load_state, mark_sent, save_state, should_send
 
 _KEY = lambda name: dg.AssetKey(["h2s", name])
+
+# Latest-mirror for the cascade hazard chart (stable URL for dashboards).
+_CASCADE_CHART_LATEST = "latest/tijuana/forecast_data/cascade_nestor_latest.png"
 
 
 def _md_prob(prob: float):
@@ -28,6 +34,30 @@ def _md_prob(prob: float):
     if prob is None or (isinstance(prob, float) and math.isnan(prob)):
         return "n/a"
     return round(float(prob), 4)
+
+
+def _render_and_upload_chart(context, s3, products_df, result) -> str | None:
+    """Render the NESTOR hazard-timeline chart, upload to S3, return its public URL.
+
+    Failure to render/upload must never block the alert itself, so any error is
+    logged and the alert posts text-only (image_url=None).
+    """
+    try:
+        env_label = os.environ.get("ENV_LABEL", "").upper()
+        buf = generate_forecast_hazard_chart(
+            products_df, NB_SITE, variant=TRIGGER_VARIANT, env_label=env_label
+        )
+        data = buf.getvalue()
+        run_ts = result.run_ts or pd.Timestamp.now("UTC").strftime("%Y-%m-%dT%H%MZ")
+        run_path = f"{PRODUCTS_PATH}/run_ts={run_ts}/cascade_nestor.png"
+        s3.putFile(data, run_path, bucket=s3.S3_BUCKET, content_type="image/png")
+        s3.putFile(data, _CASCADE_CHART_LATEST, bucket=s3.S3_BUCKET, content_type="image/png")
+        url = s3.publicUrl(path=run_path, bucket=s3.S3_BUCKET)
+        context.log.info(f"✓ Cascade chart uploaded → {run_path}")
+        return url
+    except Exception as e:  # noqa: BLE001 — chart is best-effort
+        context.log.warning(f"Cascade chart render/upload failed; posting text-only: {e}")
+        return None
 
 
 @dg.asset(
@@ -80,8 +110,9 @@ def cascade_alert_dispatcher(
         return
 
     ops_channel = os.environ.get("SLACK_CHANNEL_OPS", slack.channel)
+    image_url = _render_and_upload_chart(context, s3, h2s_products, result)
     text = build_cascade_message(result, h2s_products, now)
-    blocks = build_cascade_blocks(result, h2s_products, now)
+    blocks = build_cascade_blocks(result, h2s_products, now, image_url=image_url)
     slack.get_client().chat_postMessage(channel=ops_channel, text=text, blocks=blocks)
     context.log.info(f"Dispatched cascade {fired} (new: {sendable}) to {ops_channel}")
 

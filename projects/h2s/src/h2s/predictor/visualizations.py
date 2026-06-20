@@ -1306,3 +1306,190 @@ def generate_forecast_slack_chart(predictions: pd.DataFrame, env_label: str = ""
     buf.seek(0)
     plt.close(fig)
     return buf
+
+
+# ---------------------------------------------------------------------------
+# Forecast cascade / digest charts (hazard timeline + log-axis sparkline)
+# ---------------------------------------------------------------------------
+
+# Hazard band colours, keyed to the green/yellow/orange categories.
+_HAZARD_GREEN = "#4caf50"
+_HAZARD_YELLOW = "#ffc107"
+_HAZARD_ORANGE = "#f44336"
+
+
+def _hazard_color(value: float, low: float, high: float) -> str:
+    """Map an H2S value (ppb) to its hazard colour: green < low <= yellow < high <= orange."""
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return "#cccccc"
+    if value >= high:
+        return _HAZARD_ORANGE
+    if value >= low:
+        return _HAZARD_YELLOW
+    return _HAZARD_GREEN
+
+
+def _station_product_series(products_df: pd.DataFrame, station: str, variant: str) -> pd.DataFrame:
+    """Stitch a station's three products into one contiguous lead-ordered series.
+
+    nowcast (leads 1–3), nearcast (4–6) and forecast (7–24) are window slices of
+    the same recursion, so concatenating them for one (station, variant) and
+    sorting by ``lead_hour`` reconstructs the full 1–24 h curve.
+    """
+    df = products_df[
+        (products_df["station"] == station) & (products_df["variant"] == variant)
+    ].copy()
+    if df.empty:
+        return df
+    df = df.sort_values("lead_hour").drop_duplicates("lead_hour", keep="first")
+    return df.reset_index(drop=True)
+
+
+def _draw_hazard_station(line_ax, strip_ax, sdf: pd.DataFrame, title: str, *,
+                         yscale: str = "symlog") -> None:
+    """Draw the sparkline (top) + hazard strip (bottom) for one station onto two axes."""
+    import matplotlib.dates as mdates
+    from zoneinfo import ZoneInfo
+
+    from h2s.constants import H2S_THRESHOLD_LOW, H2S_THRESHOLD_HIGH
+
+    pacific = ZoneInfo("America/Los_Angeles")
+    low, high = H2S_THRESHOLD_LOW, H2S_THRESHOLD_HIGH
+
+    times = sdf["time"].apply(
+        lambda t: t.astimezone(pacific) if hasattr(t, "astimezone") else t
+    ).tolist()
+    has_time = len(times) > 1 and hasattr(times[0], "toordinal")
+    x = times if has_time else list(range(len(sdf)))
+    vals = sdf["h2s_pred"].astype(float).tolist()
+
+    # --- Sparkline -------------------------------------------------------
+    line_ax.plot(x, vals, color="#37474f", linewidth=1.8, zorder=5)
+    line_ax.scatter(x, vals, s=12,
+                    c=[_hazard_color(v, low, high) for v in vals], zorder=6,
+                    edgecolors="white", linewidths=0.4)
+    for thr, col in ((low, _HAZARD_YELLOW), (high, _HAZARD_ORANGE), (100, "#b71c1c")):
+        line_ax.axhline(thr, color=col, linewidth=0.9, linestyle="--", alpha=0.75)
+    if yscale == "symlog":
+        line_ax.set_yscale("symlog", linthresh=1, linscale=0.4)
+        ymax = max([v for v in vals if not np.isnan(v)] + [high * 1.2])
+        line_ax.set_ylim(0, max(ymax * 1.3, 110))
+        line_ax.set_yticks([0, 1, low, high, 100])
+        line_ax.get_yaxis().set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:g}"))
+    else:
+        line_ax.set_ylim(bottom=0)
+    line_ax.set_ylabel("H2S (ppb)\n[log]" if yscale == "symlog" else "H2S (ppb)",
+                       fontsize=8, fontweight="bold")
+    line_ax.set_title(title, fontsize=10, fontweight="bold", loc="left")
+    line_ax.grid(True, alpha=0.25)
+
+    # --- Hazard strip ----------------------------------------------------
+    if has_time and len(x) > 1:
+        dt_hours = (x[1] - x[0]).total_seconds() / 3600
+        width = dt_hours * 0.95 / 24
+    else:
+        width = 0.85
+    strip_ax.bar(x, [1.0] * len(x), width=width,
+                 color=[_hazard_color(v, low, high) for v in vals], align="center")
+    strip_ax.set_ylim(0, 1)
+    strip_ax.set_yticks([])
+    strip_ax.set_ylabel("hazard", fontsize=8, fontweight="bold", rotation=0,
+                        ha="right", va="center")
+
+    if has_time:
+        strip_ax.xaxis.set_major_formatter(mdates.DateFormatter("%-I %p\n%-m/%-d", tz=pacific))
+        strip_ax.xaxis.set_major_locator(mdates.HourLocator(interval=6))
+        plt.setp(strip_ax.xaxis.get_majorticklabels(), fontsize=7)
+
+
+def generate_forecast_hazard_chart(
+    products_df: pd.DataFrame,
+    station: str,
+    *,
+    variant: str = "evidence",
+    yscale: str = "symlog",
+    env_label: str = "",
+) -> BytesIO:
+    """Single-station hazard timeline + log-axis H2S sparkline for forecast alerts.
+
+    Top panel: predicted H2S sparkline on a symlog axis (true zeros render;
+    5/30/100 ppb reference lines). Bottom strip: one hour-cell coloured by
+    hazard category (green <5 / yellow 5–30 / orange >=30). Shares one
+    Pacific-time x-axis covering the 1–24 h forecast.
+
+    Returns a PNG BytesIO, or an empty-state PNG when the station has no rows.
+    """
+    sdf = _station_product_series(products_df, station, variant)
+    label_suffix = f" [{env_label}]" if env_label else ""
+    title = f"{station} — {variant.capitalize()} forecast (next 24 h){label_suffix}"
+
+    fig, axes = plt.subplots(
+        2, 1, figsize=(11, 4.2),
+        gridspec_kw={"height_ratios": [3, 1]}, sharex=True,
+    )
+    fig.patch.set_facecolor("#f8f9fa")
+    for ax in axes:
+        ax.set_facecolor("#ffffff")
+
+    if sdf.empty:
+        axes[0].text(0.5, 0.5, f"No forecast rows for {station} / {variant}",
+                     ha="center", va="center", transform=axes[0].transAxes)
+        axes[0].set_title(title, fontsize=10, fontweight="bold", loc="left")
+    else:
+        _draw_hazard_station(axes[0], axes[1], sdf, title, yscale=yscale)
+
+    plt.tight_layout()
+    buf = BytesIO()
+    plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    buf.seek(0)
+    plt.close(fig)
+    return buf
+
+
+def generate_forecast_digest_chart(
+    products_df: pd.DataFrame,
+    stations: List[str],
+    *,
+    variant: str = "evidence",
+    yscale: str = "symlog",
+    env_label: str = "",
+) -> BytesIO:
+    """All-station forecast digest: a hazard timeline + sparkline per station.
+
+    Stacks one ``_draw_hazard_station`` panel-pair per station so a single image
+    summarises the 24 h outlook across the network, fired or not.
+    """
+    stations = [s for s in stations if not _station_product_series(products_df, s, variant).empty]
+    label_suffix = f" [{env_label}]" if env_label else ""
+
+    if not stations:
+        fig, ax = plt.subplots(figsize=(11, 3))
+        ax.text(0.5, 0.5, "No forecast rows available", ha="center", va="center",
+                transform=ax.transAxes)
+        ax.set_axis_off()
+        buf = BytesIO()
+        plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+        buf.seek(0)
+        plt.close(fig)
+        return buf
+
+    n = len(stations)
+    fig = plt.figure(figsize=(11, 3.6 * n))
+    fig.patch.set_facecolor("#f8f9fa")
+    fig.suptitle(f"H2S 24 h Forecast Digest — {variant.capitalize()}{label_suffix}",
+                 fontsize=13, fontweight="bold", y=0.995)
+    gs = fig.add_gridspec(2 * n, 1, height_ratios=[3, 1] * n, hspace=0.55)
+
+    for i, station in enumerate(stations):
+        sdf = _station_product_series(products_df, station, variant)
+        line_ax = fig.add_subplot(gs[2 * i, 0])
+        strip_ax = fig.add_subplot(gs[2 * i + 1, 0], sharex=line_ax)
+        line_ax.set_facecolor("#ffffff")
+        strip_ax.set_facecolor("#ffffff")
+        _draw_hazard_station(line_ax, strip_ax, sdf, station, yscale=yscale)
+
+    buf = BytesIO()
+    plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    buf.seek(0)
+    plt.close(fig)
+    return buf
