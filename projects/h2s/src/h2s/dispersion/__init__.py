@@ -45,6 +45,11 @@ from h2s.dispersion.emission_inversion import (
     batch_inversion_stacked,
     inversion_to_forward_sources,
     q_field_to_parquet_rows,
+    # Phase 2 — geometry-aware inversion
+    build_sensitivity_matrix_from_geometry,
+    project_footprint_to_sources,
+    calibration_loop_from_geometry,
+    batch_inversion_from_geometry,
 )
 
 __all__ = [
@@ -84,4 +89,9 @@ __all__ = [
     "batch_inversion_stacked",
     "inversion_to_forward_sources",
     "q_field_to_parquet_rows",
+    # Phase 2 — geometry-aware inversion
+    "build_sensitivity_matrix_from_geometry",
+    "project_footprint_to_sources",
+    "calibration_loop_from_geometry",
+    "batch_inversion_from_geometry",
 ]
