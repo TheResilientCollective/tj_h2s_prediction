@@ -276,12 +276,18 @@ def _train_one_variant(
     split: int,
     ensemble_margin: float,
     variant_label: str,
+    enable_smote_clf_30ppb: bool = False,
 ) -> dict[str, tuple]:
     """Train regression + clf_5ppb + clf_10ppb + clf_30ppb for one feature set.
 
-    Returns dict[task → (model, choice_str)] for the current station.
-    The full metrics dict is recomputed downstream by station_training_report
-    using the per-variant feature slice (so importance keys are correct).
+    Returns dict[task → (model, choice_str, smote_applied)] for the current
+    station. The full metrics dict is recomputed downstream by
+    station_training_report using the per-variant feature slice (so importance
+    keys are correct).
+
+    When *enable_smote_clf_30ppb* is True, BorderlineSMOTE oversampling is
+    applied to the clf_30ppb train split ONLY (sparse 30 ppb positives at
+    low-base-rate stations); all other tasks are unchanged.
     """
     X = sdf[features].values
     y_cont = sdf['H2S'].values
@@ -302,12 +308,17 @@ def _train_one_variant(
         ('clf_10ppb',  ytr_10, yte_10),
         ('clf_30ppb',  ytr_30, yte_30),
     ]:
-        context.log.info(f"  [{variant_label}] Training {task}...")
-        model, choice, _ = train_and_select(
-            Xtr, Xte, ytr_, yte_, task, ensemble_margin=ensemble_margin
+        use_smote = enable_smote_clf_30ppb and task == 'clf_30ppb'
+        context.log.info(
+            f"  [{variant_label}] Training {task}..."
+            + (" (SMOTE on minority)" if use_smote else "")
+        )
+        model, choice, metrics = train_and_select(
+            Xtr, Xte, ytr_, yte_, task, ensemble_margin=ensemble_margin,
+            use_smote_on_minority=use_smote,
         )
         context.log.info(f"    [{variant_label}] {task} → {choice}")
-        result[task] = (model, choice)
+        result[task] = (model, choice, bool(metrics.get('smote_applied', False)))
     return result
 
 
@@ -324,6 +335,17 @@ def _train_one_variant(
             float,
             default_value=0.01,
             description="AUC margin for ensembling classifiers (R² margin = 2×)",
+        ),
+        "enable_smote_clf_30ppb": dg.Field(
+            bool,
+            default_value=False,
+            description=(
+                "Apply BorderlineSMOTE to oversample 30 ppb positives for the "
+                "clf_30ppb task only. Default OFF: a walk-forward evaluation "
+                "(see docs/RETRAIN_STATION_CLF30PPB_BRIEF.md) found SMOTE "
+                "*degraded* OOS orange recall vs the baseline (AUC was already "
+                "0.96–0.98). Kept as an opt-in lever for future experiments."
+            ),
         ),
     },
 )
@@ -351,8 +373,12 @@ def per_station_trained_models(
     partition = context.partition_key  # e.g. 'san_ysidro'
     site_name = STATION_PARTITION_MAP[partition]
     ensemble_margin = context.op_config["ensemble_margin"]
+    enable_smote = context.op_config["enable_smote_clf_30ppb"]
 
-    context.log.info(f"Training models for station: {site_name} (partition: {partition})")
+    context.log.info(
+        f"Training models for station: {site_name} (partition: {partition}) "
+        f"[SMOTE clf_30ppb: {enable_smote}]"
+    )
 
     sdf = multi_station_training_data[
         multi_station_training_data['site_name'] == site_name
@@ -373,13 +399,16 @@ def per_station_trained_models(
 
     models: dict = {}
     choices: dict[str, dict[str, str]] = {}
+    smote_flags: dict[str, dict[str, bool]] = {}
     for variant, features in _VARIANTS.items():
         suffix = f"_{variant}"
         variant_results = _train_one_variant(
-            context, sdf, features, split, ensemble_margin, variant
+            context, sdf, features, split, ensemble_margin, variant,
+            enable_smote_clf_30ppb=enable_smote,
         )
-        choices[variant] = {task: choice for task, (_, choice) in variant_results.items()}
-        for task, (model, _) in variant_results.items():
+        choices[variant] = {task: choice for task, (_, choice, _) in variant_results.items()}
+        smote_flags[variant] = {task: applied for task, (_, _, applied) in variant_results.items()}
+        for task, (model, _, _) in variant_results.items():
             models[f"{task}{suffix}"] = model
 
     context.add_output_metadata({
@@ -390,6 +419,8 @@ def per_station_trained_models(
         "tasks": list(models.keys()),
         "variants": list(_VARIANTS.keys()),
         "algorithm_choices": choices,
+        "smote_applied": smote_flags,
+        "enable_smote_clf_30ppb": enable_smote,
     })
     return models
 
@@ -426,6 +457,14 @@ def _importance_for_features(model, feature_names: list[str], top_n: int = 10) -
     },
     config_schema={
         "ensemble_margin": dg.Field(float, default_value=0.01),
+        "enable_smote_clf_30ppb": dg.Field(
+            bool, default_value=False,
+            description=(
+                "Mirror of per_station_trained_models config — records which "
+                "tasks used SMOTE in training_report.json/archive_metadata.json. "
+                "Keep consistent with the training asset's config (default OFF)."
+            ),
+        ),
     },
 )
 def station_training_report(
@@ -448,6 +487,7 @@ def station_training_report(
     site_name = STATION_PARTITION_MAP[partition]
     s3 = context.resources.s3
     ensemble_margin = context.op_config["ensemble_margin"]
+    enable_smote = context.op_config["enable_smote_clf_30ppb"]
 
     sdf = multi_station_training_data[
         multi_station_training_data['site_name'] == site_name
@@ -486,6 +526,10 @@ def station_training_report(
         'n_test': len(sdf) - split,
         'features': {variant: features for variant, features in _VARIANTS.items()},
         'ensemble_margin': ensemble_margin,
+        'smote_applied': {
+            variant: {task: bool(enable_smote and task == 'clf_30ppb') for task in _TASKS}
+            for variant in _VARIANTS
+        },
         'tasks': tasks_metrics,
         'training_snapshot': {
             's3_path': multi_station_training_data.attrs.get('training_snapshot_s3_path'),
@@ -580,13 +624,16 @@ def station_model_archive(
     s3.putFile(json.dumps(station_training_report, indent=2, default=str).encode('utf-8'),
                f"{archive_base}/training_report.json",
                bucket=s3.S3_BUCKET, content_type='application/json')
-    # Archive metadata
+    # Archive metadata. `smote_applied` (per variant/task) is recorded for
+    # replayability — see docs/ALGORITHM_CHOICES.md — sourced from the
+    # training report so it reflects how these models were actually trained.
     archive_meta = {
         "model_version": version_tag,
         "archived_at": datetime.now(timezone.utc).isoformat(),
         "git_sha": _git_short_sha(),
         "station": site_name,
         "partition": partition,
+        "smote_applied": station_training_report.get("smote_applied"),
         "artifacts": _station_artifact_names(),
     }
     s3.putFile(json.dumps(archive_meta, indent=2).encode('utf-8'),
