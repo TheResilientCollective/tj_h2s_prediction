@@ -1446,6 +1446,122 @@ def generate_forecast_hazard_chart(
     return buf
 
 
+def generate_skill_by_lead_chart(curves_df: pd.DataFrame, *, env_label: str = "") -> BytesIO:
+    """Forecast skill vs lead-hour: Spearman, MAE, and P(>30) recall, Evidence vs Lean.
+
+    ``curves_df`` is the ``forecast_skill_report`` output (one row per product,
+    variant, lead_hour). Products are stitched into a single 1–24 h lead axis
+    with shaded nowcast / nearcast / forecast bands.
+    """
+    variant_colors = {"evidence": "#1565c0", "lean": "#ef6c00"}
+    bands = [("nowcast", 0.5, 3.5, "#e8f5e9"), ("nearcast", 3.5, 6.5, "#fff8e1"),
+             ("forecast", 6.5, 24.5, "#ffebee")]
+
+    fig, axes = plt.subplots(3, 1, figsize=(11, 8), sharex=True)
+    fig.patch.set_facecolor("#f8f9fa")
+    label_suffix = f" [{env_label}]" if env_label else ""
+    fig.suptitle(f"Forecast skill vs lead hour{label_suffix}", fontsize=13,
+                 fontweight="bold", y=0.995)
+
+    if curves_df is None or curves_df.empty:
+        for ax in axes:
+            ax.text(0.5, 0.5, "No skill data yet", ha="center", va="center", transform=ax.transAxes)
+    else:
+        df = curves_df.copy()
+        panels = [("spearman", "Spearman ρ (actual vs pred)", False),
+                  ("mae", "MAE (ppb)", False),
+                  ("prob_recall_30", "P(>30 ppb) recall", True)]
+        for ax, (col, ylabel, is_recall) in zip(axes, panels):
+            for _, x0, x1, c in bands:
+                ax.axvspan(x0, x1, color=c, alpha=0.6, zorder=0)
+            ax.set_facecolor("#ffffff")
+            if col in df.columns:
+                for variant, g in df.groupby("variant"):
+                    g = g.sort_values("lead_hour")
+                    ax.plot(g["lead_hour"], g[col], marker="o", markersize=3,
+                            color=variant_colors.get(variant, "#555"),
+                            label=variant.capitalize(), zorder=4)
+            if is_recall:
+                ax.axhline(0.5, color="#888", linestyle="--", linewidth=0.8)
+                ax.set_ylim(0, 1.02)
+            ax.set_ylabel(ylabel, fontsize=9, fontweight="bold")
+            ax.grid(True, alpha=0.25)
+            ax.legend(fontsize=8, loc="upper right")
+        for _, x0, x1, _c in bands:
+            axes[0].text((x0 + x1) / 2, axes[0].get_ylim()[1], _, ha="center",
+                         va="bottom", fontsize=8, color="#555")
+        axes[-1].set_xlabel("Lead hour", fontsize=9, fontweight="bold")
+        axes[-1].set_xticks(range(2, 25, 2))
+
+    plt.tight_layout()
+    buf = BytesIO()
+    plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    buf.seek(0)
+    plt.close(fig)
+    return buf
+
+
+def generate_forecast_vs_measured_chart(fva: pd.DataFrame, *, env_label: str = "") -> BytesIO:
+    """Event close-out: forecast (most-ahead) vs measured H2S over the event window.
+
+    ``fva`` is the ``forecast_vs_actual`` output (time, h2s_pred, actual_h2s,
+    p_exceed). Top: symlog H2S — measured vs predicted with 10/30 ppb refs.
+    Bottom: predicted P(>10 ppb) with the 0.5 call line.
+    """
+    import matplotlib.dates as mdates
+    from zoneinfo import ZoneInfo
+
+    pacific = ZoneInfo("America/Los_Angeles")
+    label_suffix = f" [{env_label}]" if env_label else ""
+
+    fig, axes = plt.subplots(2, 1, figsize=(11, 5), gridspec_kw={"height_ratios": [3, 1]},
+                             sharex=True)
+    fig.patch.set_facecolor("#f8f9fa")
+    for ax in axes:
+        ax.set_facecolor("#ffffff")
+    fig.suptitle(f"Alert performance — forecast vs measured{label_suffix}", fontsize=13,
+                 fontweight="bold", y=0.995)
+
+    if fva is None or fva.empty:
+        axes[0].text(0.5, 0.5, "No overlapping forecast for this event",
+                     ha="center", va="center", transform=axes[0].transAxes)
+    else:
+        df = fva.copy()
+        df["time"] = pd.to_datetime(df["time"], utc=True)
+        x = [t.astimezone(pacific) for t in df["time"]]
+        axes[0].plot(x, df["actual_h2s"], color="#37474f", linewidth=2.0,
+                     marker="o", markersize=3, label="Measured")
+        axes[0].plot(x, df["h2s_pred"], color="#1565c0", linewidth=1.6,
+                     linestyle="--", marker="s", markersize=3, label="Forecast (most-ahead)")
+        for thr, col in ((10, _HAZARD_YELLOW), (30, _HAZARD_ORANGE)):
+            axes[0].axhline(thr, color=col, linestyle="--", linewidth=0.9, alpha=0.75)
+        axes[0].set_yscale("symlog", linthresh=1, linscale=0.4)
+        ymax = float(np.nanmax([df["actual_h2s"].max(), df["h2s_pred"].max(), 30]))
+        axes[0].set_ylim(0, max(ymax * 1.3, 110))
+        axes[0].set_yticks([0, 1, 10, 30, 100])
+        axes[0].get_yaxis().set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:g}"))
+        axes[0].set_ylabel("H2S (ppb) [log]", fontsize=9, fontweight="bold")
+        axes[0].legend(fontsize=8, loc="upper right")
+        axes[0].grid(True, alpha=0.25)
+
+        if "p_exceed" in df.columns:
+            axes[1].bar(x, df["p_exceed"], width=0.03, color="#b71c1c", alpha=0.7)
+            axes[1].axhline(0.5, color="#888", linestyle="--", linewidth=0.8)
+        axes[1].set_ylim(0, 1.02)
+        axes[1].set_ylabel("P(>10)", fontsize=9, fontweight="bold")
+        axes[1].grid(True, alpha=0.25, axis="y")
+        axes[1].xaxis.set_major_formatter(mdates.DateFormatter("%-I %p\n%-m/%-d", tz=pacific))
+        axes[1].xaxis.set_major_locator(mdates.HourLocator(interval=3))
+        plt.setp(axes[1].xaxis.get_majorticklabels(), fontsize=7)
+
+    plt.tight_layout()
+    buf = BytesIO()
+    plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    buf.seek(0)
+    plt.close(fig)
+    return buf
+
+
 def generate_forecast_digest_chart(
     products_df: pd.DataFrame,
     stations: List[str],
