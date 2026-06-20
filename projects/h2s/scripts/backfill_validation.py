@@ -250,7 +250,7 @@ def load_station_models(s3: S3Resource) -> dict:
     import pickle
 
     artifacts = {}
-    tasks = ["regression", "clf_5ppb", "clf_10ppb"]
+    tasks = ["regression", "clf_5ppb", "clf_10ppb", "clf_30ppb"]
     variants = ["evidence", "lean"]
 
     for site_name, info in STATIONS.items():
@@ -385,11 +385,12 @@ def daily_station_hindcast(
         prob_5 = clf5.predict_proba(X)[:, 1] * 100 if clf5 else np.zeros(len(X))
         prob_10 = clf10.predict_proba(X)[:, 1] * 100 if clf10 else np.zeros(len(X))
 
-        # Only use clf_30ppb for NESTOR (main site); fall back to 2-class for others
-        if station_key == "NESTOR__BES":
-            prob_30 = clf30.predict_proba(X)[:, 1] * 100 if clf30 else np.zeros(len(X))
-        else:
-            prob_30 = np.zeros(len(X))  # Force fallback to prob_10 logic for other sites
+        # clf_30ppb enabled for ALL stations. Walk-forward backtest (Jan–Jun 2026,
+        # scored via classify_risk @ PROB_30_ALERT=0.25) showed the baseline 30 ppb
+        # classifier gives IB_CIVIC_CTR ~0.91 orange recall (passes the 0.50 gate)
+        # and SAN_YSIDRO ~0.43 (below gate but far better than the 2-class fallback).
+        # SMOTE retraining was evaluated and *degraded* recall, so it is not used.
+        prob_30 = clf30.predict_proba(X)[:, 1] * 100 if clf30 else np.zeros(len(X))
 
         for i in range(len(sfc)):
             risk = classify_risk(prob_5[i] / 100, prob_10[i] / 100, h2s_pred[i], prob_30[i] / 100)

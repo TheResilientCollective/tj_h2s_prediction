@@ -338,12 +338,13 @@ def _train_one_variant(
         ),
         "enable_smote_clf_30ppb": dg.Field(
             bool,
-            default_value=True,
+            default_value=False,
             description=(
                 "Apply BorderlineSMOTE to oversample 30 ppb positives for the "
-                "clf_30ppb task only. Targets sparse-positive stations "
-                "(SAN_YSIDRO/IB_CIVIC_CTR). NESTOR is unaffected when trained on "
-                "its own partition unless explicitly included."
+                "clf_30ppb task only. Default OFF: a walk-forward evaluation "
+                "(see docs/RETRAIN_STATION_CLF30PPB_BRIEF.md) found SMOTE "
+                "*degraded* OOS orange recall vs the baseline (AUC was already "
+                "0.96–0.98). Kept as an opt-in lever for future experiments."
             ),
         ),
     },
@@ -457,11 +458,11 @@ def _importance_for_features(model, feature_names: list[str], top_n: int = 10) -
     config_schema={
         "ensemble_margin": dg.Field(float, default_value=0.01),
         "enable_smote_clf_30ppb": dg.Field(
-            bool, default_value=True,
+            bool, default_value=False,
             description=(
                 "Mirror of per_station_trained_models config — records which "
                 "tasks used SMOTE in training_report.json/archive_metadata.json. "
-                "Keep consistent with the training asset's config."
+                "Keep consistent with the training asset's config (default OFF)."
             ),
         ),
     },

@@ -290,6 +290,16 @@ posts a forecast-vs-measured close-out. Both replaced the retired met-regime
 gate + sigmoid-score `tiered_alerts` system. The observation tiers
 (`watch` 30 / `critical` 100, in `h2s_alert_system`) are unchanged.
 
+**Per-station clf_30ppb status (2026-06):** clf_30ppb is enabled for all three
+stations (`PROB_30_ALERT = 0.25`). Walk-forward backtest orange recall @ 0.25:
+NESTOR ~0.95, IB_CIVIC_CTR ~0.91, **SAN_YSIDRO ~0.43 — below the 0.50 target
+(known limitation)**: sparse 30 ppb positives and a low-calibrated probability
+scale; a per-station threshold (~0.10–0.15) would clear it but per-station
+`PROB_30_ALERT` is deferred. BorderlineSMOTE oversampling was evaluated and
+*degraded* recall (AUC was already 0.96–0.98), so it is OFF by default
+(opt-in via `enable_smote_clf_30ppb`). See
+`projects/h2s/docs/RETRAIN_STATION_CLF30PPB_BRIEF.md` §11.
+
 ### Forecast Validation Store + Skill Curves
 
 `station_forecast_validation_rebuild_job` joins every stored product row to the H2S

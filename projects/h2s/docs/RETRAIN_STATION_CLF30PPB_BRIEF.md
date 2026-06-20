@@ -253,3 +253,53 @@ env $(grep -v '^#' ../../.env | xargs) uv run <command>
 - Backtest report (current): `s3://test/tijuana/forecast/backtest/2026-05/backtest_results.json`
 - Sweep script: `projects/h2s/scripts/sweep_prob_30_threshold.py`
 - This brief: `projects/h2s/docs/RETRAIN_STATION_CLF30PPB_BRIEF.md`
+
+---
+
+## 11. RESOLUTION (2026-06-20)
+
+Executed in a cloud session. Outcome: **SMOTE rejected; baseline clf_30ppb
+re-enabled for all stations.**
+
+### Step 3 / Experiment C (threshold sweep, per-station)
+`sweep_prob_30_threshold.py` was extended to report per-station metrics and to
+enable clf_30ppb for every station. On the May–Jun in-period sample (only 6–7
+orange events/station), at the deploy threshold `PROB_30_ALERT = 0.25`:
+SAN_YSIDRO recall 0.286, IB_CIVIC_CTR 0.000 — both **fail** the gate; a lower
+threshold (~0.10) rescued both, but that needs per-station thresholds
+(out of scope). Pre-check failed the gate → proceeded to Step 2.
+
+### Step 2 (SMOTE) — implemented and evaluated, then rejected
+`use_smote_on_minority` was plumbed through `train_and_select` and wired
+(config `enable_smote_clf_30ppb`) through both the production
+(`per_station_trained_models`) and walk-forward (`backfill_station_models`)
+training paths, applied to clf_30ppb only; `smote_applied` is recorded in
+`training_report.json` / `archive_metadata.json`.
+
+A proper **walk-forward** eval (`scripts/eval_smote_clf30.py`; train < 2026-01-01,
+OOS Jan–Jun 2026, ~63/70/372 orange events for SY/IB/NESTOR), scored through the
+production `classify_risk` @ 0.25:
+
+| Station | baseline recall / FAR | SMOTE recall / FAR | gate (baseline) |
+|---|---|---|---|
+| SAN_YSIDRO | 0.429 / 0.013 | 0.413 / 0.013 | FAIL (close) |
+| IB_CIVIC_CTR | **0.914** / 0.028 | 0.814 / 0.024 | **PASS** |
+| NESTOR (control) | 0.949 / 0.106 | 0.914 / 0.090 | — |
+
+**SMOTE *degraded* OOS orange recall in every case** (clf_30 AUC was already
+0.96–0.98 — imbalance was never the bottleneck). The brief's "SY 0% / IB 50%"
+premise reflected clf_30ppb being *disabled* for non-NESTOR in the analysis
+scripts (and the backtest's stricter p>0.5 prob-call metric). With the baseline
+classifier simply **re-enabled** and scored at the real deploy threshold,
+IB_CIVIC_CTR already clears the gate and SAN_YSIDRO improves to 0.43.
+
+### Decision (user-approved): re-enable baseline, drop SMOTE
+- `backfill_validation.py`: load clf_30ppb and remove the NESTOR-only guard
+  (production `h2s_daily_pipeline.py` already used clf_30 for all stations).
+- `sweep_prob_30_threshold.py`: clf_30 enabled for all stations.
+- SMOTE config defaults flipped to **False** (kept as an opt-in lever).
+
+**Known limitation:** SAN_YSIDRO clf_30ppb orange recall is ~0.43 @ 0.25
+(below the 0.50 gate) — sparse positives + a probability scale that calibrates
+low; a per-station threshold (~0.10–0.15) would clear it but is deferred
+(per-station `PROB_30_ALERT` is out of scope). IB_CIVIC_CTR passes (~0.91).

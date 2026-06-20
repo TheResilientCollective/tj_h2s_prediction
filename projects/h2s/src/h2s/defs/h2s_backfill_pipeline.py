@@ -331,11 +331,12 @@ def backfill_training_data(context: AssetExecutionContext) -> pd.DataFrame:
     config_schema={
         "ensemble_margin": dg.Field(float, default_value=0.01),
         "enable_smote_clf_30ppb": dg.Field(
-            bool, default_value=True,
+            bool, default_value=False,
             description=(
                 "Apply BorderlineSMOTE to oversample 30 ppb positives for the "
-                "clf_30ppb task only (sparse-positive stations). Other tasks "
-                "unchanged. Recorded in archive_metadata.json.smote_applied."
+                "clf_30ppb task only (sparse-positive stations). Default OFF: "
+                "walk-forward eval found SMOTE degraded OOS orange recall. "
+                "Recorded in archive_metadata.json.smote_applied when enabled."
             ),
         ),
     },
