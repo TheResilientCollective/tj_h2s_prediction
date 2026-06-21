@@ -126,6 +126,7 @@ class InversionConfig(dg.Config):
     n_particles: int = 2000
     hours_back: int = 2  # Valley-scale: sources are 1-7 km away, 37 min max travel time @ 3 m/s
     max_events: int = 0   # 0 = all events
+    obs_bucket: str = "resilentpublic"
 
 
 class HysplitConfig(dg.Config):
@@ -135,6 +136,7 @@ class HysplitConfig(dg.Config):
     h2s_threshold_ppb: float = 30.0
     date_start: str = "2026-02-01"
     date_end: str = "2026-04-01"
+    obs_bucket: str = "resilentpublic"
 
 
 class ForwardForecastConfig(dg.Config):
@@ -144,6 +146,7 @@ class ForwardForecastConfig(dg.Config):
     # via per-cell max (captures worst-case ppb per bucket). Set equal to
     # cadence_minutes to disable aggregation.
     animation_cadence_minutes: int = 60
+    obs_bucket: str = "resilentpublic"
 
 
 class EmissionInversionConfig(dg.Config):
@@ -185,6 +188,7 @@ class EmissionInversionConfig(dg.Config):
     fit_sensor_bias: bool = False
     require_anchor_sensor: str = ""    # e.g. "NESTOR - BES"
     anchor_wd_gate: bool = False
+    obs_bucket: str = "resilentpublic"
 
 
 def _build_geometry_events(
@@ -313,8 +317,8 @@ def lagrangian_source_attribution(
                                            description=description,
                                            )
 
-    log.info(f"Loading obs data from S3: {OBS_DATA_PATH}")
-    url = s3.publicUrl(OBS_DATA_PATH)
+    log.info(f"Loading obs data from S3: {OBS_DATA_PATH} (bucket={config.obs_bucket})")
+    url = s3.publicUrl(OBS_DATA_PATH, bucket=config.obs_bucket)
     df = pd.read_parquet(url)
     df["time"] = pd.to_datetime(df["time"], utc=True).dt.tz_convert("America/Los_Angeles")
     log.info(f"Loaded {len(df)} obs rows")
@@ -493,8 +497,8 @@ def emission_rate_inversion(
     geom_payload: dict = {}
     if config.use_geometry_nnls:
         try:
-            log.info("Running geometry-aware NNLS inversion...")
-            obs_url = s3.publicUrl(OBS_DATA_PATH)
+            log.info(f"Running geometry-aware NNLS inversion (obs bucket={config.obs_bucket})...")
+            obs_url = s3.publicUrl(OBS_DATA_PATH, bucket=config.obs_bucket)
             obs_df = pd.read_parquet(obs_url)
             obs_df["time"] = pd.to_datetime(obs_df["time"], utc=True).dt.tz_convert(
                 "America/Los_Angeles"
@@ -622,8 +626,8 @@ def hysplit_controls_generation(
 
     df = None
     if config.mode in ("backward_traj", "backward_disp"):
-        log.info(f"Loading obs data for backward mode from {OBS_DATA_PATH}")
-        url = s3.publicUrl(OBS_DATA_PATH)
+        log.info(f"Loading obs data for backward mode from {OBS_DATA_PATH} (bucket={config.obs_bucket})")
+        url = s3.publicUrl(OBS_DATA_PATH, bucket=config.obs_bucket)
         df = pd.read_parquet(url)
         df["time"] = pd.to_datetime(df["time"], utc=True).dt.tz_convert("America/Los_Angeles")
 
@@ -846,8 +850,8 @@ def gaussian_forward_forecast(
     s3 = context.resources.s3
 
     # Load FORECAST meteorology at 15-min cadence (not obs data)
-    log.info(f"Loading 15-min forecast met data from S3: {FORECAST_DATA_15MIN_PATH}")
-    url = s3.publicUrl(FORECAST_DATA_15MIN_PATH)
+    log.info(f"Loading 15-min forecast met data from S3: {FORECAST_DATA_15MIN_PATH} (bucket={config.obs_bucket})")
+    url = s3.publicUrl(FORECAST_DATA_15MIN_PATH, bucket=config.obs_bucket)
     fc_df = pd.read_parquet(url)
     fc_df["time"] = pd.to_datetime(fc_df["time"], utc=True).dt.tz_convert("America/Los_Angeles")
     log.info(f"Loaded {len(fc_df)} forecast rows, time range: {fc_df['time'].min()} → {fc_df['time'].max()}")
@@ -1067,8 +1071,8 @@ def gaussian_forward_forecast_detailed(
     s3 = context.resources.s3
 
     # Load FORECAST meteorology at 15-min cadence (not obs data)
-    log.info(f"Loading 15-min forecast met data from S3: {FORECAST_DATA_15MIN_PATH}")
-    url = s3.publicUrl(FORECAST_DATA_15MIN_PATH)
+    log.info(f"Loading 15-min forecast met data from S3: {FORECAST_DATA_15MIN_PATH} (bucket={config.obs_bucket})")
+    url = s3.publicUrl(FORECAST_DATA_15MIN_PATH, bucket=config.obs_bucket)
     fc_df = pd.read_parquet(url)
     fc_df["time"] = pd.to_datetime(fc_df["time"], utc=True).dt.tz_convert("America/Los_Angeles")
     log.info(f"Loaded {len(fc_df)} forecast rows, time range: {fc_df['time'].min()} → {fc_df['time'].max()}")
