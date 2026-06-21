@@ -1,23 +1,24 @@
-"""Dispersion hindcast — compare Gaussian model predictions against observed H2S.
+"""Dispersion hindcast — compare geometry Gaussian model against observed H2S.
 
-Loads observed met + H2S from S3, runs the forward model for a specified window,
-and prints/plots a comparison table at each sensor.
+Loads observed met + H2S from S3, runs run_forward_model_from_geometry with
+per-source Q rates, and prints/plots a comparison table at each sensor.
 
 Usage
 -----
-    uv run python scripts/dispersion_hindcast.py \
-        --start "2026-06-21 22:00" --end "2026-06-22 00:00" --tz "America/Los_Angeles"
+    uv run python scripts/dispersion_hindcast.py
 
-    # Override emission rates (g/s) if geometry rates aren't in S3 yet:
+    # Explicit window:
     uv run python scripts/dispersion_hindcast.py \
-        --start "2026-06-21 22:00" --end "2026-06-22 00:00" \
-        --east 20 --west 10 --south 137
+        --start "2026-06-20 22:00" --end "2026-06-21 00:00"
 
-    # Write a PNG plot:
-    uv run python scripts/dispersion_hindcast.py \
-        --start "2026-06-21 22:00" --end "2026-06-22 00:00" --plot hindcast.png
+    # Scale all source Q uniformly (sensitivity test):
+    uv run python scripts/dispersion_hindcast.py --scale 2.0
 
-Reads .env for S3 credentials (S3_BUCKET, S3_ADDRESS, etc.).
+    # Save a PNG:
+    uv run python scripts/dispersion_hindcast.py --plot hindcast.png
+
+Source Q (g/s) loaded from emission_rates_by_geometry_g_s in S3.
+Falls back to q_prior values in source_geometry.toml when S3 rates are absent.
 Obs bucket defaults to "resilentpublic"; override with --obs-bucket.
 """
 
@@ -30,25 +31,20 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-# Make sure the h2s package is importable when run from the project root
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parents[1] / ".env")
 
 from h2s.resources.minio import S3Resource
-from h2s.constants import (
-    OBS_DATA_PATH,
-    EMISSION_RATES_PATH,
-)
-from h2s.dispersion import (
-    run_forward_model,
-    run_forward_model_from_geometry,
-    load_source_geometry,
-)
+from h2s.constants import OBS_DATA_PATH, EMISSION_RATES_PATH
+from h2s.dispersion import run_forward_model_from_geometry, load_source_geometry
 
 
 SENSORS = ["NESTOR - BES", "IB CIVIC CTR", "SAN YSIDRO"]
+
+_DEFAULT_START = "2026-06-20 22:00"
+_DEFAULT_END   = "2026-06-21 00:00"
 
 
 def build_s3() -> S3Resource:
@@ -62,40 +58,35 @@ def build_s3() -> S3Resource:
     )
 
 
-def load_emission_rates(s3: S3Resource, args) -> tuple[dict, bool]:
-    """Return (rates_dict, use_geometry).
+def load_source_q(s3: S3Resource, specs: dict, scale: float = 1.0) -> dict[str, float]:
+    """Return per-source Q (g/s), scaled by `scale`.
 
-    If geometry rates are in S3 and no manual override was given, use them.
-    Falls back to the 3-zone dict (east/west/south) otherwise.
-    Manual --east/--west/--south always takes priority.
+    Priority:
+      1. emission_rates_by_geometry_g_s from S3 emission_rates.json
+      2. q_prior from source_geometry.toml (calibrated design values)
     """
-    manual = any(v is not None for v in [args.east, args.west, args.south])
-    if manual:
-        rates = {
-            "east":  args.east  or 20.0,
-            "west":  args.west  or 10.0,
-            "south": args.south or 137.0,
-        }
-        print(f"Using manual rates: {rates}")
-        return rates, False
-
     try:
         data = json.loads(s3.getFile(EMISSION_RATES_PATH))
         geom = data.get("emission_rates_by_geometry_g_s", {})
         if geom:
-            print(f"Loaded geometry rates from S3 ({len(geom)} sources, "
-                  f"Q_total={sum(geom.values()):.1f} g/s)")
-            return {k: float(v) for k, v in geom.items()}, True
-        zone_rates = data.get("emission_rates_g_s", {})
-        if zone_rates:
-            print(f"Loaded 3-zone rates from S3: {zone_rates}")
-            return {k: float(v) for k, v in zone_rates.items()}, False
+            q = {k: float(v) * scale for k, v in geom.items()}
+            print(f"Source Q from S3 geometry rates (scale={scale:.2f}):")
+            for sid, qv in q.items():
+                if qv > 0:
+                    print(f"  {sid:35s}  {qv:.2f} g/s")
+            print(f"  Q_total = {sum(q.values()):.1f} g/s")
+            return q
+        print("No geometry rates in S3 emission_rates.json — falling back to q_prior from TOML")
     except Exception as e:
-        print(f"Could not load emission rates from S3 ({e}) — using calibrated defaults")
+        print(f"Could not load S3 emission rates ({e}) — falling back to q_prior from TOML")
 
-    defaults = {"east": 20.0, "west": 10.0, "south": 137.0}
-    print(f"Using calibrated defaults: {defaults}")
-    return defaults, False
+    q = {sid: spec.q_prior * scale for sid, spec in specs.items()}
+    print(f"Source Q from q_prior (scale={scale:.2f}):")
+    for sid, qv in q.items():
+        if qv > 0:
+            print(f"  {sid:35s}  {qv:.2f} g/s")
+    print(f"  Q_total = {sum(q.values()):.1f} g/s")
+    return q
 
 
 def run_hindcast(args):
@@ -107,16 +98,15 @@ def run_hindcast(args):
     print(f"\nHindcast window: {t_start}  →  {t_end}  ({window_hours:.1f} h)")
 
     s3 = build_s3()
+    specs = load_source_geometry()
 
     # Load obs data
-    print(f"Loading obs data from {args.obs_bucket}/{OBS_DATA_PATH} ...")
+    print(f"\nLoading obs data from {args.obs_bucket}/{OBS_DATA_PATH} ...")
     url = s3.publicUrl(OBS_DATA_PATH, bucket=args.obs_bucket)
     df = pd.read_parquet(url)
 
-    # Handle timezone: parquet may store as UTC, tz-naive, or already local.
     raw_time = pd.to_datetime(df["time"])
     if raw_time.dt.tz is None:
-        # Timezone-naive — assume UTC
         df["time"] = raw_time.dt.tz_localize("UTC").dt.tz_convert(tz)
     else:
         df["time"] = raw_time.dt.tz_convert(tz)
@@ -125,29 +115,27 @@ def run_hindcast(args):
     t_max = df["time"].max()
     print(f"  {len(df)} rows | range: {t_min}  →  {t_max}")
 
-    # If default window was used and lies outside the data, shift to the last 2h
+    # Auto-shift if default window is beyond data end
     if args.use_default_window and t_max < t_start:
         t_end   = t_max.ceil("h")
         t_start = t_end - pd.Timedelta(hours=2)
         window_hours = 2.0
-        print(f"  Requested window is beyond data end — shifting to: {t_start}  →  {t_end}")
+        print(f"  Default window beyond data — shifted to: {t_start}  →  {t_end}")
 
-    # Filter to window
     window_df = df[(df["time"] >= t_start) & (df["time"] <= t_end)].copy()
-    print(f"  {len(window_df)} rows in window [{t_start}  →  {t_end}]")
+    print(f"  {len(window_df)} rows in window")
 
     if window_df.empty:
-        # Show the last available timestamps to help user pick a valid window
         print("\nNo data in the requested window.")
-        print("Last 10 timestamps available in the dataset:")
+        print("Last 10 timestamps in the dataset:")
         print(df["time"].drop_duplicates().sort_values().tail(10).to_string())
-        print("\nRe-run with e.g.:")
         last = df["time"].max().floor("h")
-        print(f"  --start \"{(last - pd.Timedelta(hours=2)).strftime('%Y-%m-%d %H:%M')}\" "
+        print(f"\nSuggested window:\n"
+              f"  --start \"{(last - pd.Timedelta(hours=2)).strftime('%Y-%m-%d %H:%M')}\" "
               f"--end \"{last.strftime('%Y-%m-%d %H:%M')}\"")
         sys.exit(1)
 
-    # Show actual H2S in window
+    # Observed H2S
     print("\n--- Observed H2S (ppb) ---")
     obs_pivot = (
         window_df[window_df["site_name"].isin(SENSORS)]
@@ -156,31 +144,21 @@ def run_hindcast(args):
     )
     print(obs_pivot.to_string())
 
-    # Load emission rates
-    rates, use_geometry = load_emission_rates(s3, args)
+    # Load per-source Q
+    print()
+    source_q = load_source_q(s3, specs, scale=args.scale)
 
-    # Run forward model using the obs met over the window
-    print(f"\nRunning {'geometry' if use_geometry else '3-zone'} forward model ...")
-    if use_geometry:
-        specs = load_source_geometry()
-        result = run_forward_model_from_geometry(
-            df=window_df,
-            specs=specs,
-            source_q_g_s=rates,
-            start_time=t_start,
-            hours=window_hours,
-            cadence_minutes=args.cadence,
-        )
-    else:
-        result = run_forward_model(
-            df=window_df,
-            emission_rates_g_s=rates,
-            start_time=t_start,
-            hours=window_hours,
-            cadence_minutes=args.cadence,
-        )
+    # Run geometry forward model with observed meteorology
+    print(f"\nRunning geometry forward model ({len([v for v in source_q.values() if v>0])} active sources) ...")
+    result = run_forward_model_from_geometry(
+        df=window_df,
+        specs=specs,
+        source_q_g_s=source_q,
+        start_time=t_start,
+        hours=window_hours,
+        cadence_minutes=args.cadence,
+    )
 
-    # Build comparison table
     pred_df = pd.DataFrame(
         {sname: result.concentrations.get(sname, []) for sname in SENSORS},
         index=result.times,
@@ -190,8 +168,7 @@ def run_hindcast(args):
     print("\n--- Dispersion model predicted H2S (ppb) ---")
     print(pred_df.to_string(float_format=lambda x: f"{x:.1f}"))
 
-    # Align and compute residuals
-    obs_aligned  = obs_pivot.reindex(pred_df.index)
+    obs_aligned = obs_pivot.reindex(pred_df.index)
     resid_df = pred_df - obs_aligned
     print("\n--- Residual: predicted − observed (ppb) ---")
     print(resid_df.to_string(float_format=lambda x: f"{x:+.1f}"))
@@ -202,30 +179,34 @@ def run_hindcast(args):
     for s in SENSORS:
         print(f"  {s:20s}  bias={bias[s]:+.1f} ppb   RMSE={rmse[s]:.1f} ppb")
 
-    # Optional plot
     if args.plot:
         try:
             import matplotlib
             matplotlib.use("Agg")
             import matplotlib.pyplot as plt
+            import matplotlib.dates
 
             fig, axes = plt.subplots(len(SENSORS), 1, figsize=(10, 3 * len(SENSORS)), sharex=True)
-            fig.suptitle(f"Dispersion hindcast  {t_start.strftime('%Y-%m-%d %H:%M')} – "
-                         f"{t_end.strftime('%H:%M %Z')}", fontsize=12)
-
+            fig.suptitle(
+                f"Dispersion hindcast  {t_start.strftime('%Y-%m-%d %H:%M')} – "
+                f"{t_end.strftime('%H:%M %Z')}\n"
+                f"Q_total={sum(v for v in source_q.values() if v>0):.0f} g/s  "
+                f"(scale={args.scale:.2f})",
+                fontsize=11,
+            )
             for ax, sname in zip(axes, SENSORS):
-                obs_s = obs_aligned[sname].dropna()
+                obs_s  = obs_aligned[sname].dropna()
                 pred_s = pred_df[sname].dropna()
-                ax.step(obs_s.index, obs_s.values, where="post", label="Observed", color="steelblue", lw=1.5)
+                ax.step(obs_s.index,  obs_s.values,  where="post", label="Observed",
+                        color="steelblue", lw=1.5)
                 ax.step(pred_s.index, pred_s.values, where="post", label="Dispersion model",
                         color="tomato", lw=1.5, linestyle="--")
-                ax.axhline(30, color="orange", lw=0.8, linestyle=":")
-                ax.axhline(100, color="red", lw=0.8, linestyle=":")
+                ax.axhline(30,  color="orange", lw=0.8, linestyle=":", label="30 ppb watch")
+                ax.axhline(100, color="red",    lw=0.8, linestyle=":", label="100 ppb critical")
                 ax.set_ylabel("H₂S (ppb)")
                 ax.set_title(sname)
                 ax.legend(fontsize=8)
                 ax.grid(True, alpha=0.3)
-
             axes[-1].xaxis.set_major_formatter(
                 matplotlib.dates.DateFormatter("%H:%M", tz=tz))
             plt.tight_layout()
@@ -235,24 +216,19 @@ def run_hindcast(args):
             print(f"Plot failed: {e}")
 
 
-_DEFAULT_START = "2026-06-20 22:00"
-_DEFAULT_END   = "2026-06-21 00:00"
-
-
 def main():
-    p = argparse.ArgumentParser(description="Dispersion hindcast vs observed H2S")
+    p = argparse.ArgumentParser(description="Geometry dispersion hindcast vs observed H2S")
     p.add_argument("--start", default=_DEFAULT_START,
-                   help="Window start (local time, default: night of Jun 20 10pm)")
+                   help="Window start (local time)")
     p.add_argument("--end",   default=_DEFAULT_END,
-                   help="Window end (local time, default: Jun 21 midnight)")
+                   help="Window end (local time)")
     p.add_argument("--tz",    default="America/Los_Angeles")
     p.add_argument("--obs-bucket", default="resilentpublic",
                    help="S3 bucket for obs data")
     p.add_argument("--cadence", type=int, default=60,
-                   help="Model timestep in minutes (default: 60 = hourly)")
-    p.add_argument("--east",  type=float, default=None, help="Override east Q (g/s)")
-    p.add_argument("--west",  type=float, default=None, help="Override west Q (g/s)")
-    p.add_argument("--south", type=float, default=None, help="Override south Q (g/s)")
+                   help="Model timestep in minutes (default 60)")
+    p.add_argument("--scale", type=float, default=1.0,
+                   help="Multiply all source Q by this factor (sensitivity test)")
     p.add_argument("--plot",  default=None, help="Save comparison PNG to this path")
     args = p.parse_args()
     args.use_default_window = (args.start == _DEFAULT_START and args.end == _DEFAULT_END)
