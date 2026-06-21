@@ -177,10 +177,54 @@ def build_cascade_message(
     return "\n".join(header + body + footer)
 
 
+def _mrkdwn_section(text: str) -> dict:
+    """A section block, truncated to Slack's 3000-char text limit."""
+    if len(text) > 2990:
+        text = text[:2985] + "\n…"
+    return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
+
+
 def build_cascade_blocks(
     result: CascadeResult,
     products_df: pd.DataFrame,
     evaluated_at: pd.Timestamp,
+    image_url: str | None = None,
 ) -> list[dict]:
-    text = build_cascade_message(result, products_df, evaluated_at)
-    return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+    """Block Kit payload for the cascade report.
+
+    One section block per fired tier (never one giant block) so the consolidated
+    message can never blow Slack's 3000-char-per-section cap, plus an optional
+    NESTOR hazard-timeline image and a context footer.
+    """
+    fired = result.fired_tiers
+    labels = ", ".join(ALERT_TIERS[t]["label"] for t in fired) or "none"
+    header = "\n".join([
+        "🌊 *H2S Forecast Cascade — NESTOR / Berry Elementary School*",
+        f"Evaluated: {_fmt_time(evaluated_at)}",
+        f"Forecast run: {result.run_ts or 'n/a'}   ·   Model: {result.model_version or 'n/a'}",
+        f"Tiers firing: *{labels}*",
+    ])
+
+    blocks: list[dict] = [_mrkdwn_section(header), {"type": "divider"}]
+    for tier in fired:  # ascending: tier_1 → tier_3
+        blocks.append(_mrkdwn_section("\n".join(_TIER_LINE_BUILDERS[tier](products_df, result))))
+
+    if image_url:
+        blocks.append({
+            "type": "image",
+            "image_url": image_url,
+            "alt_text": "NESTOR-BES 24 h H2S forecast — hazard timeline and log-scale sparkline",
+        })
+
+    blocks.append({
+        "type": "context",
+        "elements": [{
+            "type": "mrkdwn",
+            "text": (
+                "Evidence variant drives triggers; Lean (L) shown for the "
+                "not-overdetermined comparison. Cutoffs are pre-validation "
+                "starting points (Phase 5 will tune them)."
+            ),
+        }],
+    })
+    return blocks

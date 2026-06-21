@@ -23,6 +23,7 @@ from h2s.constants import (
     PRODUCTS_PATH,
 )
 from h2s.defs.h2s_alert_system import _load_recent
+from h2s.predictor.visualizations import generate_forecast_vs_measured_chart
 
 from .logic import (
     evaluate_yellow,
@@ -78,6 +79,26 @@ def _load_recent_products(s3, start, end, max_runs: int = 16) -> pd.DataFrame | 
     return pd.concat(frames, ignore_index=True) if frames else None
 
 
+def _render_closeout_chart(s3, fva: pd.DataFrame, now: pd.Timestamp) -> str | None:
+    """Render+upload the forecast-vs-measured close-out chart; return its URL or None.
+
+    Best-effort: any failure (including no overlapping forecast) returns None so
+    the close-out still posts text-only.
+    """
+    if fva is None or fva.empty:
+        return None
+    try:
+        env_label = os.environ.get("ENV_LABEL", "").upper()
+        data = generate_forecast_vs_measured_chart(fva, env_label=env_label).getvalue()
+        path = f"{ALERT_PERF_ARCHIVE_PATH}/{now.strftime('%Y-%m-%d')}/{now.strftime('%Y-%m-%d_%H%M')}_performance.png"
+        latest = ALERT_PERF_LATEST_PATH.rsplit(".", 1)[0] + ".png"
+        s3.putFile(data, path=path, content_type="image/png")
+        s3.putFile(data, path=latest, content_type="image/png")
+        return s3.publicUrl(path=path, bucket=s3.S3_BUCKET)
+    except Exception:  # noqa: BLE001 — chart is best-effort
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Dispatcher asset
 # ---------------------------------------------------------------------------
@@ -87,6 +108,7 @@ class PerformanceConfig(dg.Config):
     onset_msg: str = ""
     send_close: bool = False
     close_msg: str = ""
+    close_chart_url: str = ""
     archive_json: str = ""
 
 
@@ -112,7 +134,14 @@ def h2s_alert_performance_dispatcher(
 
     if config.send_close and config.close_msg:
         context.log.info("Sending Alert-Performance close-out.")
-        client.chat_postMessage(channel=channel, text=f"```{config.close_msg}```")
+        blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": f"```{config.close_msg}```"}}]
+        if config.close_chart_url:
+            blocks.append({
+                "type": "image",
+                "image_url": config.close_chart_url,
+                "alt_text": "Forecast vs measured H2S over the event window",
+            })
+        client.chat_postMessage(channel=channel, text=f"```{config.close_msg}```", blocks=blocks)
         if config.archive_json:
             ts = datetime.now(timezone.utc)
             path = f"{ALERT_PERF_ARCHIVE_PATH}/{ts.strftime('%Y-%m-%d')}/{ts.strftime('%Y-%m-%d_%H%M')}_performance.json"
@@ -157,6 +186,7 @@ def h2s_alert_performance_sensor(context: dg.SensorEvaluationContext):
 
     onset_msg = ""
     close_msg = ""
+    close_chart_url = ""
     archive_json = ""
 
     if verdict.send_onset:
@@ -170,6 +200,7 @@ def h2s_alert_performance_sensor(context: dg.SensorEvaluationContext):
         fva = forecast_vs_actual(products, df, event_start, event_end)
         summary = performance_summary(fva)
         close_msg = build_closeout_message(verdict.event_df, ha, fva, summary, verdict.current_ppb or 0.0)
+        close_chart_url = _render_closeout_chart(s3, fva, now) or ""
         archive_json = json.dumps({
             "generated_at": now.isoformat(),
             "event_start": str(event_start),
@@ -197,6 +228,7 @@ def h2s_alert_performance_sensor(context: dg.SensorEvaluationContext):
                         "onset_msg": onset_msg,
                         "send_close": verdict.send_close,
                         "close_msg": close_msg,
+                        "close_chart_url": close_chart_url,
                         "archive_json": archive_json,
                     }
                 }

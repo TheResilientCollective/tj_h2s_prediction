@@ -125,6 +125,20 @@ def defs():
         forecast_validation_schedule,
     )
 
+    # Import daily forecast digest (always-on situational awareness) — Deliverable B
+    from h2s.defs.forecast_digest import (
+        forecast_digest,
+        forecast_digest_job,
+        forecast_digest_schedule,
+    )
+
+    # Import forecast skill scorecard (Slack report off the skill curves) — Deliverable C
+    from h2s.defs.forecast_skill_scorecard import (
+        forecast_skill_scorecard,
+        forecast_skill_scorecard_job,
+        forecast_skill_scorecard_schedule,
+    )
+
     # Import station forecast analysis pipeline assets
     from h2s.defs.h2s_daily_pipeline import (
         multi_station_model_artifacts,
@@ -258,6 +272,9 @@ def defs():
             # Forecast Validation Store + Accuracy Reporting (Phase 5)
             forecast_validation_store,
             forecast_skill_report,
+            forecast_skill_scorecard,
+            # Daily forecast digest (all-station situational awareness)
+            forecast_digest,
             # Forecast Cascade Pre-Alert (Tiers 1–3, product-probability-driven)
             cascade_alert_dispatcher,
             # Observed >10 ppb Alert-Performance machine (yellow tier)
@@ -300,6 +317,10 @@ def defs():
             apcd_sensor_watch_job,
             # Forecast cascade pre-alert job (Tiers 1–3)
             cascade_alerts_job,
+            # Daily forecast digest job (Deliverable B)
+            forecast_digest_job,
+            # Forecast skill scorecard job (Deliverable C)
+            forecast_skill_scorecard_job,
             # Observed >10 ppb Alert-Performance job (yellow tier)
             h2s_alert_performance_job,
             # Validation jobs
@@ -324,6 +345,10 @@ def defs():
             daily_station_validation_schedule,
             # Forecast cascade pre-alert schedule
             cascade_alerts_schedule,
+            # Daily forecast digest schedule (Deliverable B)
+            forecast_digest_schedule,
+            # Weekly forecast skill scorecard schedule (Deliverable C)
+            forecast_skill_scorecard_schedule,
             # Walk-forward backfill schedule
             station_backfill_schedule,
         ],
