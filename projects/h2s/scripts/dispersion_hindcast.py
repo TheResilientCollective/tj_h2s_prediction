@@ -112,15 +112,39 @@ def run_hindcast(args):
     print(f"Loading obs data from {args.obs_bucket}/{OBS_DATA_PATH} ...")
     url = s3.publicUrl(OBS_DATA_PATH, bucket=args.obs_bucket)
     df = pd.read_parquet(url)
-    df["time"] = pd.to_datetime(df["time"], utc=True).dt.tz_convert(tz)
-    print(f"  {len(df)} total rows, columns: {list(df.columns)}")
 
-    # Filter to window (with a small buffer so the model can find met at t_start)
+    # Handle timezone: parquet may store as UTC, tz-naive, or already local.
+    raw_time = pd.to_datetime(df["time"])
+    if raw_time.dt.tz is None:
+        # Timezone-naive — assume UTC
+        df["time"] = raw_time.dt.tz_localize("UTC").dt.tz_convert(tz)
+    else:
+        df["time"] = raw_time.dt.tz_convert(tz)
+
+    t_min = df["time"].min()
+    t_max = df["time"].max()
+    print(f"  {len(df)} rows | range: {t_min}  →  {t_max}")
+
+    # If default window was used and lies outside the data, shift to the last 2h
+    if args.use_default_window and t_max < t_start:
+        t_end   = t_max.ceil("h")
+        t_start = t_end - pd.Timedelta(hours=2)
+        window_hours = 2.0
+        print(f"  Requested window is beyond data end — shifting to: {t_start}  →  {t_end}")
+
+    # Filter to window
     window_df = df[(df["time"] >= t_start) & (df["time"] <= t_end)].copy()
-    print(f"  {len(window_df)} rows in window")
+    print(f"  {len(window_df)} rows in window [{t_start}  →  {t_end}]")
 
     if window_df.empty:
-        print("ERROR: No obs data in the requested window. Check --start/--end and --obs-bucket.")
+        # Show the last available timestamps to help user pick a valid window
+        print("\nNo data in the requested window.")
+        print("Last 10 timestamps available in the dataset:")
+        print(df["time"].drop_duplicates().sort_values().tail(10).to_string())
+        print("\nRe-run with e.g.:")
+        last = df["time"].max().floor("h")
+        print(f"  --start \"{(last - pd.Timedelta(hours=2)).strftime('%Y-%m-%d %H:%M')}\" "
+              f"--end \"{last.strftime('%Y-%m-%d %H:%M')}\"")
         sys.exit(1)
 
     # Show actual H2S in window
@@ -135,7 +159,7 @@ def run_hindcast(args):
     # Load emission rates
     rates, use_geometry = load_emission_rates(s3, args)
 
-    # Run forward model
+    # Run forward model using the obs met over the window
     print(f"\nRunning {'geometry' if use_geometry else '3-zone'} forward model ...")
     if use_geometry:
         specs = load_source_geometry()
@@ -211,12 +235,16 @@ def run_hindcast(args):
             print(f"Plot failed: {e}")
 
 
+_DEFAULT_START = "2026-06-20 22:00"
+_DEFAULT_END   = "2026-06-21 00:00"
+
+
 def main():
     p = argparse.ArgumentParser(description="Dispersion hindcast vs observed H2S")
-    p.add_argument("--start", default="2026-06-21 22:00",
-                   help="Window start (local time, default: last night 10pm)")
-    p.add_argument("--end",   default="2026-06-22 00:00",
-                   help="Window end (local time, default: last night midnight)")
+    p.add_argument("--start", default=_DEFAULT_START,
+                   help="Window start (local time, default: night of Jun 20 10pm)")
+    p.add_argument("--end",   default=_DEFAULT_END,
+                   help="Window end (local time, default: Jun 21 midnight)")
     p.add_argument("--tz",    default="America/Los_Angeles")
     p.add_argument("--obs-bucket", default="resilentpublic",
                    help="S3 bucket for obs data")
@@ -227,6 +255,7 @@ def main():
     p.add_argument("--south", type=float, default=None, help="Override south Q (g/s)")
     p.add_argument("--plot",  default=None, help="Save comparison PNG to this path")
     args = p.parse_args()
+    args.use_default_window = (args.start == _DEFAULT_START and args.end == _DEFAULT_END)
     run_hindcast(args)
 
 
