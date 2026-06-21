@@ -601,14 +601,22 @@ def hysplit_controls_generation(
     log = context.log
     s3 = context.resources.s3
 
-    # Load emission rates
+    # Load emission rates; prefer geometry per-source rates when available
+    emission_rates: dict = dict(DISPERSION_DEFAULT_EMISSION_RATES_GS)
+    geom_specs = None
+    geom_source_q: dict[str, float] = {}
     try:
         rates_bytes = s3.getFile(EMISSION_RATES_PATH)
         rates_data = json.loads(rates_bytes)
         emission_rates = rates_data["emission_rates_g_s"]
+        geom_by_source = rates_data.get("emission_rates_by_geometry_g_s", {})
+        if geom_by_source and config.mode == "forward_disp":
+            geom_source_q = {k: float(v) for k, v in geom_by_source.items()}
+            geom_specs = load_source_geometry()
+            log.info(f"HYSPLIT forward bundle: geometry mode ({len(geom_source_q)} sources, "
+                     f"Q_total={sum(geom_source_q.values()):.1f} g/s)")
     except Exception as e:
         log.warning(f"Could not load emission rates ({e}) — using calibrated defaults")
-        emission_rates = dict(DISPERSION_DEFAULT_EMISSION_RATES_GS)
 
     run_tag = pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M")
 
@@ -621,7 +629,8 @@ def hysplit_controls_generation(
 
     start_utc = pd.Timestamp.utcnow().isoformat() if config.mode == "forward_disp" else None
 
-    log.info(f"Generating HYSPLIT bundle: mode={config.mode}, met_dir={config.met_dir}")
+    log.info(f"Generating HYSPLIT bundle: mode={config.mode}, met_dir={config.met_dir}, "
+             f"geometry={'yes' if geom_specs else 'no'}")
     zip_bytes = generate_hysplit_bundle(
         mode=config.mode,
         df=df,
@@ -632,6 +641,8 @@ def hysplit_controls_generation(
         h2s_threshold=config.h2s_threshold_ppb,
         date_start=config.date_start,
         date_end=config.date_end,
+        specs=geom_specs,
+        source_q_g_s=geom_source_q if geom_source_q else None,
     )
 
     # Count CONTROL files in zip for metadata
@@ -658,14 +669,23 @@ def hysplit_controls_generation(
         "Or submit to NOAA READY server via email."
     )
 
-    return dg.MaterializeResult(metadata={
+    meta: dict = {
         "mode":              dg.MetadataValue.text(config.mode),
         "n_control_files":   dg.MetadataValue.int(n_control),
         "zip_size_bytes":    dg.MetadataValue.int(len(zip_bytes)),
         "s3_versioned_path": dg.MetadataValue.text(versioned_path),
         "s3_latest_path":    dg.MetadataValue.text(latest_path),
         "run_tag":           dg.MetadataValue.text(run_tag),
-    })
+        "geometry_mode":     dg.MetadataValue.bool(geom_specs is not None),
+    }
+    if geom_specs is not None:
+        n_sub = sum(len(spec.sub_points) for spec in geom_specs.values()
+                    if geom_source_q.get(spec.source_id, 0.0) > 0.0)
+        meta["n_sub_points"] = dg.MetadataValue.int(n_sub)
+        meta["n_active_sources"] = dg.MetadataValue.int(
+            sum(1 for v in geom_source_q.values() if v > 0.0)
+        )
+    return dg.MaterializeResult(metadata=meta)
 
 
 # ==============================================================================
