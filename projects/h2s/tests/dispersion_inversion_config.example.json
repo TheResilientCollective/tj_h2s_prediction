@@ -1,0 +1,15 @@
+{
+  "ops": {
+    "h2s__emission_rate_inversion": {
+      "config": {
+        "use_geometry_nnls": true,
+        "fit_sensor_bias": true,
+        "require_anchor_sensor": "NESTOR - BES",
+        "anchor_wd_gate": true,
+        "date_start": "2026-02-01",
+        "date_end": "2026-04-01",
+        "h2s_threshold_ppb": 30.0
+      }
+    }
+  }
+}

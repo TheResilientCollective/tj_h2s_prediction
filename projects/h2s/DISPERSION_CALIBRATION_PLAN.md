@@ -83,6 +83,21 @@ When `use_geometry_nnls=True`, `emission_rates.json` gains `emission_rates_by_ge
 
 ## 3. Calibration runbook
 
+> **Passing config:** the examples below use `--config-json '<inline JSON>'`, but
+> inline JSON is easy to break (every key/string must stay double-quoted, and the
+> shell splits on unquoted whitespace). For anything non-trivial prefer a config
+> file with `--config <path>`:
+>
+> ```bash
+> uv run dg launch --job dispersion_inversion_job \
+>   --config tests/dispersion_inversion_config.example.json
+> ```
+>
+> A ready-to-edit example (geometry NNLS + sensor bias + NESTOR anchor) lives at
+> `tests/dispersion_inversion_config.example.json`. Copy it, tweak the dates /
+> flags, and pass the path. `dg launch` accepts JSON or YAML config files via
+> `--config`.
+
 ### Step 1 — Baseline run (no filters)
 
 ```bash
