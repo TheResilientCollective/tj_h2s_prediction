@@ -149,6 +149,10 @@ class ForwardForecastConfig(dg.Config):
     obs_bucket: str = "resilentpublic"
 
 
+class DispersionAlertConfig(dg.Config):
+    slack_channel: str = ""   # overrides slack resource channel when non-empty
+
+
 class EmissionInversionConfig(dg.Config):
     """Geometry-aware NNLS inversion options for emission_rate_inversion.
 
@@ -1334,7 +1338,10 @@ def gaussian_forward_forecast_detailed(
         dg.AssetKey(["h2s", "gaussian_forward_forecast_detailed"]),
     ],
 )
-def dispersion_alert_check(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
+def dispersion_alert_check(
+    context: dg.AssetExecutionContext,
+    config: DispersionAlertConfig,
+) -> dg.MaterializeResult:
     log = context.log
     s3 = context.resources.s3
 
@@ -1444,11 +1451,13 @@ def dispersion_alert_check(context: dg.AssetExecutionContext) -> dg.MaterializeR
         try:
             slack = context.resources.slack
             client = slack.get_client()
-            client.chat_postMessage(channel=slack.channel, text=msg)
-            log.info(f"Slack alert sent: {tier_label}")
+            channel = config.slack_channel or slack.channel
+            client.chat_postMessage(channel=channel, text=msg)
+            log.info(f"Slack alert sent to {channel}: {tier_label}")
         except Exception as e:
             log.error(f"Slack send failed: {e}")
 
+    slack_channel_used = config.slack_channel or context.resources.slack.channel
     return dg.MaterializeResult(metadata={
         "alert_count":      dg.MetadataValue.int(len(alerts_triggered)),
         "max_tier":         dg.MetadataValue.text(alerts_triggered[0]["tier"] if alerts_triggered else "none"),
@@ -1457,6 +1466,7 @@ def dispersion_alert_check(context: dg.AssetExecutionContext) -> dg.MaterializeR
         ),
         "lookahead_hours":  dg.MetadataValue.int(lookahead_hours),
         "models_checked":   dg.MetadataValue.text(", ".join(forecasts.keys())),
+        "slack_channel":    dg.MetadataValue.text(slack_channel_used),
     })
 
 # ==============================================================================
