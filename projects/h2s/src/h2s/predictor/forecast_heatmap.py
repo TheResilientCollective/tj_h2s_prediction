@@ -73,15 +73,65 @@ def _station_frame(products_df: pd.DataFrame, station: str, variant: str) -> pd.
 
 
 def _hour_axis(products_df: pd.DataFrame, variant: str):
-    """Shared lead-hour columns + their hour-of-day labels across stations."""
+    """Shared lead-hour columns + their hour-of-day labels + target times."""
     w = products_df[products_df["variant"] == variant]
     leads = sorted(int(x) for x in w["lead_hour"].dropna().unique())
-    labels = []
+    labels, times = [], []
     for lead in leads:
         row = w[w["lead_hour"] == lead]
-        ts = pd.to_datetime(row["time"].iloc[0], utc=True, errors="coerce") if len(row) else None
-        labels.append(f"{ts.hour:02d}" if ts is not None and not pd.isna(ts) else f"+{lead}")
-    return leads, labels
+        ts = pd.to_datetime(row["time"].iloc[0], utc=True, errors="coerce") if len(row) else pd.NaT
+        labels.append(f"{ts.hour:02d}" if pd.notna(ts) else f"+{lead}")
+        times.append(ts)
+    return leads, labels, times
+
+
+def _day_bands(times: list):
+    """Group consecutive columns sharing a calendar date (UTC).
+
+    Returns (start_col, end_col_inclusive, "Mon 06-23") tuples — the text-day
+    labels drawn beneath the hour axis so multi-day forecasts stay readable.
+    """
+    bands: list = []
+    start = last = None
+    cur_day = None
+    for c, ts in enumerate(times):
+        if pd.isna(ts):
+            continue
+        day = ts.normalize()
+        if start is None:
+            start, cur_day, last = c, day, c
+        elif day != cur_day:
+            bands.append((start, last, times[start].strftime("%a %m-%d")))
+            start, cur_day, last = c, day, c
+        else:
+            last = c
+    if start is not None:
+        bands.append((start, last, times[start].strftime("%a %m-%d")))
+    return bands
+
+
+def _date_caption(times: list) -> str:
+    """Weekday + date span for the title, e.g. 'Fri 2026-06-23' or a range."""
+    valid = [t for t in times if pd.notna(t)]
+    if not valid:
+        return ""
+    first, last = valid[0], valid[-1]
+    if first.normalize() == last.normalize():
+        return first.strftime("%a %Y-%m-%d")
+    return f"{first.strftime('%a %Y-%m-%d')} → {last.strftime('%a %Y-%m-%d')}"
+
+
+def _draw_day_bands(ax, times: list) -> None:
+    """Draw vertical day separators + centered text-day labels in a header band
+    just above the grid (x in data coords, y in axes fraction)."""
+    bands = _day_bands(times)
+    for start, end, label in bands:
+        ax.text((start + end) / 2.0, 1.015, label, transform=ax.get_xaxis_transform(),
+                ha="center", va="bottom", fontsize=7.5, fontweight="bold",
+                color="#34495e", clip_on=False)
+    # Heavier separators where the calendar day rolls over.
+    for start, _end, _label in bands[1:]:
+        ax.axvline(start - 0.5, color="#34495e", linewidth=1.6)
 
 
 def _empty(message: str) -> BytesIO:
@@ -111,7 +161,7 @@ def generate_category_heatmap(
     if not stations:
         return _empty(f"No forecast rows for variant '{variant}'")
 
-    leads, hour_labels = _hour_axis(products_df, variant)
+    leads, hour_labels, times = _hour_axis(products_df, variant)
     n_rows, n_cols = len(stations), len(leads)
 
     codes = np.full((n_rows, n_cols), _CAT_CODE[CATEGORY_UNKNOWN], dtype=float)
@@ -148,12 +198,15 @@ def generate_category_heatmap(
     ax.set_yticks(np.arange(-0.5, n_rows, 1), minor=True)
     ax.grid(which="minor", color="white", linewidth=1.4)
     ax.tick_params(which="minor", length=0)
+    _draw_day_bands(ax, times)
 
+    caption = _date_caption(times)
+    date_line = f"\n{caption}" if caption else ""
     label = f" [{env_label}]" if env_label else ""
     ax.set_title(
-        f"H2S Hazard Heatmap — {variant.capitalize()}{label}\n"
+        f"H2S Hazard Heatmap — {variant.capitalize()}{label}{date_line}\n"
         "green <5  ·  yellow 5–10  ·  yellow-high 10–30 (smell)  ·  orange ≥30 ppb",
-        fontsize=11, fontweight="bold", pad=10,
+        fontsize=11, fontweight="bold", pad=18,
     )
     plt.tight_layout()
     buf = BytesIO()
@@ -179,7 +232,7 @@ def generate_probability_heatmap(
     if not stations:
         return _empty(f"No forecast rows for variant '{variant}'")
 
-    leads, hour_labels = _hour_axis(products_df, variant)
+    leads, hour_labels, times = _hour_axis(products_df, variant)
     n_cols = len(leads)
     row_specs = [(s, col, lbl) for s in stations for col, lbl in _PROB_ROWS]
     n_rows = len(row_specs)
@@ -222,12 +275,15 @@ def generate_probability_heatmap(
     ax.tick_params(which="minor", length=0)
     for i in range(len(_PROB_ROWS), n_rows, len(_PROB_ROWS)):
         ax.axhline(i - 0.5, color="#34495e", linewidth=1.8)
+    _draw_day_bands(ax, times)
 
+    caption = _date_caption(times)
+    date_line = f"\n{caption}" if caption else ""
     label = f" [{env_label}]" if env_label else ""
     ax.set_title(
-        f"H2S Exceedance-Probability Heatmap (%) — {variant.capitalize()}{label}\n"
+        f"H2S Exceedance-Probability Heatmap (%) — {variant.capitalize()}{label}{date_line}\n"
         "per station: P(>5) · P(>10, smell) · P(>30, hazard)",
-        fontsize=11, fontweight="bold", pad=10,
+        fontsize=11, fontweight="bold", pad=18,
     )
     plt.tight_layout()
     buf = BytesIO()
