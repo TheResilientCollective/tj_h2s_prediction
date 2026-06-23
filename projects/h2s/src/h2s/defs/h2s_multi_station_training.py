@@ -863,8 +863,19 @@ def station_model_promotion(context: dg.AssetExecutionContext) -> dict:
     # Server-side copy each artifact from the archive to the production
     # prefix (no download/upload round trip; content-type preserved). A
     # missing source raises → refuse the partial promotion.
+    #
+    # Model pickles + training_report.json must always exist. The per-variant
+    # feature schemas (features_{variant}.json) are written separately by the
+    # production training archive but NOT by backfill archives — there the
+    # feature lists live inside training_report.json. So copy them when present
+    # and otherwise reconstruct them from the training report, ensuring
+    # production always ends up with both files (the daily predictor reads them).
+    feature_names = {f"features_{variant}.json" for variant in _VARIANTS}
+    required = [n for n in _station_artifact_names()
+                if n not in feature_names] + ["training_report.json"]
+
     promoted: list[str] = []
-    for name in _station_artifact_names() + ["training_report.json"]:
+    for name in required:
         try:
             s3.copyFile(f"{archive_base}/{name}", f"{prod_base}/{name}")
         except Exception as e:
@@ -873,6 +884,29 @@ def station_model_promotion(context: dg.AssetExecutionContext) -> dict:
             )
         promoted.append(name)
         context.log.info(f"  ✓ {name}")
+
+    # Feature schemas: copy when present, else reconstruct from the training
+    # report's features[variant] (backfill archive layout).
+    report: dict = {}
+    for variant in _VARIANTS:
+        name = f"features_{variant}.json"
+        try:
+            s3.copyFile(f"{archive_base}/{name}", f"{prod_base}/{name}")
+            context.log.info(f"  ✓ {name}")
+        except Exception:
+            if not report:
+                report = json.loads(s3.getFile(f"{archive_base}/training_report.json"))
+            features = (report.get("features") or {}).get(variant)
+            if not features:
+                raise dg.Failure(
+                    f"Archive {version_tag} has neither {name} nor "
+                    f"training_report.json features[{variant}] — cannot promote."
+                )
+            s3.putFile(json.dumps(features, indent=2).encode('utf-8'),
+                       f"{prod_base}/{name}",
+                       bucket=s3.S3_BUCKET, content_type='application/json')
+            context.log.info(f"  ✓ {name} (reconstructed from training_report.json)")
+        promoted.append(name)
 
     # Rebuild production deployment metadata around the promoted version
     variants_meta: dict[str, dict] = {}
