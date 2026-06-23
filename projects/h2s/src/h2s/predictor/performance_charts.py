@@ -31,6 +31,7 @@ from h2s.constants import (  # noqa: E402
     H2S_THRESHOLD_MED,
 )
 from h2s.forecasting.performance_report import VERDICT_COST  # noqa: E402
+from h2s.utils.chart_meta import stamp_generated  # noqa: E402
 
 # Verdict → colour (green=good … red=dangerous), ordered best-to-worst.
 _VERDICT_ORDER = [
@@ -53,6 +54,7 @@ def _empty(message: str) -> BytesIO:
     fig, ax = plt.subplots(figsize=(9, 2.4))
     ax.text(0.5, 0.5, message, ha="center", va="center", transform=ax.transAxes)
     ax.set_axis_off()
+    stamp_generated(fig)
     buf = BytesIO()
     plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
     buf.seek(0)
@@ -61,6 +63,7 @@ def _empty(message: str) -> BytesIO:
 
 
 def _finish(fig) -> BytesIO:
+    stamp_generated(fig)
     buf = BytesIO()
     fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
     buf.seek(0)

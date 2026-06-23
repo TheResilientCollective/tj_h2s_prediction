@@ -52,6 +52,7 @@ from h2s.constants import (
     TRAINING_SNAPSHOTS_PATH,
 )
 from h2s.training.calibration_eval import recall_at_threshold, spearman_rank
+from h2s.utils.chart_meta import stamp_generated
 from h2s.training.multi_station_trainer import (
     TRAIN_FRACTION,
     eval_classifier,
@@ -521,6 +522,7 @@ _C = {
 
 def _fig_to_b64(fig) -> str:
     buf = io.BytesIO()
+    stamp_generated(fig)
     fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
     plt.close(fig)
     buf.seek(0)

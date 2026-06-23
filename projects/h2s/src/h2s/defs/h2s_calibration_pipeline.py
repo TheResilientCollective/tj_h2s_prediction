@@ -94,6 +94,7 @@ from h2s.dispersion.lagrangian import (
     load_met,
     run_residence_time_particles,
 )
+from h2s.utils.chart_meta import stamp_generated
 
 
 # ==============================================================================
@@ -1187,6 +1188,7 @@ def calibration_viz(
     ]
     ax.legend(handles=legend_elts, loc="upper left", fontsize=9)
 
+    stamp_generated(fig)
     buf = _io.BytesIO()
     fig.savefig(buf, format="png", dpi=130, bbox_inches="tight")
     plt.close(fig)
@@ -1235,6 +1237,7 @@ def calibration_viz(
     ax.legend(loc="upper left", fontsize=9)
     ax.set_aspect("equal")
 
+    stamp_generated(fig)
     buf = _io.BytesIO()
     fig.savefig(buf, format="png", dpi=130, bbox_inches="tight")
     plt.close(fig)
@@ -1283,6 +1286,7 @@ def calibration_viz(
     ax.legend(loc="upper left", fontsize=9)
     ax.set_aspect("equal")
 
+    stamp_generated(fig)
     buf = _io.BytesIO()
     fig.savefig(buf, format="png", dpi=130, bbox_inches="tight")
     plt.close(fig)
@@ -1315,6 +1319,7 @@ def calibration_viz(
     ax.grid(True, axis="x", alpha=0.3)
     ax.legend(loc="upper right", fontsize=9)
 
+    stamp_generated(fig)
     buf = _io.BytesIO()
     fig.savefig(buf, format="png", dpi=130, bbox_inches="tight")
     plt.close(fig)

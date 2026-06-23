@@ -13,6 +13,8 @@ import pandas as pd
 import seaborn as sns
 from sklearn.metrics import confusion_matrix, balanced_accuracy_score
 
+from h2s.utils.chart_meta import stamp_generated
+
 
 def generate_feature_importance(model, prep_info: Dict, top_n: int = 15, model_name: str = "") -> BytesIO:
     """Generate feature importance plot as BytesIO.
@@ -62,6 +64,7 @@ def generate_feature_importance(model, prep_info: Dict, top_n: int = 15, model_n
     plt.tight_layout()
 
     # Save to BytesIO
+    stamp_generated(fig)
     buf = BytesIO()
     plt.savefig(buf, format='png', dpi=300, bbox_inches='tight')
     buf.seek(0)
@@ -87,6 +90,7 @@ def generate_confusion_matrix(predictions: pd.DataFrame, actuals: pd.DataFrame) 
         # Return empty plot if no matching data
         fig, ax = plt.subplots(figsize=(8, 6))
         ax.text(0.5, 0.5, 'No matching timestamps', ha='center', va='center')
+        stamp_generated(fig)
         buf = BytesIO()
         plt.savefig(buf, format='png', dpi=150)
         buf.seek(0)
@@ -119,6 +123,7 @@ def generate_confusion_matrix(predictions: pd.DataFrame, actuals: pd.DataFrame) 
     plt.tight_layout()
 
     # Save to BytesIO
+    stamp_generated(fig)
     buf = BytesIO()
     plt.savefig(buf, format='png', dpi=300, bbox_inches='tight')
     buf.seek(0)
@@ -148,6 +153,7 @@ def generate_confusion_matrix_with_metrics(predictions: pd.DataFrame, actuals: p
         ax.text(0.5, 0.5, 'No matching timestamps between predictions and actuals',
                 ha='center', va='center', fontsize=14)
         ax.axis('off')
+        stamp_generated(fig)
         buf = BytesIO()
         plt.savefig(buf, format='png', dpi=300, bbox_inches='tight')
         buf.seek(0)
@@ -166,6 +172,7 @@ def generate_confusion_matrix_with_metrics(predictions: pd.DataFrame, actuals: p
         ax.text(0.5, 0.5, 'No H2S measurements available for comparison',
                 ha='center', va='center', fontsize=14)
         ax.axis('off')
+        stamp_generated(fig)
         buf = BytesIO()
         plt.savefig(buf, format='png', dpi=300, bbox_inches='tight')
         buf.seek(0)
@@ -214,6 +221,7 @@ def generate_confusion_matrix_with_metrics(predictions: pd.DataFrame, actuals: p
     plt.tight_layout()
 
     # Save to BytesIO
+    stamp_generated(fig)
     buf = BytesIO()
     plt.savefig(buf, format='png', dpi=300, bbox_inches='tight')
     buf.seek(0)
@@ -250,6 +258,7 @@ def generate_model_comparison(predictions: pd.DataFrame, actuals: pd.DataFrame,
         ax.text(0.5, 0.5, 'No matching timestamps between predictions and actuals',
                 ha='center', va='center', fontsize=14)
         ax.axis('off')
+        stamp_generated(fig)
         buf = BytesIO()
         plt.savefig(buf, format='png', dpi=300, bbox_inches='tight')
         buf.seek(0)
@@ -268,6 +277,7 @@ def generate_model_comparison(predictions: pd.DataFrame, actuals: pd.DataFrame,
         ax.text(0.5, 0.5, 'No H2S measurements available for comparison',
                 ha='center', va='center', fontsize=14)
         ax.axis('off')
+        stamp_generated(fig)
         buf = BytesIO()
         plt.savefig(buf, format='png', dpi=300, bbox_inches='tight')
         buf.seek(0)
@@ -355,6 +365,7 @@ def generate_model_comparison(predictions: pd.DataFrame, actuals: pd.DataFrame,
     plt.tight_layout()
 
     # Save to BytesIO
+    stamp_generated(fig)
     buf = BytesIO()
     plt.savefig(buf, format='png', dpi=300, bbox_inches='tight')
     buf.seek(0)
@@ -409,6 +420,7 @@ def generate_cross_correlation_viz(
         ax.text(0.5, 0.5, f"Column '{h2s_col}' not found — cross-correlation unavailable",
                 ha="center", va="center", fontsize=12)
         ax.axis("off")
+        stamp_generated(fig)
         buf = BytesIO()
         plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
         buf.seek(0)
@@ -423,6 +435,7 @@ def generate_cross_correlation_viz(
         ax.text(0.5, 0.5, "No environmental feature columns found for cross-correlation",
                 ha="center", va="center", fontsize=12)
         ax.axis("off")
+        stamp_generated(fig)
         buf = BytesIO()
         plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
         buf.seek(0)
@@ -520,6 +533,7 @@ def generate_cross_correlation_viz(
 
     plt.tight_layout()
 
+    stamp_generated(fig)
     buf = BytesIO()
     plt.savefig(buf, format="png", dpi=300, bbox_inches="tight")
     buf.seek(0)
@@ -654,6 +668,7 @@ def generate_prediction_timeline(predictions: pd.DataFrame, raw_environmental_da
     plt.tight_layout()
 
     # Save to BytesIO
+    stamp_generated(fig)
     buf = BytesIO()
     plt.savefig(buf, format='png', dpi=300, bbox_inches='tight')
     buf.seek(0)
@@ -782,6 +797,7 @@ def generate_cell_comparison_png(
         ax.text(0.5, 0.5, 'No data available for cell comparison',
                 ha='center', va='center', fontsize=14)
         ax.axis('off')
+        stamp_generated(fig)
         buf = BytesIO()
         plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
         buf.seek(0)
@@ -849,6 +865,7 @@ def generate_cell_comparison_png(
 
     plt.tight_layout()
 
+    stamp_generated(fig)
     buf = BytesIO()
     plt.savefig(buf, format='png', dpi=200, bbox_inches='tight')
     buf.seek(0)
@@ -1042,6 +1059,7 @@ def generate_h2s_line_chart(
             fig, ax = plt.subplots(figsize=(12, 4))
             ax.text(0.5, 0.5, 'No H2S column found', ha='center', va='center', fontsize=14)
             ax.axis('off')
+            stamp_generated(fig)
             buf = BytesIO()
             plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
             buf.seek(0)
@@ -1102,6 +1120,7 @@ def generate_h2s_line_chart(
     fig.suptitle('Actual H2S Measurements', fontsize=13, fontweight='bold', y=1.01)
     plt.tight_layout()
 
+    stamp_generated(fig)
     buf = BytesIO()
     plt.savefig(buf, format='png', dpi=200, bbox_inches='tight')
     buf.seek(0)
@@ -1189,6 +1208,7 @@ def generate_daily_slack_chart(station_forecasts: pd.DataFrame, env_label: str =
         plt.setp(axes[-1].xaxis.get_majorticklabels(), fontsize=7)
 
     plt.tight_layout()
+    stamp_generated(fig)
     buf = BytesIO()
     plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
     buf.seek(0)
@@ -1301,6 +1321,7 @@ def generate_forecast_slack_chart(predictions: pd.DataFrame, env_label: str = ""
 
     plt.tight_layout()
 
+    stamp_generated(fig)
     buf = BytesIO()
     plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
     buf.seek(0)
@@ -1439,6 +1460,7 @@ def generate_forecast_hazard_chart(
         _draw_hazard_station(axes[0], axes[1], sdf, title, yscale=yscale)
 
     plt.tight_layout()
+    stamp_generated(fig)
     buf = BytesIO()
     plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
     buf.seek(0)
@@ -1494,6 +1516,7 @@ def generate_skill_by_lead_chart(curves_df: pd.DataFrame, *, env_label: str = ""
         axes[-1].set_xticks(range(2, 25, 2))
 
     plt.tight_layout()
+    stamp_generated(fig)
     buf = BytesIO()
     plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
     buf.seek(0)
@@ -1555,6 +1578,7 @@ def generate_forecast_vs_measured_chart(fva: pd.DataFrame, *, env_label: str = "
         plt.setp(axes[1].xaxis.get_majorticklabels(), fontsize=7)
 
     plt.tight_layout()
+    stamp_generated(fig)
     buf = BytesIO()
     plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
     buf.seek(0)
@@ -1583,6 +1607,7 @@ def generate_forecast_digest_chart(
         ax.text(0.5, 0.5, "No forecast rows available", ha="center", va="center",
                 transform=ax.transAxes)
         ax.set_axis_off()
+        stamp_generated(fig)
         buf = BytesIO()
         plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
         buf.seek(0)
@@ -1604,6 +1629,7 @@ def generate_forecast_digest_chart(
         strip_ax.set_facecolor("#ffffff")
         _draw_hazard_station(line_ax, strip_ax, sdf, station, yscale=yscale)
 
+    stamp_generated(fig)
     buf = BytesIO()
     plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
     buf.seek(0)

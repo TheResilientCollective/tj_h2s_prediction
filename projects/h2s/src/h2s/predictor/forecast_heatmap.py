@@ -33,6 +33,7 @@ from h2s.constants import (  # noqa: E402
     STATIONS,
     h2s_category,
 )
+from h2s.utils.chart_meta import stamp_generated  # noqa: E402
 
 # Category → integer code for imshow (worst = highest). Unknown maps last.
 _CAT_CODE = {cat: i for i, cat in enumerate(CATEGORY_ORDER)}
@@ -138,6 +139,7 @@ def _empty(message: str) -> BytesIO:
     fig, ax = plt.subplots(figsize=(10, 2.2))
     ax.text(0.5, 0.5, message, ha="center", va="center", transform=ax.transAxes)
     ax.set_axis_off()
+    stamp_generated(fig)
     buf = BytesIO()
     plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
     buf.seek(0)
@@ -209,6 +211,7 @@ def generate_category_heatmap(
         fontsize=11, fontweight="bold", pad=18,
     )
     plt.tight_layout()
+    stamp_generated(fig)
     buf = BytesIO()
     plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
     buf.seek(0)
@@ -286,6 +289,7 @@ def generate_probability_heatmap(
         fontsize=11, fontweight="bold", pad=18,
     )
     plt.tight_layout()
+    stamp_generated(fig)
     buf = BytesIO()
     plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
     buf.seek(0)
