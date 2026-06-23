@@ -192,6 +192,14 @@ FORECAST_VALIDATION_MAX_AGE_DAYS  = 120  # default join window; rebuild job pass
 # S3 path for extreme event summaries
 EXTREME_EVENT_PATH = 'tijuana/forecast/extreme_events'
 
+# Forecast performance report (asymmetric, temporally-tolerant rubric) — charts,
+# the structured report JSON, and the LLM narrative. Run-scoped under the base
+# plus a `latest` mirror for dashboards.
+PERFORMANCE_REPORT_BASE          = 'tijuana/forecast/performance'
+PERFORMANCE_REPORT_JSON_PATH     = f'{PERFORMANCE_REPORT_BASE}/{{run_tag}}/report.json'
+PERFORMANCE_REPORT_LATEST_PATH   = f'{LATEST_BASEPATH}/forecast_data/forecast_performance_latest.json'
+PERFORMANCE_NARRATIVE_LATEST_PATH = f'{LATEST_BASEPATH}/forecast_data/forecast_performance_narrative_latest.txt'
+
 # ==============================================================================
 # Two-Tier H2S Alert System
 # ==============================================================================

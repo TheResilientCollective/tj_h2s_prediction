@@ -9,6 +9,7 @@ from dagster_slack import make_slack_on_run_failure_sensor
 
 from h2s.resources.minio import S3Resource
 from h2s.resources.slack import SlackAlertResource
+from h2s.resources.resilientllm import ResilientLLMResource
 
 # Configure S3 resource (using EnvVar for Dagster config)
 s3_resource = S3Resource(
@@ -25,6 +26,12 @@ slack_resource = SlackAlertResource(
     token=EnvVar('SLACK_TOKEN'),
     channel=os.environ.get('SLACK_CHANNEL', '#test'),
 )
+
+# ResilientLLM webhook resource — generates plain-language narratives. Reads
+# RESILIENTLLM_API_TOKEN / RESILIENTLLM_WEBHOOK / RESILIENTLLM_WEBHOOK_UUID from
+# the environment via the resource's own defaults; an unset token makes the
+# narrative asset fall back to its deterministic local text.
+llm_resource = ResilientLLMResource()
 def slack_message_fn(context: RunFailureSensorContext) -> str:
     return (
         f"Job *[{context.dagster_run.job_name}]* failed! "
@@ -38,8 +45,8 @@ slack_on_run_failure = make_slack_on_run_failure_sensor(
 )
 
 resources = {
-    "local": {"s3": s3_resource, "slack": slack_resource},
-    "production": {"s3": s3_resource, "slack": slack_resource},
+    "local": {"s3": s3_resource, "slack": slack_resource, "llm": llm_resource},
+    "production": {"s3": s3_resource, "slack": slack_resource, "llm": llm_resource},
 }
 
 deployment_name = os.environ.get("DAGSTER_DEPLOYMENT", "local")
@@ -123,6 +130,14 @@ def defs():
         forecast_validation_job,
         station_forecast_validation_rebuild_job,
         forecast_validation_schedule,
+    )
+
+    # Import forecast performance report + AI narrative (asymmetric rubric)
+    from h2s.defs.forecast_performance import (
+        forecast_performance_report,
+        forecast_performance_narrative,
+        forecast_performance_job,
+        forecast_performance_schedule,
     )
 
     # Import daily forecast digest (always-on situational awareness) — Deliverable B
@@ -280,6 +295,9 @@ def defs():
             forecast_validation_store,
             forecast_skill_report,
             forecast_skill_scorecard,
+            # Forecast performance report + AI narrative (asymmetric rubric)
+            forecast_performance_report,
+            forecast_performance_narrative,
             # Daily forecast digest (all-station situational awareness)
             forecast_digest,
             # All-station forecast heatmap board (category + probability grids)
@@ -332,6 +350,8 @@ def defs():
             forecast_skill_scorecard_job,
             # All-station forecast heatmap board job
             forecast_heatmap_job,
+            # Forecast performance rubric report + AI narrative job
+            forecast_performance_job,
             # Observed >10 ppb Alert-Performance job (yellow tier)
             h2s_alert_performance_job,
             # Validation jobs
@@ -362,6 +382,8 @@ def defs():
             forecast_skill_scorecard_schedule,
             # Daily all-station forecast heatmap board schedule
             forecast_heatmap_schedule,
+            # Weekly forecast performance rubric report + AI narrative schedule
+            forecast_performance_schedule,
             # Walk-forward backfill schedule
             station_backfill_schedule,
         ],
