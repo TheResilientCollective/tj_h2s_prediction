@@ -1,20 +1,9 @@
-"""H2S Dagster Definitions - Export all assets."""
+"""H2S Dagster Definitions - convenience re-exports.
 
-from h2s.defs.h2s_pipeline import (
-    # Model Management
-    h2s_model_artifacts,
-
-    # Prediction Pipeline
-    preprocessed_features,
-    h2s_predictions,
-    h2s_alerts,
-    # Visualization & Export
-    feature_importance_viz,
-    confusion_matrix_viz,
-    model_comparison_viz,
-    prediction_timeline_viz,
-    predictions_export,
-)
+The legacy single-NESTOR hourly pipeline (h2s_pipeline) was retired; the
+multi-station training/products/validation pipelines are registered explicitly
+in ``h2s.definitions``.
+"""
 
 from h2s.defs.h2s_validation_pipeline import (
     daily_station_validation_report,
@@ -36,17 +25,6 @@ from h2s.defs.accuracy_reporting_pipeline import (
 )
 
 __all__ = [
-    "h2s_model_artifacts",
-    "raw_environmental_data",
-    "actual_h2s_data",
-    "preprocessed_features",
-    "h2s_predictions",
-    "h2s_alerts",
-    "feature_importance_viz",
-    "confusion_matrix_viz",
-    "model_comparison_viz",
-    "prediction_timeline_viz",
-    "predictions_export",
     # Validation
     "daily_station_validation_report",
     # Accuracy reporting

@@ -1,7 +1,6 @@
 """Unified validation pipeline for all H2S forecast models.
 
 Validates predictions from:
-- Hourly forecast (nestor_xgboost) — refactored from h2s_pipeline.daily_validation_report
 - Daily station forecasts (per-station regression + classification)
 - Multi-horizon forecasts (0-6h, 6-24h bands)
 
@@ -198,9 +197,8 @@ def _build_full_payload(
 # ---------------------------------------------------------------------------
 # Asset 1: Hourly forecast validation (refactored schema)
 # ---------------------------------------------------------------------------
-# The existing daily_validation_report in h2s_pipeline.py is kept as-is for
-# now but its metrics_output dict will be updated to v2 schema in a separate
-# edit to that file.  This module provides the *new* pipeline validations.
+# The legacy hourly daily_validation_report (h2s_pipeline.py) was retired with
+# the single-NESTOR pipeline. This module provides the per-station validations.
 
 
 # ---------------------------------------------------------------------------

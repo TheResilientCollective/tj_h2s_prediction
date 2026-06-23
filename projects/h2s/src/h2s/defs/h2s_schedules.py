@@ -1,59 +1,17 @@
-"""H2S Model Retraining Schedules and Jobs.
+"""H2S Schedules and Jobs (multi-station pipeline).
 
-Jobs are split by partition type:
-  - Data assets use monthly_training_partitions (single dimension)
-  - Model assets use model_run_partitions (month × variant, multi-dimensional)
-
-Workflow:
-1. monthly_data_schedule (2 AM 1st of month) → materializes monthly data assets
-2. monthly_model_training_schedule (4 AM 1st of month) → trains both variants in parallel
-3. Human reviews validation reports in S3 per variant
-4. Manual trigger of deploy_approved_model_job for the chosen variant
+Holds the per-station training schedule, the station forecast-analysis schedule,
+the dispersion/calibration jobs + schedules, and the daily-station validation
+job. The legacy single-NESTOR hourly forecast and monthly single-model training
+pipelines were retired — model production is the per-station training path
+(station_model_training_job → station_model_deployment_job) and the products
+pipeline (station_forecast_job).
 """
 
 import os
 from datetime import timedelta
 
 import dagster as dg
-
-from h2s.defs.h2s_pipeline import (
-    forecast_daily_partitions,
-    h2s_model_artifacts,
-    preprocessed_features,
-    h2s_predictions,
-    h2s_alerts,
-    h2s_variant_predictions,
-    h2s_ensemble_predictions,
-    predictions_export,
-    feature_importance_viz,
-    confusion_matrix_viz,
-    model_comparison_viz,
-    prediction_timeline_viz,
-    daily_validation_report,
-    monthly_performance_viz,
-)
-
-from h2s.defs.h2s_training_pipeline import (
-    # Phase 1: Data Extraction (monthly partitioned)
-    monthly_training_data,
-    relabeled_training_data,
-    data_quality_report,
-    training_data,
-    validation_data,
-    # Phase 2-3: Training + Validation (model_run partitioned)
-    trained_model_cv,
-    model_training_metrics,
-    feature_importance_analysis,
-    validation_predictions,
-    validation_report,
-    model_comparison_report,
-    # Phase 4: Deployment (model_run partitioned)
-    deployment_approval,
-    production_model_deployment,
-    # Partition definitions
-    monthly_training_partitions,
-    model_run_partitions,
-)
 
 from h2s.defs.h2s_multi_station_training import (
     multi_station_training_data,
@@ -91,248 +49,6 @@ from h2s.defs.h2s_validation_pipeline import (
     daily_station_validation_report,
     forecast_daily_partitions as validation_daily_partitions,
 )
-
-# ============================================================================
-# JOB 1: Monthly Data Extraction (monthly partitioned)
-# ============================================================================
-
-monthly_data_extraction_job = dg.define_asset_job(
-    name="monthly_data_extraction_job",
-    description="Extract and prepare training/validation data for a given month",
-    selection=dg.AssetSelection.assets(
-        monthly_training_data,
-        relabeled_training_data,
-        data_quality_report,
-        training_data,
-        validation_data,
-    ),
-    partitions_def=monthly_training_partitions,
-    tags={"environment": "production", "pipeline": "h2s_data_extraction"},
-)
-
-
-# ============================================================================
-# JOB 2: Monthly Model Training + Validation (model_run partitioned)
-# ============================================================================
-
-monthly_model_training_job = dg.define_asset_job(
-    name="monthly_model_training_job",
-    description="Train and validate a model variant for a given month",
-    selection=dg.AssetSelection.assets(
-        trained_model_cv,
-        model_training_metrics,
-        feature_importance_analysis,
-        validation_predictions,
-        validation_report,
-    ),
-    partitions_def=model_run_partitions,
-    tags={"environment": "production", "pipeline": "h2s_model_training"},
-)
-
-
-# ============================================================================
-# JOB 3: Deploy Approved Model (model_run partitioned, manual trigger)
-# ============================================================================
-
-deploy_approved_model_job = dg.define_asset_job(
-    name="deploy_approved_model_job",
-    description="Deploy an approved model variant to production (manual trigger only)",
-    selection=dg.AssetSelection.assets(
-        model_comparison_report,
-        deployment_approval,
-        production_model_deployment,
-    ),
-    partitions_def=model_run_partitions,
-    tags={"environment": "production", "pipeline": "h2s_deployment"},
-)
-
-
-# ============================================================================
-# JOB 3b: Approve and Deploy (pre-approved, no config editing needed)
-# ============================================================================
-
-approve_and_deploy_job = dg.define_asset_job(
-    name="approve_and_deploy_job",
-    description=(
-        "Approve and deploy a model variant to production. "
-        "Select the partition (month | variant) and launch — no config editing required."
-    ),
-    selection=dg.AssetSelection.assets(
-        model_comparison_report,
-        deployment_approval,
-        production_model_deployment,
-    ),
-    partitions_def=model_run_partitions,
-    config={
-        "ops": {
-            "h2s__deployment_approval": {
-                "config": {"approve_deployment": True}
-            }
-        }
-    },
-    tags={"environment": "production", "pipeline": "h2s_deployment"},
-)
-
-
-# ============================================================================
-# SCHEDULE 1: Monthly Data Extraction (2 AM on 1st of month)
-# ============================================================================
-
-@dg.schedule(
-    job=monthly_data_extraction_job,
-    cron_schedule="0 2 1 * *",
-    description="Monthly data extraction (1st of month at 2 AM UTC)",
-    default_status=dg.DefaultScheduleStatus.RUNNING,
-    tags={"environment": "production", "schedule_type": "monthly_data"},
-)
-def monthly_data_schedule(context: dg.ScheduleEvaluationContext):
-    """Materialize monthly training/validation data on the 1st of each month.
-
-    Uses the previous month as the partition key — the schedule fires on the 1st
-    of the current month, but we want to process the just-completed previous month,
-    which is the latest available partition under end_offset=0.
-    """
-    prev_month = (context.scheduled_execution_time.replace(day=1) - timedelta(days=1)).replace(day=1)
-    month_key = prev_month.strftime('%Y-%m-%d')
-    return dg.RunRequest(
-        partition_key=month_key,
-        run_key=f"data_extraction_{month_key}",
-        tags={"retraining_period": month_key},
-    )
-
-
-# ============================================================================
-# SCHEDULE 2: Monthly Model Training (4 AM on 1st of month, both variants)
-# ============================================================================
-
-@dg.schedule(
-    job=monthly_model_training_job,
-    cron_schedule="0 4 1 * *",
-    description="Monthly model training for all variants (1st of month at 4 AM UTC — 2h after data extraction)",
-    default_status=dg.DefaultScheduleStatus.RUNNING,
-    tags={"environment": "production", "schedule_type": "monthly_training"},
-)
-def monthly_model_training_schedule(context: dg.ScheduleEvaluationContext):
-    """Train all model variants for the previous (completed) month.
-
-    Runs 2 hours after data extraction to allow data assets to materialize.
-    Emits one RunRequest per variant so they train in parallel.
-    Uses the previous month partition key to match end_offset=0.
-    """
-    prev_month = (context.scheduled_execution_time.replace(day=1) - timedelta(days=1)).replace(day=1)
-    month_key = prev_month.strftime('%Y-%m-%d')
-    return [
-        dg.RunRequest(
-            partition_key=dg.MultiPartitionKey({"month": month_key, "variant": variant}),
-            run_key=f"model_training_{month_key}_{variant}",
-            tags={"retraining_period": month_key, "variant": variant},
-        )
-        for variant in model_run_partitions.get_partitions_def_for_dimension("variant").get_partition_keys()
-    ]
-
-
-# ============================================================================
-# JOB 4: 6-Hourly Forecast Prediction (unpartitioned)
-# ============================================================================
-
-forecast_prediction_job = dg.define_asset_job(
-    name="forecast_prediction_job",
-    description="Run full H2S prediction pipeline and export results to S3",
-    selection=dg.AssetSelection.assets(
-        h2s_model_artifacts,
-        preprocessed_features,
-        h2s_predictions,
-        h2s_alerts,
-        h2s_variant_predictions,
-        h2s_ensemble_predictions,
-        predictions_export,
-        feature_importance_viz,
-        confusion_matrix_viz,
-        model_comparison_viz,
-        prediction_timeline_viz,
-    ),
-    partitions_def=forecast_daily_partitions,
-    tags={"environment": "production", "pipeline": "h2s_forecast"},
-)
-
-
-# ============================================================================
-# JOB 5: Station Forecast Validation Report (unpartitioned)
-# ============================================================================
-
-station_forecast_validation_metrics_job = dg.define_asset_job(
-    name="station_forecast_validation_metrics_job",
-    description="Generate station forecast validation metrics only (useful for backfilling)",
-    selection=dg.AssetSelection.assets(
-        daily_validation_report,
-    ),
-    partitions_def=forecast_daily_partitions,
-    tags={"environment": "production", "pipeline": "h2s_validation"},
-)
-
-station_forecast_validation_job = dg.define_asset_job(
-    name="station_forecast_validation_job",
-    description="Compare previous day's H2S predictions against actual measurements and generate performance dashboard",
-    selection=dg.AssetSelection.assets(
-        daily_validation_report,
-        monthly_performance_viz,
-    ),
-    partitions_def=forecast_daily_partitions,
-    tags={"environment": "production", "pipeline": "h2s_validation"},
-)
-
-
-# ============================================================================
-# SCHEDULE 3: 6-Hourly Forecast (00:00, 06:00, 12:00, 18:00 UTC)
-# ============================================================================
-
-@dg.schedule(
-    job=forecast_prediction_job,
-    cron_schedule=SCHEDULE_6HR,
-    description="Run H2S forecast every 6 hours (00:00, 06:00, 12:00, 18:00 UTC)",
-    default_status=dg.DefaultScheduleStatus.RUNNING,
-    tags={"environment": "production", "schedule_type": "forecast"},
-)
-def forecast_prediction_schedule(context: dg.ScheduleEvaluationContext):
-    """Trigger the full H2S prediction pipeline every 6 hours.
-
-    Each run materializes TODAY's partition (all 4 daily runs update same partition).
-    S3 hour paths differentiate individual runs.
-    """
-    today_utc = context.scheduled_execution_time.date().strftime("%Y-%m-%d")
-
-    return dg.RunRequest(
-        partition_key=today_utc,
-        run_key=f"forecast_{context.scheduled_execution_time.strftime('%Y-%m-%d_%H')}",
-        tags={
-            "dagster/schedule_execution_time": context.scheduled_execution_time.isoformat(),
-        },
-    )
-
-
-# ============================================================================
-# SCHEDULE 4: Station Forecast Validation (8 AM UTC)
-# ============================================================================
-
-@dg.schedule(
-    job=station_forecast_validation_job,
-    cron_schedule="0 8 * * *",
-    description="Station forecast validation report at 8 AM UTC (after actuals data is expected)",
-    default_status=dg.DefaultScheduleStatus.RUNNING,
-    tags={"environment": "production", "schedule_type": "validation"},
-)
-def station_forecast_validation_schedule(context: dg.ScheduleEvaluationContext):
-    """Trigger station forecast validation report comparing predictions vs actuals.
-
-    Partition key is YESTERDAY's date (the day being validated).
-    """
-    yesterday_utc = (context.scheduled_execution_time - timedelta(days=1)).date().strftime("%Y-%m-%d")
-
-    return dg.RunRequest(
-        partition_key=yesterday_utc,
-        run_key=f"validation_{yesterday_utc}",
-    )
-
 
 # ============================================================================
 # SCHEDULE 5: Station Model Training (2 AM on 1st of month)
@@ -560,7 +276,7 @@ dispersion_hysplit_execution_job = dg.define_asset_job(
 
 # ============================================================================
 # SCHEDULE 9: Weekly Dispersion Inversion (Monday 02:30 UTC)
-# Offset 30min from monthly_data_schedule (02:00) to avoid collision on 1st of month.
+# Offset 30min from the 02:00 station-model-training schedule to avoid collision.
 # Starts STOPPED — enable after reviewing first emission rate inversion results.
 # ============================================================================
 

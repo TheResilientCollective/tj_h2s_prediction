@@ -54,25 +54,6 @@ deployment_name = os.environ.get("DAGSTER_DEPLOYMENT", "local")
 
 @definitions
 def defs():
-    # Import prediction pipeline assets
-    from h2s.defs.h2s_pipeline import (
-        h2s_model_artifacts,
-        preprocessed_features,
-        h2s_predictions,
-        h2s_alerts,
-        slack_alerts,
-        h2s_variant_predictions,
-        h2s_ensemble_predictions,
-        feature_importance_viz,
-        confusion_matrix_viz,
-        model_comparison_viz,
-        prediction_timeline_viz,
-        cross_correlation_viz,
-        predictions_export,
-        daily_validation_report,
-        monthly_performance_viz,
-    )
-
     # Import two-tier alert system (Tiers 4–5: observation-based)
     from h2s.defs.h2s_alert_system import (
         h2s_alert_dispatcher,
@@ -212,17 +193,6 @@ def defs():
 
     # Import schedules and jobs
     from h2s.defs.h2s_schedules import (
-        monthly_data_extraction_job,
-        monthly_model_training_job,
-        deploy_approved_model_job,
-        approve_and_deploy_job,
-        monthly_data_schedule,
-        monthly_model_training_schedule,
-        forecast_prediction_job,
-        forecast_prediction_schedule,
-        station_forecast_validation_job,
-        station_forecast_validation_metrics_job,
-        station_forecast_validation_schedule,
         station_model_training_schedule,
         station_forecast_analysis_schedule,
         station_backfill_schedule,
@@ -240,24 +210,9 @@ def defs():
     # Create definitions with assets, jobs, schedules, and resources
     all_defs = Definitions(
         assets=[
-            # Prediction Pipeline Assets
-            h2s_model_artifacts,
-            preprocessed_features,
-            h2s_predictions,
-            h2s_alerts,
-            slack_alerts,
+            # Observation-based alert dispatchers (Tiers 4–5 + APCD watch)
             h2s_alert_dispatcher,
             apcd_sensor_alert_dispatcher,
-            h2s_variant_predictions,
-            h2s_ensemble_predictions,
-            feature_importance_viz,
-            confusion_matrix_viz,
-            model_comparison_viz,
-            prediction_timeline_viz,
-            cross_correlation_viz,
-            predictions_export,
-            daily_validation_report,
-            monthly_performance_viz,
             # Multi-Station Training Pipeline Assets
             multi_station_training_data,
             per_station_trained_models,
@@ -313,16 +268,7 @@ def defs():
             backtest_comparison_index,
         ],
         jobs=[
-            # Prediction jobs
-            forecast_prediction_job,
-            station_forecast_validation_job,
-            station_forecast_validation_metrics_job,
-            # Training jobs (old single-model pipeline — kept for reference)
-            monthly_data_extraction_job,
-            monthly_model_training_job,
-            deploy_approved_model_job,
-            approve_and_deploy_job,
-            # New multi-station training jobs
+            # Multi-station training jobs
             station_model_training_job,
             station_model_deployment_job,
             station_model_promotion_job,
@@ -361,10 +307,6 @@ def defs():
             station_backtest_index_job,
         ],
         schedules=[
-            forecast_prediction_schedule,
-            station_forecast_validation_schedule,
-            monthly_data_schedule,
-            monthly_model_training_schedule,
             station_model_training_schedule,
             station_forecast_analysis_schedule,
             # Dispersion schedules
