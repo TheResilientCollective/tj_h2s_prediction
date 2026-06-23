@@ -13,7 +13,7 @@ import pandas as pd
 import seaborn as sns
 from sklearn.metrics import confusion_matrix, balanced_accuracy_score
 
-from h2s.utils.chart_meta import as_of_label, stamp_generated
+from h2s.utils.chart_meta import as_of_label, coverage_label, stamp_generated
 
 
 def generate_feature_importance(model, prep_info: Dict, top_n: int = 15, model_name: str = "") -> BytesIO:
@@ -1468,7 +1468,8 @@ def generate_forecast_hazard_chart(
     return buf
 
 
-def generate_skill_by_lead_chart(curves_df: pd.DataFrame, *, env_label: str = "", as_of=None) -> BytesIO:
+def generate_skill_by_lead_chart(curves_df: pd.DataFrame, *, env_label: str = "", as_of=None,
+                                 coverage=None) -> BytesIO:
     """Forecast skill vs lead-hour: Spearman, MAE, and P(>30) recall, Evidence vs Lean.
 
     ``curves_df`` is the ``forecast_skill_report`` output (one row per product,
@@ -1486,6 +1487,10 @@ def generate_skill_by_lead_chart(curves_df: pd.DataFrame, *, env_label: str = ""
     ds = f"   ·   {dated}" if dated else ""
     fig.suptitle(f"Forecast skill vs lead hour{label_suffix}{ds}", fontsize=13,
                  fontweight="bold", y=0.995)
+    cov = coverage_label(*coverage) if coverage else ""
+    if cov:
+        fig.text(0.5, 0.965, f"evaluated forecast {cov}", ha="center", va="top",
+                 fontsize=9, color="#555")
 
     if curves_df is None or curves_df.empty:
         for ax in axes:

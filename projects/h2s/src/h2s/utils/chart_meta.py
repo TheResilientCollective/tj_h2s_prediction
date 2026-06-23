@@ -42,6 +42,28 @@ def as_of_label(when: datetime | str | None = None, *, prefix: str = "as of") ->
     return f"{prefix} {ts:%Y-%m-%d %H:%M UTC}"
 
 
+def coverage_label(
+    t_min: datetime | str | None,
+    t_max: datetime | str | None,
+    *,
+    prefix: str = "window",
+) -> str:
+    """Return a ``window 2026-06-08 → 2026-06-23 UTC`` data-coverage label.
+
+    Collapses to a single date when min and max fall on the same UTC day.
+    Returns ``""`` if either bound is missing/unparseable so callers can append
+    it unconditionally.
+    """
+    lo, hi = _to_utc(t_min), _to_utc(t_max)
+    if lo is None or hi is None:
+        return ""
+    if lo > hi:
+        lo, hi = hi, lo
+    if lo.date() == hi.date():
+        return f"{prefix} {lo:%Y-%m-%d} UTC"
+    return f"{prefix} {lo:%Y-%m-%d} → {hi:%Y-%m-%d} UTC"
+
+
 def stamp_generated(fig, *, when: datetime | None = None, prefix: str = "Generated") -> None:
     """Stamp a small ``<prefix> YYYY-MM-DD HH:MM UTC`` footer on ``fig``.
 
