@@ -13,6 +13,8 @@ import numpy as np
 import pandas as pd
 from matplotlib.colors import LinearSegmentedColormap
 
+from h2s.utils.chart_meta import stamp_generated
+
 
 def generate_concentration_heatmap(
     grid_data: dict,
@@ -89,6 +91,7 @@ def generate_concentration_heatmap(
     ax.set_title(f"{title}\n{subtitle}", fontsize=13, fontweight='bold', pad=15)
 
     plt.tight_layout()
+    stamp_generated(fig)
     buf = BytesIO()
     plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
     plt.close(fig)
@@ -241,6 +244,7 @@ def generate_source_emission_map(
     ax.set_title(f"{title}\n{subtitle}", fontsize=13, fontweight='bold', pad=15)
 
     plt.tight_layout()
+    stamp_generated(fig)
     buf = BytesIO()
     plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
     plt.close(fig)
@@ -304,6 +308,11 @@ def generate_peak_concentration_timeseries(
     plt.xticks(rotation=45, ha='right')
     plt.tight_layout()
 
+    try:
+        when = pd.to_datetime(df['time']).max().to_pydatetime()
+    except (KeyError, ValueError, TypeError):
+        when = None
+    stamp_generated(fig, when=when)
     buf = BytesIO()
     plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
     plt.close(fig)

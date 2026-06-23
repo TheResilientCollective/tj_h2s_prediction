@@ -13,15 +13,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Overview
 
-This is an H2S (Hydrogen Sulfide) prediction system for the Tijuana River region, covering three monitoring stations: IB_CIVIC_CTR, NESTOR__BES, and SAN_YSIDRO. The repository contains two implementations:
+This is an H2S (Hydrogen Sulfide) prediction system for the Tijuana River region, covering three monitoring stations: IB_CIVIC_CTR, NESTOR__BES, and SAN_YSIDRO. The system is the **Dagster orchestration pipeline** in `projects/h2s/` (production data pipeline with S3 integration). The original standalone `src/` scripts and the legacy single-NESTOR hourly/monthly pipelines were retired — the multi-station path (per-station training → products → validation) is the focus.
 
-1. **Standalone Python scripts** (`src/`) - Original prediction scripts for direct usage
-2. **Dagster orchestration pipeline** (`projects/h2s/`) - Production data pipeline with S3 integration
-
-The system predicts H2S levels in three categories:
+The system predicts H2S across all hazard levels. Reporting uses a 4-tier view
+(the `h2s_category` helper in `constants.py`):
 - **Green:** H2S < 5 ppb (safe)
-- **Yellow:** 5 ≤ H2S < 30 ppb (caution)
-- **Orange:** H2S ≥ 30 ppb (alert)
+- **Yellow:** 5 ≤ H2S < 10 ppb (caution)
+- **Yellow-high:** 10 ≤ H2S < 30 ppb (resident-smell level — get it right)
+- **Orange:** H2S ≥ 30 ppb (hazardous)
+
+The trained per-station classifiers emit P(>5), P(>10) and P(>30) probabilities,
+so the 4-tier view needs no retraining. The underlying 3-class models
+(green / yellow 5–30 / orange) are unchanged.
 
 **Model Performance (hourly pipeline):** 61.3% orange detection rate, 5.4% false alarm rate.
 
@@ -29,54 +32,45 @@ The system predicts H2S levels in three categories:
 
 ```
 tj_h2s_prediction/
-├── src/                          # Standalone prediction scripts
-│   ├── predict_h2s.py           # Main prediction script
-│   ├── batch_predict.py         # Batch processing
-│   └── generate_visualizations.py
 ├── data/
 │   ├── models_v2/               # Trained per-station models (local)
 │   └── startmodels/             # Seed models for initial S3 upload
-├── projects/h2s/                 # Dagster orchestration project
+├── projects/h2s/                 # Dagster orchestration project (the system)
 │   ├── src/h2s/
 │   │   ├── definitions.py       # Dagster definitions (asset + job registration)
-│   │   ├── constants.py         # S3 path constants + shared utilities
+│   │   ├── constants.py         # S3 paths, 4-tier h2s_category() + palette, thresholds
 │   │   ├── defs/
-│   │   │   ├── h2s_pipeline.py          # Hourly forecast pipeline (14 assets)
 │   │   │   ├── h2s_daily_pipeline.py    # Daily analysis: source attribution + station forecasts
+│   │   │   ├── h2s_products_pipeline.py # nowcast/nearcast/forecast products (p5/p10/p30)
+│   │   │   ├── h2s_forecast_validation_pipeline.py  # Validation store + skill curves
+│   │   │   ├── forecast_digest.py       # Daily all-station sparkline digest → Slack
+│   │   │   ├── forecast_heatmap.py      # All-station category + probability heatmap board → Slack
+│   │   │   ├── forecast_performance.py  # Asymmetric-rubric performance report + AI narrative
 │   │   │   ├── h2s_dispersion_pipeline.py  # Dispersion modeling: Lagrangian + Gaussian + HYSPLIT
 │   │   │   ├── h2s_multi_station_training.py  # Per-station model training (partitioned)
-│   │   │   ├── h2s_training_pipeline.py       # Legacy single-model training pipeline
-│   │   │   └── h2s_schedules.py               # All schedules and job definitions
+│   │   │   └── h2s_schedules.py               # Schedules + dispersion/calibration/validation jobs
+│   │   ├── forecasting/
+│   │   │   ├── recursive.py            # Recursive nowcast/nearcast/forecast engine
+│   │   │   ├── product_validation.py   # Join product rows to measured H2S; skill curves
+│   │   │   ├── performance_report.py   # Asymmetric, temporally-tolerant verdict + cost rubric
+│   │   │   └── narrative.py            # Plain-language narrative + ResilientLLM payload
 │   │   ├── predictor/
 │   │   │   ├── h2s_predictor.py  # H2SPredictor class with S3 loading
-│   │   │   └── visualizations.py # Plot generators returning BytesIO
-│   │   ├── dispersion/
-│   │   │   ├── lagrangian.py    # Backward particle tracking + source attribution
-│   │   │   ├── gaussian.py      # Forward Gaussian plume model
-│   │   │   └── hysplit_controls.py  # HYSPLIT CONTROL file generation
-│   │   ├── training/
-│   │   │   ├── feature_builder.py       # ensure_base_features() — 33-feature production set
-│   │   │   ├── model_trainer.py         # train_and_select() for XGBoost/RF
-│   │   │   ├── multi_station_trainer.py # Per-station training logic
-│   │   │   ├── relabeling.py            # H2S threshold relabeling
-│   │   │   └── validation.py            # Model validation utilities
+│   │   │   ├── visualizations.py # Plot generators returning BytesIO
+│   │   │   ├── forecast_heatmap.py    # Category + probability heatmap grids (BytesIO)
+│   │   │   └── performance_charts.py  # Scatter, skill-by-hour, verdict/confusion charts
+│   │   ├── dispersion/          # lagrangian.py, gaussian.py, hysplit_controls.py
+│   │   ├── training/            # feature_builder, model_trainer, multi_station_trainer, …
 │   │   ├── resources/
 │   │   │   ├── minio.py         # S3Resource
-│   │   │   └── slack.py         # SlackAlertResource
-│   │   └── utils/
-│   │       └── store_assets.py  # S3 storage utilities
-│   ├── scripts/                 # Helper scripts
-│   │   └── train_station_models.py  # Local per-station training (analysis only)
+│   │   │   ├── slack.py         # SlackAlertResource
+│   │   │   └── resilientllm.py  # ResilientLLMResource (n8n webhook → narrative)
+│   │   └── utils/store_assets.py
+│   ├── scripts/                 # Helper / backfill scripts
 │   ├── tests/                   # Test suite
-│   │   ├── conftest.py
-│   │   ├── test_h2s_pipeline.py
-│   │   ├── test_predictor.py
-│   │   ├── test_s3_integration.py
-│   │   └── README.md
 │   ├── pytest.ini
 │   └── pyproject.toml
-├── nestor_xgboost_weighted_model.json  # 4.2 MB trained model (root copy)
-└── nestor_preprocessing_info.json      # Feature metadata (JSON, not pickle)
+└── data/startmodels/            # Per-variant seed models for first S3 upload
 ```
 ### Asset Development Guidelines
 When creating new assets:
@@ -147,8 +141,8 @@ cp .env.example .env   # fill in S3 credentials
 uv run dg launch --job station_model_training_job --partition san_ysidro,nestor_bes,ib_civic_ctr
 uv run dg launch --job station_model_deployment_job --partition san_ysidro,nestor_bes,ib_civic_ctr
 
-# 2. Run hourly forecast pipeline
-uv run dg launch --job forecast_prediction_job
+# 2. Run the products pipeline (nowcast/nearcast/forecast, all stations × variants)
+uv run dg launch --job station_forecast_job
 
 # 3. Run daily analysis (source attribution + station forecasts + dashboard)
 uv run dg launch --job station_forecast_analysis_job
@@ -161,13 +155,11 @@ writes the immutable version archive that `promote_station_models_job` promotes
 from. The previous one-off `seed_models_job` was removed — there is no separate
 bootstrap; the training pipeline owns model production.
 
-The hourly NESTOR 3-class model
-(`tijuana/forecast/models/nestor_xgboost_weighted_model.json`) that
-`forecast_prediction_job` reads, plus the hourly variant models
-(`xgboost_base` / `xgboost_smote` / `random_forest`), come from the legacy
-monthly training pipeline (`monthly_model_training_job` →
-`approve_and_deploy_job`); `h2s_variant_predictions` skips missing variants
-gracefully until they exist.
+The legacy hourly NESTOR 3-class model
+(`tijuana/forecast/models/nestor_xgboost_weighted_model.json`) and the legacy
+monthly training pipeline that produced it were retired. The hindcast mode of
+`scripts/backfill_validation.py` still reads that model from S3 if present, but
+nothing trains or refreshes it. Model production is the per-station path above.
 
 ### Rebuilding Models (new training data available)
 
@@ -229,8 +221,8 @@ models that produced it (`models/archive/stations/{KEY}/{version}/`).
 ```bash
 cd projects/h2s
 
-# Hourly H2S prediction (auto-runs every 6h via forecast_prediction_schedule)
-uv run dg launch --job forecast_prediction_job
+# Products (nowcast/nearcast/forecast, all stations × variants; auto via cascade_alerts every 6h)
+uv run dg launch --job station_forecast_job
 
 # Daily source attribution + station forecasts + dashboard (auto-runs daily at 8am)
 uv run dg launch --job forecast_analysis_job
@@ -252,7 +244,41 @@ uv run dg launch --job cascade_alerts_job
 # Forecast validation store + per-lead-hour skill curves (rebuild from ALL runs):
 uv run dg launch --job station_forecast_validation_rebuild_job
 # (forecast_validation_job is the recent-window daily variant; schedule STOPPED)
+
+# All-station heatmap board: category grid (station × hour, coloured by 4-tier
+# hazard, labelled ppb) + probability grid (P>5/P>10/P>30 × hour) → Slack
+# (auto-runs daily 08:45 UTC).
+uv run dg launch --job forecast_heatmap_job
+
+# Forecast performance report + AI narrative (asymmetric, temporally-tolerant
+# rubric): rebuilds the validation store, scores predicted-vs-measured by the
+# verdict rubric (dangerous-miss / smell-miss / early-warning-ok / …), renders
+# scatter + skill-by-hour + verdict board, and posts a plain-language narrative
+# (ResilientLLM webhook, local fallback). Schedule weekly Mon 14:00 UTC, STOPPED.
+uv run dg launch --job forecast_performance_job
 ```
+
+### The Forecast Heatmap Board + Performance Report
+
+`forecast_heatmap_job` posts two grids built from the latest product rows: a
+**category grid** (station × forecast hour, each cell coloured green / yellow /
+yellow-high / orange and labelled with the predicted ppb) and a **probability
+grid** (per station: P>5, P>10, P>30 across the forecast hours). The 4-tier
+split comes from `h2s_category()` in `constants.py` (cut points 5/10/30) and the
+existing p5/p10/p30 — no retraining.
+
+`forecast_performance_job` scores the forecast with an **asymmetric, temporally-
+tolerant rubric** (`forecasting/performance_report.py`): under-predicting a
+hazard costs far more than over-predicting it, the ≥10 ppb resident-smell level
+is called out, and an over-prediction the actual reaches within ±2 h is an
+*early warning* rather than a false alarm. Headline metrics: tolerant-accuracy,
+dangerous-miss rate, smell-miss rate, mean cost; plus Spearman/MAE by lead-hour
+and by hour-of-day, and a predicted-vs-measured scatter. The narrative is
+generated via the ResilientLLM n8n webhook (`resources/resilientllm.py`,
+`execute_with_data`) when `RESILIENTLLM_*` env vars are set, otherwise a
+deterministic local narrative. See `projects/h2s/docs/FORECAST_PERFORMANCE_RUBRIC.md`
+for the full verdict definitions, cost weights, and tuning notes. These are
+starting points — refine the rubric with health officials and the community.
 
 ### The Forecast Products (nowcast / nearcast / forecast)
 
@@ -515,13 +541,31 @@ print(f'Model loaded: {len(predictor.feature_cols)} features')
 
 ### Active Pipelines
 
-**`forecast_prediction_job`** (every 6h) — hourly H2S forecast for NESTOR-BES
+> **Retired (multi-station replaces single-NESTOR):** the legacy
+> `forecast_prediction_job` (hourly NESTOR forecast), the monthly single-model
+> training jobs (`monthly_data_extraction_job` / `monthly_model_training_job` /
+> `deploy_approved_model_job` / `approve_and_deploy_job`), and the legacy hourly
+> validation (`station_forecast_validation_job`) were removed along with
+> `defs/h2s_pipeline.py` and `defs/h2s_training_pipeline.py`. Model production is
+> the per-station path (`station_model_training_job` → `station_model_deployment_job`)
+> feeding the products pipeline (`station_forecast_job`).
+
+**`station_forecast_job`** (the products pipeline) — nowcast/nearcast/forecast
+rows (p5/p10/p30 per station × variant), the substrate for everything below.
+
+**`forecast_heatmap_job`** (daily 08:45 UTC, RUNNING) — all-station heatmap board
 ```
-h2s_model_artifacts → preprocessed_features → h2s_predictions → h2s_alerts → slack_alerts
-                                                               → h2s_variant_predictions → h2s_ensemble_predictions
-                                                               → predictions_export
-h2s_model_artifacts → feature_importance_viz / confusion_matrix_viz / model_comparison_viz
-                    → prediction_timeline_viz / cross_correlation_viz
+products_model_artifacts → h2s_products → forecast_heatmap_board
+   → category grid (station × hour, coloured by 4-tier hazard, labelled ppb)
+   → probability grid (station × {P>5,P>10,P>30} × hour) → S3 + Slack
+```
+
+**`forecast_performance_job`** (weekly Mon 14:00 UTC, STOPPED) — asymmetric rubric report + AI narrative
+```
+forecast_validation_store → forecast_performance_report → forecast_performance_narrative
+   report: predicted-vs-measured scatter + skill-by-hour correlation + verdict/
+   confusion board (tolerant-accuracy, dangerous-miss, smell-miss); narrative via
+   ResilientLLM webhook with a deterministic local fallback.
 ```
 
 **`forecast_analysis_job`** (every 6h) — multi-station source attribution + 48h forecasts
@@ -708,6 +752,13 @@ HOST=local
 
 ## Daily Partitions and Validation Metrics
 
+> **Mostly retired.** This section described the legacy hourly
+> `forecast_prediction_job` + `daily_validation_*` partition workflow, which was
+> removed with the single-NESTOR pipeline. Forecast accuracy now comes from the
+> products → `forecast_validation_store` → `forecast_skill_report` path and the
+> asymmetric `forecast_performance_job`. The partition mechanics below are kept
+> for historical context only.
+
 ### Partition System
 
 **Forecast and validation jobs use daily partitions** (start_date=2026-01-01, timezone=UTC):
@@ -824,4 +875,5 @@ See README.md for complete column list.
 - `NESTOR_BES_H2S_Forecasting_Report.md` - Technical report
 - `Complete_Model_Testing_Summary.md` - Model evaluation
 - `projects/h2s/VALIDATION_AND_ACCURACY_REPORTING.md` - Validation pipeline guide, backfill scripts, accuracy reporting (see this for detailed validation workflows)
+- `projects/h2s/docs/FORECAST_PERFORMANCE_RUBRIC.md` - Forecast performance rubric: verdict definitions, cost weights, and tuning notes for health official refinement
 - `experiments/` - Research-style retrain experiments; each subfolder has its own `README.md` / `RESULTS.md`. Calibration-aligned evaluation harness lives in `projects/h2s/src/h2s/training/calibration_eval.py`.

@@ -1,18 +1,20 @@
 """Accuracy reporting pipeline.
 
-Aggregates the per-day `metrics.json` artifacts that
-`daily_validation_schedule` writes into S3 and produces stakeholder-facing
-rollups:
+Reads the multi-station forecast validation store parquet
+(``FORECAST_VALIDATION_STORE_PATH``) and produces stakeholder-facing rollups:
 
     s3://{bucket}/tijuana/forecast/accuracy_reports/
         daily/{YYYY-MM-DD}/scorecard.json
         rolling/{7d,30d,90d}/scorecard.json
         monthly/{YYYY-MM}/scorecard.json
         alert_performance/{period}.json
-        lead_time/{period}.json
-        calibration/{period}.json
-        regime/{period}.json
         latest.json                 ← single source of truth for downstream UIs
+
+The validation store is built by ``station_forecast_validation_rebuild_job``
+(or the daily ``forecast_validation_job``). Scorecards are computed directly
+from the ``h2s_pred`` / ``actual_h2s`` / ``p30`` columns, so they reflect the
+multi-station forecast products (Evidence variant by default) rather than the
+retired per-day metrics.json files.
 
 Downstream consumers (Quarto report, Panel dashboard, geodemic Analytics page,
 weekly Slack scorecard) read these rollups directly and stay dumb.
@@ -26,7 +28,6 @@ together and handle I/O.
 import json
 import os
 import shutil
-import urllib.request
 import subprocess
 import tempfile
 from dataclasses import asdict, dataclass
@@ -40,20 +41,18 @@ import pandas as pd
 import dagster as dg
 from dagster import AssetExecutionContext
 
+from h2s.constants import FORECAST_VALIDATION_STORE_PATH
 from h2s.resources.minio import S3Resource
 
 # ---------------------------------------------------------------------------
 # S3 layout
 # ---------------------------------------------------------------------------
 
-VALIDATION_PREFIX = "tijuana/forecast/validation"
 ACCURACY_PREFIX = "tijuana/forecast/accuracy_reports"
-FORECAST_PREFIX = "tijuana/forecast/output"
-OBSERVATIONS_KEY = "latest/tijuana/forecast_data/modeldata_h2s.csv"
 
 ROLLING_WINDOWS_DAYS = (7, 30, 90)
 
-# Category thresholds, mirrored from dashboard/constants.py.
+# Category thresholds (3-class: green / yellow / orange).
 H2S_GREEN_MAX = 5.0
 H2S_YELLOW_MAX = 30.0
 CATEGORIES = ("green", "yellow", "orange")
@@ -73,8 +72,17 @@ class SiteScorecard:
     orange_recall: float | None
     orange_precision: float | None
     false_alarm_rate: float | None
-    brier_score: float | None
-    expected_calibration_error: float | None
+    # Probability calibration per threshold (p_k = P(H2S ≥ k ppb))
+    brier_score_p5: float | None
+    brier_score_p10: float | None
+    brier_score_p30: float | None
+    ece_p5: float | None
+    ece_p10: float | None
+    ece_p30: float | None
+    # Recall: fraction of actual ≥k events where p_k > 0.5 fired
+    prob_recall_p5: float | None
+    prob_recall_p10: float | None
+    prob_recall_p30: float | None
     confusion_matrix: list[list[int]]
 
 
@@ -147,22 +155,22 @@ def false_alarm_rate_for_orange(cm: list[list[int]]) -> float | None:
 
 
 def brier_score(
-    prob_orange: Iterable[float], y_true_orange: Iterable[int]
+    probs: Iterable[float], y_true: Iterable[int]
 ) -> float | None:
-    p = np.asarray(list(prob_orange), dtype=float)
-    y = np.asarray(list(y_true_orange), dtype=float)
+    p = np.asarray(list(probs), dtype=float)
+    y = np.asarray(list(y_true), dtype=float)
     if len(p) == 0:
         return None
     return float(np.mean((p - y) ** 2))
 
 
 def expected_calibration_error(
-    prob_orange: Iterable[float],
-    y_true_orange: Iterable[int],
+    probs: Iterable[float],
+    y_true: Iterable[int],
     n_bins: int = 10,
 ) -> float | None:
-    p = np.asarray(list(prob_orange), dtype=float)
-    y = np.asarray(list(y_true_orange), dtype=float)
+    p = np.asarray(list(probs), dtype=float)
+    y = np.asarray(list(y_true), dtype=float)
     if len(p) == 0:
         return None
     bins = np.linspace(0.0, 1.0, n_bins + 1)
@@ -242,11 +250,11 @@ def scorecard_from_predictions(
     orange_precision, _ = class_precision_recall(cm, "orange")
     far = false_alarm_rate_for_orange(cm)
 
-    brier = ece = None
-    if "probability_orange" in joined:
+    bs30 = ece30 = None
+    if "probability_orange" in joined.columns:
         y_true_orange = [1 if c == "orange" else 0 for c in y_true]
-        brier = brier_score(joined["probability_orange"], y_true_orange)
-        ece = expected_calibration_error(joined["probability_orange"], y_true_orange)
+        bs30 = brier_score(joined["probability_orange"], y_true_orange)
+        ece30 = expected_calibration_error(joined["probability_orange"], y_true_orange)
 
     return SiteScorecard(
         site=site,
@@ -256,8 +264,15 @@ def scorecard_from_predictions(
         orange_recall=orange_recall,
         orange_precision=orange_precision,
         false_alarm_rate=far,
-        brier_score=brier,
-        expected_calibration_error=ece,
+        brier_score_p5=None,
+        brier_score_p10=None,
+        brier_score_p30=bs30,
+        ece_p5=None,
+        ece_p10=None,
+        ece_p30=ece30,
+        prob_recall_p5=None,
+        prob_recall_p10=None,
+        prob_recall_p30=None,
         confusion_matrix=cm,
     )
 
@@ -275,6 +290,11 @@ def overall_from_sites(site_cards: list[SiteScorecard]) -> dict[str, Any]:
     cm = combine_confusion_matrices(c.confusion_matrix for c in site_cards)
     _, orange_recall = class_precision_recall(cm, "orange")
     orange_precision, _ = class_precision_recall(cm, "orange")
+
+    def _mean(vals):
+        clean = [v for v in vals if v is not None]
+        return float(np.mean(clean)) if clean else None
+
     return {
         "n_sites": len(site_cards),
         "n_predictions": sum(c.n_predictions for c in site_cards),
@@ -283,6 +303,15 @@ def overall_from_sites(site_cards: list[SiteScorecard]) -> dict[str, Any]:
         "orange_recall": orange_recall,
         "orange_precision": orange_precision,
         "false_alarm_rate": false_alarm_rate_for_orange(cm),
+        "brier_score_p5": _mean(c.brier_score_p5 for c in site_cards),
+        "brier_score_p10": _mean(c.brier_score_p10 for c in site_cards),
+        "brier_score_p30": _mean(c.brier_score_p30 for c in site_cards),
+        "ece_p5": _mean(c.ece_p5 for c in site_cards),
+        "ece_p10": _mean(c.ece_p10 for c in site_cards),
+        "ece_p30": _mean(c.ece_p30 for c in site_cards),
+        "prob_recall_p5": _mean(c.prob_recall_p5 for c in site_cards),
+        "prob_recall_p10": _mean(c.prob_recall_p10 for c in site_cards),
+        "prob_recall_p30": _mean(c.prob_recall_p30 for c in site_cards),
         "confusion_matrix": cm,
     }
 
@@ -321,57 +350,53 @@ def regime_slices(
 
 
 class AccuracyStore:
-    """Read historical `metrics.json` files and write rollup artifacts.
+    """Read the forecast validation store parquet and write rollup artifacts.
 
     Uses the project's :class:`S3Resource` (minio client) so that no extra
-    dependency (boto3) is needed.
+    dependency (boto3) is needed.  The validation store is built by
+    ``station_forecast_validation_rebuild_job``.
     """
 
     def __init__(self, s3: S3Resource) -> None:
         self._s3 = s3
+        self._store_cache: pd.DataFrame | None = None
 
-    def read_json(self, key: str) -> dict[str, Any] | None:
-        try:
-            url = self._s3.publicUrl(path=key)
-            with urllib.request.urlopen(url) as resp:  # noqa: S310
-                return json.loads(resp.read())
-        except Exception:
-            return None
+    def _load_store(self) -> pd.DataFrame:
+        """Lazy-load the validation store parquet (cached for lifetime of asset run)."""
+        if self._store_cache is None:
+            try:
+                url = self._s3.publicUrl(path=FORECAST_VALIDATION_STORE_PATH)
+                df = pd.read_parquet(url)
+                df["time"] = pd.to_datetime(df["time"], utc=True)
+                self._store_cache = df
+            except Exception:
+                self._store_cache = pd.DataFrame()
+        return self._store_cache
+
+    def load_window(
+        self,
+        start: date,
+        end: date,
+        variant: str = "evidence",
+    ) -> pd.DataFrame:
+        """Return validation rows for target hours in [start, end] (inclusive).
+
+        Filters to the given *variant* (default "evidence").  All rows are
+        already matched (inner-joined) observations, so ``actual_h2s`` is
+        always present.
+        """
+        df = self._load_store()
+        if df.empty:
+            return df
+        if "variant" in df.columns:
+            df = df[df["variant"] == variant]
+        start_ts = pd.Timestamp(start, tz="UTC")
+        end_ts = pd.Timestamp(end, tz="UTC") + pd.Timedelta(hours=23, minutes=59)
+        return df[(df["time"] >= start_ts) & (df["time"] <= end_ts)].copy()
 
     def write_json(self, key: str, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, default=str, indent=2)
         self._s3.putFile_text(data=body, path=key, content_type="application/json")
-
-    def read_csv(self, key: str) -> pd.DataFrame:
-        url = self._s3.publicUrl(path=key)
-        return pd.read_csv(url)
-
-    def list_validation_days(
-        self, since: date, until: date, pipeline: str | None = None,
-    ) -> list[date]:
-        """Return the set of validation days present under the validation
-        prefix within [since, until].
-
-        If *pipeline* is given (e.g. "hourly", "daily_station"), look under
-        the per-pipeline subdirectory.  Otherwise fall back to the legacy
-        root ``metrics.json``.
-        """
-        days: list[date] = []
-        cur = since
-        while cur <= until:
-            if self.read_day_metrics(cur, pipeline=pipeline) is not None:
-                days.append(cur)
-            cur += timedelta(days=1)
-        return days
-
-    def read_day_metrics(
-        self, day: date, pipeline: str | None = None,
-    ) -> dict[str, Any] | None:
-        if pipeline:
-            key = f"{VALIDATION_PREFIX}/{day.isoformat()}/{pipeline}/metrics.json"
-        else:
-            key = f"{VALIDATION_PREFIX}/{day.isoformat()}/metrics.json"
-        return self.read_json(key)
 
 
 # ---------------------------------------------------------------------------
@@ -383,28 +408,27 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def _extract_sites_dict(m: dict[str, Any]) -> dict[str, Any] | None:
-    """Normalise a metrics.json payload into a sites dict (v1 or v2 schema)."""
-    sites_dict = m.get("sites")
-    if sites_dict is not None:
-        return sites_dict
-    # v1 flat schema: wrap into sites dict for uniform processing
-    if m.get("confusion_matrix") is not None:
-        site_key = m.get("site", "NESTOR__BES")
-        return {
-            site_key: {
-                "confusion_matrix": m["confusion_matrix"],
-                "n_predictions": m.get("n_predictions", 0),
-                "n_matched_observations": m.get("n_matched", 0),
-            },
-        }
-    return None
+def _prob_metrics(
+    grp: pd.DataFrame,
+    prob_col: str,
+    threshold_ppb: float,
+) -> tuple[float | None, float | None, float | None]:
+    """Return (brier_score, ece, prob_recall) for one probability column.
 
-
-# Pipeline subdirectories to scan for per-day metrics.
-# Order matters: daily_station covers all 3 stations, so its metrics are
-# preferred.  The root path (pipeline=None) is the legacy hourly-only fallback.
-_PIPELINES_TO_SCAN: list[str | None] = ["daily_station", None]
+    *prob_recall* is the fraction of actual ≥ threshold_ppb rows where the
+    classifier fired (p_k > 0.5) — the probability-call recall.
+    """
+    if prob_col not in grp.columns:
+        return None, None, None
+    valid = grp.dropna(subset=[prob_col, "actual_h2s"])
+    if valid.empty:
+        return None, None, None
+    y_true = (valid["actual_h2s"] >= threshold_ppb).astype(int).tolist()
+    bs = brier_score(valid[prob_col], y_true)
+    ece = expected_calibration_error(valid[prob_col], y_true)
+    positives = valid[valid["actual_h2s"] >= threshold_ppb]
+    recall = float((positives[prob_col] > 0.5).sum() / len(positives)) if len(positives) else None
+    return bs, ece, recall
 
 
 def build_period_scorecard(
@@ -412,76 +436,63 @@ def build_period_scorecard(
     start: date,
     end: date,
     scope: str,
+    variant: str = "evidence",
 ) -> PeriodScorecard:
-    """Aggregate per-day metrics.json into a single scorecard for [start, end].
+    """Build a scorecard for [start, end] from the multi-station validation store.
 
-    Scans multiple pipeline subdirectories (daily_station and the legacy
-    root) for each day and merges all sites found.  When a site appears in
-    more than one pipeline on the same day, daily_station takes precedence
-    (it covers all 3 stations and uses per-station models).
+    Reads ``h2s_pred`` and ``actual_h2s`` ppb columns, bins them into the
+    3-class scheme (green/yellow/orange), and computes per-station confusion
+    matrices. Brier score and ECE are computed from ``p30`` when present.
 
-    Raises ``dg.Failure`` when no validation days are found in the window.
+    Raises ``dg.Failure`` when no validation rows exist for the window.
     """
-    site_cms: dict[str, list[list[list[int]]]] = {}
-    site_pred_counts: dict[str, int] = {}
-    site_match_counts: dict[str, int] = {}
-    found_any = False
-
-    cur = start
-    while cur <= end:
-        # Collect sites from all pipelines for this day.
-        # Track which sites we've already seen so earlier pipelines in the
-        # list take precedence (daily_station > root).
-        seen_sites_today: set[str] = set()
-
-        for pipeline in _PIPELINES_TO_SCAN:
-            m = store.read_day_metrics(cur, pipeline=pipeline)
-            if not m:
-                continue
-            sites_dict = _extract_sites_dict(m)
-            if not sites_dict:
-                continue
-
-            for site, site_m in sites_dict.items():
-                if site in seen_sites_today:
-                    continue  # already covered by a higher-priority pipeline
-                cm = site_m.get("confusion_matrix")
-                if cm is None:
-                    continue
-                seen_sites_today.add(site)
-                found_any = True
-                site_cms.setdefault(site, []).append(cm)
-                site_pred_counts[site] = site_pred_counts.get(site, 0) + int(
-                    site_m.get("n_predictions", 0)
-                )
-                site_match_counts[site] = site_match_counts.get(site, 0) + int(
-                    site_m.get("n_matched_observations", site_m.get("n_matched", 0))
-                )
-
-        cur += timedelta(days=1)
-
-    if not found_any:
+    df = store.load_window(start, end, variant=variant)
+    if df.empty:
         raise dg.Failure(
-            f"No validation metrics found for {scope} window "
-            f"[{start.isoformat()} .. {end.isoformat()}]"
+            f"No validation data for {scope} window "
+            f"[{start.isoformat()} .. {end.isoformat()}] variant={variant}. "
+            "Run station_forecast_validation_rebuild_job to populate the store."
         )
 
+    df = df.dropna(subset=["h2s_pred", "actual_h2s"]).copy()
+    if df.empty:
+        raise dg.Failure(
+            f"All rows for {scope} [{start} .. {end}] have null predictions or actuals."
+        )
+
+    df["pred_cat"] = categorize(df["h2s_pred"]).astype(str)
+    df["actual_cat"] = categorize(df["actual_h2s"]).astype(str)
+
     site_cards: list[SiteScorecard] = []
-    for site, cms in site_cms.items():
-        cm = combine_confusion_matrices(cms)
+    for station, grp in df.groupby("station"):
+        y_true = grp["actual_cat"].tolist()
+        y_pred = grp["pred_cat"].tolist()
+        cm = confusion_matrix(y_true, y_pred)
         _, orange_recall = class_precision_recall(cm, "orange")
         orange_precision, _ = class_precision_recall(cm, "orange")
+
+        bs5, ece5, rec5 = _prob_metrics(grp, "p5", threshold_ppb=5.0)
+        bs10, ece10, rec10 = _prob_metrics(grp, "p10", threshold_ppb=10.0)
+        bs30, ece30, rec30 = _prob_metrics(grp, "p30", threshold_ppb=30.0)
+
         site_cards.append(
             SiteScorecard(
-                site=site,
-                n_predictions=site_pred_counts.get(site, 0),
-                n_matched_observations=site_match_counts.get(site, 0),
+                site=str(station),
+                n_predictions=len(grp),
+                n_matched_observations=len(grp),
                 balanced_accuracy=balanced_accuracy(cm),
                 orange_recall=orange_recall,
                 orange_precision=orange_precision,
                 false_alarm_rate=false_alarm_rate_for_orange(cm),
-                brier_score=None,
-                expected_calibration_error=None,
+                brier_score_p5=bs5,
+                brier_score_p10=bs10,
+                brier_score_p30=bs30,
+                ece_p5=ece5,
+                ece_p10=ece10,
+                ece_p30=ece30,
+                prob_recall_p5=rec5,
+                prob_recall_p10=rec10,
+                prob_recall_p30=rec30,
                 confusion_matrix=cm,
             )
         )
@@ -512,11 +523,10 @@ daily_partitions = dg.DailyPartitionsDefinition(start_date="2024-01-01")
 def daily_accuracy_scorecard(context: AssetExecutionContext) -> dict[str, Any]:
     day = date.fromisoformat(context.partition_key)
     store = AccuracyStore(context.resources.s3)
-    metrics = store.read_day_metrics(day)
-    if metrics is None:
+    if store.load_window(day, day).empty:
         raise dg.Failure(
-            f"No metrics.json found for {day.isoformat()} at "
-            f"{VALIDATION_PREFIX}/{day.isoformat()}/metrics.json"
+            f"No validation data for {day.isoformat()} — "
+            "run station_forecast_validation_rebuild_job to populate the store."
         )
     card = build_period_scorecard(store, day, day, scope="daily")
     store.write_json(

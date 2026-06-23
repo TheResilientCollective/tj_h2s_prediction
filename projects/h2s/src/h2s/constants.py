@@ -192,6 +192,14 @@ FORECAST_VALIDATION_MAX_AGE_DAYS  = 120  # default join window; rebuild job pass
 # S3 path for extreme event summaries
 EXTREME_EVENT_PATH = 'tijuana/forecast/extreme_events'
 
+# Forecast performance report (asymmetric, temporally-tolerant rubric) — charts,
+# the structured report JSON, and the LLM narrative. Run-scoped under the base
+# plus a `latest` mirror for dashboards.
+PERFORMANCE_REPORT_BASE          = 'tijuana/forecast/performance'
+PERFORMANCE_REPORT_JSON_PATH     = f'{PERFORMANCE_REPORT_BASE}/{{run_tag}}/report.json'
+PERFORMANCE_REPORT_LATEST_PATH   = f'{LATEST_BASEPATH}/forecast_data/forecast_performance_latest.json'
+PERFORMANCE_NARRATIVE_LATEST_PATH = f'{LATEST_BASEPATH}/forecast_data/forecast_performance_narrative_latest.txt'
+
 # ==============================================================================
 # Two-Tier H2S Alert System
 # ==============================================================================
@@ -306,6 +314,66 @@ def classify_risk(prob_5: float, prob_10: float, h2s_pred: float, prob_30: float
     elif prob_5 > PROB_5_CAUTION or h2s_pred > H2S_THRESHOLD_LOW:
         return RISK_YELLOW_LOW
     return RISK_GREEN
+
+
+# ------------------------------------------------------------------------------
+# 4-tier reporting categories (green / yellow-low / yellow-high / orange)
+# ------------------------------------------------------------------------------
+# Surfaces every hazard level — not just orange (>30). The yellow-HIGH tier
+# (>=10 ppb) is the resident-smell threshold we particularly want to get right.
+# Cut points reuse H2S_THRESHOLD_LOW/MED/HIGH (5 / 10 / 30 ppb).
+
+CATEGORY_GREEN = 'green'
+CATEGORY_YELLOW_LOW = 'yellow_low'
+CATEGORY_YELLOW_HIGH = 'yellow_high'
+CATEGORY_ORANGE = 'orange'
+CATEGORY_UNKNOWN = 'unknown'
+
+# Ordered worst-last for color ramps / category codes.
+CATEGORY_ORDER = [
+    CATEGORY_GREEN, CATEGORY_YELLOW_LOW, CATEGORY_YELLOW_HIGH, CATEGORY_ORANGE,
+]
+
+# Hex palette: green → pale yellow → amber (smell) → red (hazard); grey = no data.
+CATEGORY_COLORS = {
+    CATEGORY_GREEN:       '#2ecc71',
+    CATEGORY_YELLOW_LOW:  '#f7dc6f',
+    CATEGORY_YELLOW_HIGH: '#f39c12',
+    CATEGORY_ORANGE:      '#e74c3c',
+    CATEGORY_UNKNOWN:     '#bdc3c7',
+}
+
+# Human-facing labels (yellow_low and yellow_high both read as "yellow" tiers).
+CATEGORY_LABELS = {
+    CATEGORY_GREEN:       'green',
+    CATEGORY_YELLOW_LOW:  'yellow',
+    CATEGORY_YELLOW_HIGH: 'yellow-high',
+    CATEGORY_ORANGE:      'orange',
+    CATEGORY_UNKNOWN:     'n/a',
+}
+
+
+def h2s_category(value: float) -> str:
+    """4-tier hazard category from an H2S value (ppb).
+
+    green       H2S < 5 ppb
+    yellow_low  5 <= H2S < 10 ppb
+    yellow_high 10 <= H2S < 30 ppb   (resident-smell level — get it right)
+    orange      H2S >= 30 ppb        (hazardous)
+
+    NaN/None → 'unknown'. This is the magnitude-only mapping used by the
+    heatmaps, performance reports, and LLM narrative; it deliberately ignores
+    probabilities so a single predicted-vs-actual rubric applies on both sides.
+    """
+    if value is None or value != value:  # NaN-safe
+        return CATEGORY_UNKNOWN
+    if value >= H2S_THRESHOLD_HIGH:
+        return CATEGORY_ORANGE
+    if value >= H2S_THRESHOLD_MED:
+        return CATEGORY_YELLOW_HIGH
+    if value >= H2S_THRESHOLD_LOW:
+        return CATEGORY_YELLOW_LOW
+    return CATEGORY_GREEN
 
 # ==============================================================================
 # Model Feature Lists

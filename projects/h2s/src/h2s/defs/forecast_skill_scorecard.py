@@ -19,6 +19,7 @@ from h2s.defs.h2s_forecast_validation_pipeline import (
     forecast_validation_store,
 )
 from h2s.predictor.visualizations import generate_skill_by_lead_chart
+from h2s.utils.chart_meta import coverage_label
 
 _KEY = lambda name: dg.AssetKey(["h2s", name])
 
@@ -55,20 +56,35 @@ def _scorecard_lines(curves: pd.DataFrame) -> list[str]:
     required_resource_keys={"slack", "s3"},
     kinds={"slack", "s3"},
     description="Render the per-lead-hour skill curves as a Slack scorecard + chart (Evidence vs Lean)",
-    ins={"forecast_skill_report": dg.AssetIn(key=_KEY("forecast_skill_report"))},
+    ins={
+        "forecast_skill_report": dg.AssetIn(key=_KEY("forecast_skill_report")),
+        "forecast_validation_store": dg.AssetIn(key=_KEY("forecast_validation_store")),
+    },
 )
 def forecast_skill_scorecard(
     context: dg.AssetExecutionContext,
     forecast_skill_report: pd.DataFrame,
+    forecast_validation_store: pd.DataFrame,
 ) -> None:
     s3 = context.resources.s3
     slack = context.resources.slack
     env_label = os.environ.get("ENV_LABEL", "").upper()
     curves = forecast_skill_report
 
+    # Evaluated-forecast window: the span of forecast target hours that have
+    # since been measured (the period these skill stats actually reflect).
+    vs = forecast_validation_store
+    t_min = t_max = None
+    if vs is not None and not vs.empty and "time" in vs.columns:
+        t = pd.to_datetime(vs["time"], utc=True, errors="coerce").dropna()
+        if not t.empty:
+            t_min, t_max = t.min(), t.max()
+    coverage = (t_min, t_max) if t_min is not None else None
+    window_str = coverage_label(t_min, t_max)
+
     image_url = None
     try:
-        buf = generate_skill_by_lead_chart(curves, env_label=env_label)
+        buf = generate_skill_by_lead_chart(curves, env_label=env_label, coverage=coverage)
         data = buf.getvalue()
         s3.putFile(data, _SCORECARD_CHART_LATEST, bucket=s3.S3_BUCKET, content_type="image/png")
         image_url = s3.publicUrl(path=_SCORECARD_CHART_LATEST, bucket=s3.S3_BUCKET)
@@ -77,15 +93,16 @@ def forecast_skill_scorecard(
         context.log.warning(f"Scorecard chart render/upload failed; posting text-only: {e}")
 
     label = f" [{env_label}]" if env_label else ""
+    window_line = f"\n🗓 Evaluated forecast {window_str}" if window_str else ""
     if curves is None or curves.empty:
         body = (
-            f"📈 *H2S Forecast Skill Scorecard{label}*\n"
+            f"📈 *H2S Forecast Skill Scorecard{label}*{window_line}\n"
             "No overlapping forecast/actual rows yet — the validation store fills "
             "in as product target hours are observed."
         )
     else:
         body = "\n".join([
-            f"📈 *H2S Forecast Skill Scorecard{label}*",
+            f"📈 *H2S Forecast Skill Scorecard{label}*{window_line}",
             f"Skill curves: {len(curves)} (product, variant, lead) cells   "
             f"· skill_curves.parquet",
             "─" * 40,

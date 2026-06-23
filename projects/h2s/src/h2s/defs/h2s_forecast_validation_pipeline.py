@@ -185,8 +185,18 @@ def _summarize(curves: pd.DataFrame, v: pd.DataFrame) -> dict:
                 for r in g.itertuples()
             },
             "mae_by_lead": {int(r.lead_hour): round(r.mae, 2) for r in g.itertuples()},
+            "prob_recall_5_by_lead": {
+                int(r.lead_hour): (None if getattr(r, "prob_recall_5", None) is None
+                                   else round(r.prob_recall_5, 3))
+                for r in g.itertuples()
+            },
+            "prob_recall_10_by_lead": {
+                int(r.lead_hour): (None if getattr(r, "prob_recall_10", None) is None
+                                   else round(r.prob_recall_10, 3))
+                for r in g.itertuples()
+            },
             "prob_recall_30_by_lead": {
-                int(r.lead_hour): (None if getattr(r, "prob_recall_30") is None
+                int(r.lead_hour): (None if getattr(r, "prob_recall_30", None) is None
                                    else round(r.prob_recall_30, 3))
                 for r in g.itertuples()
             },

@@ -9,6 +9,7 @@ from dagster_slack import make_slack_on_run_failure_sensor
 
 from h2s.resources.minio import S3Resource
 from h2s.resources.slack import SlackAlertResource
+from h2s.resources.resilientllm import ResilientLLMResource
 
 # Configure S3 resource (using EnvVar for Dagster config)
 s3_resource = S3Resource(
@@ -25,6 +26,12 @@ slack_resource = SlackAlertResource(
     token=EnvVar('SLACK_TOKEN'),
     channel=os.environ.get('SLACK_CHANNEL', '#test'),
 )
+
+# ResilientLLM webhook resource — generates plain-language narratives. Reads
+# RESILIENTLLM_API_TOKEN / RESILIENTLLM_WEBHOOK / RESILIENTLLM_WEBHOOK_UUID from
+# the environment via the resource's own defaults; an unset token makes the
+# narrative asset fall back to its deterministic local text.
+llm_resource = ResilientLLMResource()
 def slack_message_fn(context: RunFailureSensorContext) -> str:
     return (
         f"Job *[{context.dagster_run.job_name}]* failed! "
@@ -38,8 +45,8 @@ slack_on_run_failure = make_slack_on_run_failure_sensor(
 )
 
 resources = {
-    "local": {"s3": s3_resource, "slack": slack_resource},
-    "production": {"s3": s3_resource, "slack": slack_resource},
+    "local": {"s3": s3_resource, "slack": slack_resource, "llm": llm_resource},
+    "production": {"s3": s3_resource, "slack": slack_resource, "llm": llm_resource},
 }
 
 deployment_name = os.environ.get("DAGSTER_DEPLOYMENT", "local")
@@ -47,25 +54,6 @@ deployment_name = os.environ.get("DAGSTER_DEPLOYMENT", "local")
 
 @definitions
 def defs():
-    # Import prediction pipeline assets
-    from h2s.defs.h2s_pipeline import (
-        h2s_model_artifacts,
-        preprocessed_features,
-        h2s_predictions,
-        h2s_alerts,
-        slack_alerts,
-        h2s_variant_predictions,
-        h2s_ensemble_predictions,
-        feature_importance_viz,
-        confusion_matrix_viz,
-        model_comparison_viz,
-        prediction_timeline_viz,
-        cross_correlation_viz,
-        predictions_export,
-        daily_validation_report,
-        monthly_performance_viz,
-    )
-
     # Import two-tier alert system (Tiers 4–5: observation-based)
     from h2s.defs.h2s_alert_system import (
         h2s_alert_dispatcher,
@@ -125,6 +113,14 @@ def defs():
         forecast_validation_schedule,
     )
 
+    # Import forecast performance report + AI narrative (asymmetric rubric)
+    from h2s.defs.forecast_performance import (
+        forecast_performance_report,
+        forecast_performance_narrative,
+        forecast_performance_job,
+        forecast_performance_schedule,
+    )
+
     # Import daily forecast digest (always-on situational awareness) — Deliverable B
     from h2s.defs.forecast_digest import (
         forecast_digest,
@@ -137,6 +133,13 @@ def defs():
         forecast_skill_scorecard,
         forecast_skill_scorecard_job,
         forecast_skill_scorecard_schedule,
+    )
+
+    # Import all-station heatmap board (category + exceedance-probability grids)
+    from h2s.defs.forecast_heatmap import (
+        forecast_heatmap_board,
+        forecast_heatmap_job,
+        forecast_heatmap_schedule,
     )
 
     # Import station forecast analysis pipeline assets
@@ -190,17 +193,6 @@ def defs():
 
     # Import schedules and jobs
     from h2s.defs.h2s_schedules import (
-        monthly_data_extraction_job,
-        monthly_model_training_job,
-        deploy_approved_model_job,
-        approve_and_deploy_job,
-        monthly_data_schedule,
-        monthly_model_training_schedule,
-        forecast_prediction_job,
-        forecast_prediction_schedule,
-        station_forecast_validation_job,
-        station_forecast_validation_metrics_job,
-        station_forecast_validation_schedule,
         station_model_training_schedule,
         station_forecast_analysis_schedule,
         station_backfill_schedule,
@@ -218,24 +210,9 @@ def defs():
     # Create definitions with assets, jobs, schedules, and resources
     all_defs = Definitions(
         assets=[
-            # Prediction Pipeline Assets
-            h2s_model_artifacts,
-            preprocessed_features,
-            h2s_predictions,
-            h2s_alerts,
-            slack_alerts,
+            # Observation-based alert dispatchers (Tiers 4–5 + APCD watch)
             h2s_alert_dispatcher,
             apcd_sensor_alert_dispatcher,
-            h2s_variant_predictions,
-            h2s_ensemble_predictions,
-            feature_importance_viz,
-            confusion_matrix_viz,
-            model_comparison_viz,
-            prediction_timeline_viz,
-            cross_correlation_viz,
-            predictions_export,
-            daily_validation_report,
-            monthly_performance_viz,
             # Multi-Station Training Pipeline Assets
             multi_station_training_data,
             per_station_trained_models,
@@ -273,8 +250,13 @@ def defs():
             forecast_validation_store,
             forecast_skill_report,
             forecast_skill_scorecard,
+            # Forecast performance report + AI narrative (asymmetric rubric)
+            forecast_performance_report,
+            forecast_performance_narrative,
             # Daily forecast digest (all-station situational awareness)
             forecast_digest,
+            # All-station forecast heatmap board (category + probability grids)
+            forecast_heatmap_board,
             # Forecast Cascade Pre-Alert (Tiers 1–3, product-probability-driven)
             cascade_alert_dispatcher,
             # Observed >10 ppb Alert-Performance machine (yellow tier)
@@ -286,16 +268,7 @@ def defs():
             backtest_comparison_index,
         ],
         jobs=[
-            # Prediction jobs
-            forecast_prediction_job,
-            station_forecast_validation_job,
-            station_forecast_validation_metrics_job,
-            # Training jobs (old single-model pipeline — kept for reference)
-            monthly_data_extraction_job,
-            monthly_model_training_job,
-            deploy_approved_model_job,
-            approve_and_deploy_job,
-            # New multi-station training jobs
+            # Multi-station training jobs
             station_model_training_job,
             station_model_deployment_job,
             station_model_promotion_job,
@@ -321,6 +294,10 @@ def defs():
             forecast_digest_job,
             # Forecast skill scorecard job (Deliverable C)
             forecast_skill_scorecard_job,
+            # All-station forecast heatmap board job
+            forecast_heatmap_job,
+            # Forecast performance rubric report + AI narrative job
+            forecast_performance_job,
             # Observed >10 ppb Alert-Performance job (yellow tier)
             h2s_alert_performance_job,
             # Validation jobs
@@ -330,10 +307,6 @@ def defs():
             station_backtest_index_job,
         ],
         schedules=[
-            forecast_prediction_schedule,
-            station_forecast_validation_schedule,
-            monthly_data_schedule,
-            monthly_model_training_schedule,
             station_model_training_schedule,
             station_forecast_analysis_schedule,
             # Dispersion schedules
@@ -349,6 +322,10 @@ def defs():
             forecast_digest_schedule,
             # Weekly forecast skill scorecard schedule (Deliverable C)
             forecast_skill_scorecard_schedule,
+            # Daily all-station forecast heatmap board schedule
+            forecast_heatmap_schedule,
+            # Weekly forecast performance rubric report + AI narrative schedule
+            forecast_performance_schedule,
             # Walk-forward backfill schedule
             station_backfill_schedule,
         ],
