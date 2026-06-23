@@ -31,7 +31,7 @@ from h2s.constants import (  # noqa: E402
     H2S_THRESHOLD_MED,
 )
 from h2s.forecasting.performance_report import VERDICT_COST  # noqa: E402
-from h2s.utils.chart_meta import stamp_generated  # noqa: E402
+from h2s.utils.chart_meta import as_of_label, stamp_generated  # noqa: E402
 
 # Verdict → colour (green=good … red=dangerous), ordered best-to-worst.
 _VERDICT_ORDER = [
@@ -72,13 +72,15 @@ def _finish(fig) -> BytesIO:
 
 
 def generate_pred_vs_actual_scatter(
-    annotated: pd.DataFrame, *, env_label: str = ""
+    annotated: pd.DataFrame, *, env_label: str = "", as_of=None
 ) -> BytesIO:
     """Predicted vs measured H2S on a symlog grid, coloured by verdict."""
     if annotated is None or annotated.empty:
         return _empty("No matched forecast/observation pairs yet")
 
     label = f" [{env_label}]" if env_label else ""
+    dated = as_of_label(as_of)
+    ds = f"   ·   {dated}" if dated else ""
     fig, ax = plt.subplots(figsize=(7.5, 7))
     fig.patch.set_facecolor("#f8f9fa")
 
@@ -105,7 +107,7 @@ def generate_pred_vs_actual_scatter(
     ax.set_xlabel("measured H2S (ppb)")
     ax.set_ylabel("predicted H2S (ppb)")
     ax.set_title(
-        f"Predicted vs Measured H2S{label}\n"
+        f"Predicted vs Measured H2S{label}{ds}\n"
         "below the diagonal = under-prediction (the hazardous direction)",
         fontsize=12, fontweight="bold",
     )
@@ -141,6 +143,7 @@ def generate_correlation_by_hour(
     by_hour_of_day: pd.DataFrame,
     *,
     env_label: str = "",
+    as_of=None,
 ) -> BytesIO:
     """Two-panel correlation chart: skill vs lead hour and vs hour-of-day."""
     if (by_lead_hour is None or by_lead_hour.empty) and (
@@ -149,6 +152,8 @@ def generate_correlation_by_hour(
         return _empty("No matched pairs for correlation yet")
 
     label = f" [{env_label}]" if env_label else ""
+    dated = as_of_label(as_of)
+    ds = f"   ·   {dated}" if dated else ""
     fig, (axl, axr) = plt.subplots(1, 2, figsize=(13, 5))
     fig.patch.set_facecolor("#f8f9fa")
     _corr_panel(axl, by_lead_hour, "lead_hour", "lead hour (h ahead)")
@@ -156,7 +161,7 @@ def generate_correlation_by_hour(
     _corr_panel(axr, by_hour_of_day, "hour_of_day", "UTC hour-of-day")
     axr.set_title("Skill vs hour-of-day", fontsize=11, fontweight="bold")
     fig.suptitle(
-        f"Forecast Performance by Hour{label}  (ρ = rank correlation of predicted vs measured)",
+        f"Forecast Performance by Hour{label}  (ρ = rank correlation of predicted vs measured){ds}",
         fontsize=12, fontweight="bold",
     )
     fig.tight_layout(rect=(0, 0, 1, 0.95))
@@ -168,9 +173,12 @@ def generate_verdict_confusion(
     summary: dict,
     *,
     env_label: str = "",
+    as_of=None,
 ) -> BytesIO:
     """Category confusion grid + verdict tally bar with headline metrics."""
     label = f" [{env_label}]" if env_label else ""
+    dated = as_of_label(as_of)
+    ds = f"   ·   {dated}" if dated else ""
     fig, (axc, axb) = plt.subplots(1, 2, figsize=(13, 5.5),
                                    gridspec_kw={"width_ratios": [1, 1.1]})
     fig.patch.set_facecolor("#f8f9fa")
@@ -223,7 +231,7 @@ def generate_verdict_confusion(
     if dm is not None:
         headline += f"   dangerous-miss={dm:.1%}   smell-miss={sm:.1%}   mean cost={mc:.2f}"
     fig.suptitle(
-        f"Forecast Performance Rubric{label}\n{headline}",
+        f"Forecast Performance Rubric{label}{ds}\n{headline}",
         fontsize=12, fontweight="bold",
     )
     fig.tight_layout(rect=(0, 0, 1, 0.93))

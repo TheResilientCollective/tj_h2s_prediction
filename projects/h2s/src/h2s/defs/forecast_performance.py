@@ -95,16 +95,18 @@ def forecast_performance_report(
     base = f"{PERFORMANCE_REPORT_BASE}/{run_tag}"
     verdict_url = _upload(
         context, s3,
-        generate_verdict_confusion(report["confusion"], summary, env_label=env_label),
+        generate_verdict_confusion(report["confusion"], summary, env_label=env_label,
+                                   as_of=run_tag),
         f"{base}/verdict_confusion.png", _VERDICT_LATEST, "Verdict/confusion board")
     scatter_url = _upload(
         context, s3,
-        generate_pred_vs_actual_scatter(report["annotated"], env_label=env_label),
+        generate_pred_vs_actual_scatter(report["annotated"], env_label=env_label,
+                                        as_of=run_tag),
         f"{base}/pred_vs_actual.png", _SCATTER_LATEST, "Predicted-vs-measured scatter")
     byhour_url = _upload(
         context, s3,
         generate_correlation_by_hour(report["by_lead_hour"], report["by_hour_of_day"],
-                                     env_label=env_label),
+                                     env_label=env_label, as_of=run_tag),
         f"{base}/correlation_by_hour.png", _BYHOUR_LATEST, "Correlation-by-hour")
 
     # --- Slack board -------------------------------------------------------

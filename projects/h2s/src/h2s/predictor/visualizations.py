@@ -13,7 +13,7 @@ import pandas as pd
 import seaborn as sns
 from sklearn.metrics import confusion_matrix, balanced_accuracy_score
 
-from h2s.utils.chart_meta import stamp_generated
+from h2s.utils.chart_meta import as_of_label, stamp_generated
 
 
 def generate_feature_importance(model, prep_info: Dict, top_n: int = 15, model_name: str = "") -> BytesIO:
@@ -1468,7 +1468,7 @@ def generate_forecast_hazard_chart(
     return buf
 
 
-def generate_skill_by_lead_chart(curves_df: pd.DataFrame, *, env_label: str = "") -> BytesIO:
+def generate_skill_by_lead_chart(curves_df: pd.DataFrame, *, env_label: str = "", as_of=None) -> BytesIO:
     """Forecast skill vs lead-hour: Spearman, MAE, and P(>30) recall, Evidence vs Lean.
 
     ``curves_df`` is the ``forecast_skill_report`` output (one row per product,
@@ -1482,7 +1482,9 @@ def generate_skill_by_lead_chart(curves_df: pd.DataFrame, *, env_label: str = ""
     fig, axes = plt.subplots(3, 1, figsize=(11, 8), sharex=True)
     fig.patch.set_facecolor("#f8f9fa")
     label_suffix = f" [{env_label}]" if env_label else ""
-    fig.suptitle(f"Forecast skill vs lead hour{label_suffix}", fontsize=13,
+    dated = as_of_label(as_of)
+    ds = f"   ·   {dated}" if dated else ""
+    fig.suptitle(f"Forecast skill vs lead hour{label_suffix}{ds}", fontsize=13,
                  fontweight="bold", y=0.995)
 
     if curves_df is None or curves_df.empty:
