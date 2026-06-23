@@ -276,8 +276,9 @@ dangerous-miss rate, smell-miss rate, mean cost; plus Spearman/MAE by lead-hour
 and by hour-of-day, and a predicted-vs-measured scatter. The narrative is
 generated via the ResilientLLM n8n webhook (`resources/resilientllm.py`,
 `execute_with_data`) when `RESILIENTLLM_*` env vars are set, otherwise a
-deterministic local narrative. Cost weights are starting points — tune the
-low-yellow cut and the rubric with health officials.
+deterministic local narrative. See `projects/h2s/docs/FORECAST_PERFORMANCE_RUBRIC.md`
+for the full verdict definitions, cost weights, and tuning notes. These are
+starting points — refine the rubric with health officials and the community.
 
 ### The Forecast Products (nowcast / nearcast / forecast)
 
@@ -874,4 +875,5 @@ See README.md for complete column list.
 - `NESTOR_BES_H2S_Forecasting_Report.md` - Technical report
 - `Complete_Model_Testing_Summary.md` - Model evaluation
 - `projects/h2s/VALIDATION_AND_ACCURACY_REPORTING.md` - Validation pipeline guide, backfill scripts, accuracy reporting (see this for detailed validation workflows)
+- `projects/h2s/docs/FORECAST_PERFORMANCE_RUBRIC.md` - Forecast performance rubric: verdict definitions, cost weights, and tuning notes for health official refinement
 - `experiments/` - Research-style retrain experiments; each subfolder has its own `README.md` / `RESULTS.md`. Calibration-aligned evaluation harness lives in `projects/h2s/src/h2s/training/calibration_eval.py`.
