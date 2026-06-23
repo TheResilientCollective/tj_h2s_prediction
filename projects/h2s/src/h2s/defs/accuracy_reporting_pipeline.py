@@ -512,11 +512,17 @@ daily_partitions = dg.DailyPartitionsDefinition(start_date="2024-01-01")
 def daily_accuracy_scorecard(context: AssetExecutionContext) -> dict[str, Any]:
     day = date.fromisoformat(context.partition_key)
     store = AccuracyStore(context.resources.s3)
-    metrics = store.read_day_metrics(day)
+    # Guard: check all known pipeline paths, not just the legacy root.
+    metrics = None
+    for pipeline in _PIPELINES_TO_SCAN:
+        metrics = store.read_day_metrics(day, pipeline=pipeline)
+        if metrics is not None:
+            break
     if metrics is None:
         raise dg.Failure(
-            f"No metrics.json found for {day.isoformat()} at "
-            f"{VALIDATION_PREFIX}/{day.isoformat()}/metrics.json"
+            f"No metrics.json found for {day.isoformat()} under "
+            f"{VALIDATION_PREFIX}/{day.isoformat()}/ "
+            f"(checked pipelines: {_PIPELINES_TO_SCAN})"
         )
     card = build_period_scorecard(store, day, day, scope="daily")
     store.write_json(
