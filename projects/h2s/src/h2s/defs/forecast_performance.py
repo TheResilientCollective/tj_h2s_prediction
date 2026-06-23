@@ -37,6 +37,7 @@ from h2s.predictor.performance_charts import (
     generate_pred_vs_actual_scatter,
     generate_verdict_confusion,
 )
+from h2s.utils.chart_meta import coverage_label
 
 _KEY = lambda name: dg.AssetKey(["h2s", name])
 
@@ -84,6 +85,17 @@ def forecast_performance_report(
     summary = report["summary"]
     payload = build_llm_payload(report, variant=variant)
 
+    # Evaluated-forecast window: span of forecast target hours that have been
+    # measured (the period these performance stats reflect).
+    vs = forecast_validation_store
+    t_min = t_max = None
+    if vs is not None and not vs.empty and "time" in vs.columns:
+        t = pd.to_datetime(vs["time"], utc=True, errors="coerce").dropna()
+        if not t.empty:
+            t_min, t_max = t.min(), t.max()
+    coverage = (t_min, t_max) if t_min is not None else None
+    window_str = coverage_label(t_min, t_max)
+
     # --- Persist the structured report (narrative-ready) -------------------
     report_json = json.dumps(payload, indent=2, default=str)
     s3.putFile(report_json, PERFORMANCE_REPORT_JSON_PATH.format(run_tag=run_tag),
@@ -96,25 +108,26 @@ def forecast_performance_report(
     verdict_url = _upload(
         context, s3,
         generate_verdict_confusion(report["confusion"], summary, env_label=env_label,
-                                   as_of=run_tag),
+                                   as_of=run_tag, coverage=coverage),
         f"{base}/verdict_confusion.png", _VERDICT_LATEST, "Verdict/confusion board")
     scatter_url = _upload(
         context, s3,
         generate_pred_vs_actual_scatter(report["annotated"], env_label=env_label,
-                                        as_of=run_tag),
+                                        as_of=run_tag, coverage=coverage),
         f"{base}/pred_vs_actual.png", _SCATTER_LATEST, "Predicted-vs-measured scatter")
     byhour_url = _upload(
         context, s3,
         generate_correlation_by_hour(report["by_lead_hour"], report["by_hour_of_day"],
-                                     env_label=env_label, as_of=run_tag),
+                                     env_label=env_label, as_of=run_tag, coverage=coverage),
         f"{base}/correlation_by_hour.png", _BYHOUR_LATEST, "Correlation-by-hour")
 
     # --- Slack board -------------------------------------------------------
     label = f" [{env_label}]" if env_label else ""
     ta = summary.get("tolerant_accuracy")
+    window_line = f"🗓 Evaluated forecast {window_str}\n" if window_str else ""
     header = "\n".join([
         f"📈 *H2S Forecast Performance{label}* — {variant.capitalize()}",
-        f"Matched forecast-hours: {summary.get('n', 0)}   "
+        f"{window_line}Matched forecast-hours: {summary.get('n', 0)}   "
         f"tolerant-accuracy: {'n/a' if ta is None else f'{ta:.0%}'}   "
         f"dangerous-miss: {summary.get('dangerous_miss_rate')}   "
         f"smell-miss: {summary.get('smell_miss_rate')}",
