@@ -72,8 +72,17 @@ class SiteScorecard:
     orange_recall: float | None
     orange_precision: float | None
     false_alarm_rate: float | None
-    brier_score: float | None
-    expected_calibration_error: float | None
+    # Probability calibration per threshold (p_k = P(H2S ≥ k ppb))
+    brier_score_p5: float | None
+    brier_score_p10: float | None
+    brier_score_p30: float | None
+    ece_p5: float | None
+    ece_p10: float | None
+    ece_p30: float | None
+    # Recall: fraction of actual ≥k events where p_k > 0.5 fired
+    prob_recall_p5: float | None
+    prob_recall_p10: float | None
+    prob_recall_p30: float | None
     confusion_matrix: list[list[int]]
 
 
@@ -146,22 +155,22 @@ def false_alarm_rate_for_orange(cm: list[list[int]]) -> float | None:
 
 
 def brier_score(
-    prob_orange: Iterable[float], y_true_orange: Iterable[int]
+    probs: Iterable[float], y_true: Iterable[int]
 ) -> float | None:
-    p = np.asarray(list(prob_orange), dtype=float)
-    y = np.asarray(list(y_true_orange), dtype=float)
+    p = np.asarray(list(probs), dtype=float)
+    y = np.asarray(list(y_true), dtype=float)
     if len(p) == 0:
         return None
     return float(np.mean((p - y) ** 2))
 
 
 def expected_calibration_error(
-    prob_orange: Iterable[float],
-    y_true_orange: Iterable[int],
+    probs: Iterable[float],
+    y_true: Iterable[int],
     n_bins: int = 10,
 ) -> float | None:
-    p = np.asarray(list(prob_orange), dtype=float)
-    y = np.asarray(list(y_true_orange), dtype=float)
+    p = np.asarray(list(probs), dtype=float)
+    y = np.asarray(list(y_true), dtype=float)
     if len(p) == 0:
         return None
     bins = np.linspace(0.0, 1.0, n_bins + 1)
@@ -241,11 +250,11 @@ def scorecard_from_predictions(
     orange_precision, _ = class_precision_recall(cm, "orange")
     far = false_alarm_rate_for_orange(cm)
 
-    brier = ece = None
-    if "probability_orange" in joined:
+    bs30 = ece30 = None
+    if "probability_orange" in joined.columns:
         y_true_orange = [1 if c == "orange" else 0 for c in y_true]
-        brier = brier_score(joined["probability_orange"], y_true_orange)
-        ece = expected_calibration_error(joined["probability_orange"], y_true_orange)
+        bs30 = brier_score(joined["probability_orange"], y_true_orange)
+        ece30 = expected_calibration_error(joined["probability_orange"], y_true_orange)
 
     return SiteScorecard(
         site=site,
@@ -255,8 +264,15 @@ def scorecard_from_predictions(
         orange_recall=orange_recall,
         orange_precision=orange_precision,
         false_alarm_rate=far,
-        brier_score=brier,
-        expected_calibration_error=ece,
+        brier_score_p5=None,
+        brier_score_p10=None,
+        brier_score_p30=bs30,
+        ece_p5=None,
+        ece_p10=None,
+        ece_p30=ece30,
+        prob_recall_p5=None,
+        prob_recall_p10=None,
+        prob_recall_p30=None,
         confusion_matrix=cm,
     )
 
@@ -274,6 +290,11 @@ def overall_from_sites(site_cards: list[SiteScorecard]) -> dict[str, Any]:
     cm = combine_confusion_matrices(c.confusion_matrix for c in site_cards)
     _, orange_recall = class_precision_recall(cm, "orange")
     orange_precision, _ = class_precision_recall(cm, "orange")
+
+    def _mean(vals):
+        clean = [v for v in vals if v is not None]
+        return float(np.mean(clean)) if clean else None
+
     return {
         "n_sites": len(site_cards),
         "n_predictions": sum(c.n_predictions for c in site_cards),
@@ -282,6 +303,15 @@ def overall_from_sites(site_cards: list[SiteScorecard]) -> dict[str, Any]:
         "orange_recall": orange_recall,
         "orange_precision": orange_precision,
         "false_alarm_rate": false_alarm_rate_for_orange(cm),
+        "brier_score_p5": _mean(c.brier_score_p5 for c in site_cards),
+        "brier_score_p10": _mean(c.brier_score_p10 for c in site_cards),
+        "brier_score_p30": _mean(c.brier_score_p30 for c in site_cards),
+        "ece_p5": _mean(c.ece_p5 for c in site_cards),
+        "ece_p10": _mean(c.ece_p10 for c in site_cards),
+        "ece_p30": _mean(c.ece_p30 for c in site_cards),
+        "prob_recall_p5": _mean(c.prob_recall_p5 for c in site_cards),
+        "prob_recall_p10": _mean(c.prob_recall_p10 for c in site_cards),
+        "prob_recall_p30": _mean(c.prob_recall_p30 for c in site_cards),
         "confusion_matrix": cm,
     }
 
@@ -378,6 +408,28 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def _prob_metrics(
+    grp: pd.DataFrame,
+    prob_col: str,
+    threshold_ppb: float,
+) -> tuple[float | None, float | None, float | None]:
+    """Return (brier_score, ece, prob_recall) for one probability column.
+
+    *prob_recall* is the fraction of actual ≥ threshold_ppb rows where the
+    classifier fired (p_k > 0.5) — the probability-call recall.
+    """
+    if prob_col not in grp.columns:
+        return None, None, None
+    valid = grp.dropna(subset=[prob_col, "actual_h2s"])
+    if valid.empty:
+        return None, None, None
+    y_true = (valid["actual_h2s"] >= threshold_ppb).astype(int).tolist()
+    bs = brier_score(valid[prob_col], y_true)
+    ece = expected_calibration_error(valid[prob_col], y_true)
+    positives = valid[valid["actual_h2s"] >= threshold_ppb]
+    recall = float((positives[prob_col] > 0.5).sum() / len(positives)) if len(positives) else None
+    return bs, ece, recall
+
 
 def build_period_scorecard(
     store: AccuracyStore,
@@ -419,13 +471,9 @@ def build_period_scorecard(
         _, orange_recall = class_precision_recall(cm, "orange")
         orange_precision, _ = class_precision_recall(cm, "orange")
 
-        bs = ece = None
-        if "p30" in grp.columns:
-            valid = grp.dropna(subset=["p30"])
-            if not valid.empty:
-                y_true_orange = [1 if c == "orange" else 0 for c in valid["actual_cat"]]
-                bs = brier_score(valid["p30"], y_true_orange)
-                ece = expected_calibration_error(valid["p30"], y_true_orange)
+        bs5, ece5, rec5 = _prob_metrics(grp, "p5", threshold_ppb=5.0)
+        bs10, ece10, rec10 = _prob_metrics(grp, "p10", threshold_ppb=10.0)
+        bs30, ece30, rec30 = _prob_metrics(grp, "p30", threshold_ppb=30.0)
 
         site_cards.append(
             SiteScorecard(
@@ -436,8 +484,15 @@ def build_period_scorecard(
                 orange_recall=orange_recall,
                 orange_precision=orange_precision,
                 false_alarm_rate=false_alarm_rate_for_orange(cm),
-                brier_score=bs,
-                expected_calibration_error=ece,
+                brier_score_p5=bs5,
+                brier_score_p10=bs10,
+                brier_score_p30=bs30,
+                ece_p5=ece5,
+                ece_p10=ece10,
+                ece_p30=ece30,
+                prob_recall_p5=rec5,
+                prob_recall_p10=rec10,
+                prob_recall_p30=rec30,
                 confusion_matrix=cm,
             )
         )
