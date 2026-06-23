@@ -139,6 +139,13 @@ def defs():
         forecast_skill_scorecard_schedule,
     )
 
+    # Import all-station heatmap board (category + exceedance-probability grids)
+    from h2s.defs.forecast_heatmap import (
+        forecast_heatmap_board,
+        forecast_heatmap_job,
+        forecast_heatmap_schedule,
+    )
+
     # Import station forecast analysis pipeline assets
     from h2s.defs.h2s_daily_pipeline import (
         multi_station_model_artifacts,
@@ -275,6 +282,8 @@ def defs():
             forecast_skill_scorecard,
             # Daily forecast digest (all-station situational awareness)
             forecast_digest,
+            # All-station forecast heatmap board (category + probability grids)
+            forecast_heatmap_board,
             # Forecast Cascade Pre-Alert (Tiers 1–3, product-probability-driven)
             cascade_alert_dispatcher,
             # Observed >10 ppb Alert-Performance machine (yellow tier)
@@ -321,6 +330,8 @@ def defs():
             forecast_digest_job,
             # Forecast skill scorecard job (Deliverable C)
             forecast_skill_scorecard_job,
+            # All-station forecast heatmap board job
+            forecast_heatmap_job,
             # Observed >10 ppb Alert-Performance job (yellow tier)
             h2s_alert_performance_job,
             # Validation jobs
@@ -349,6 +360,8 @@ def defs():
             forecast_digest_schedule,
             # Weekly forecast skill scorecard schedule (Deliverable C)
             forecast_skill_scorecard_schedule,
+            # Daily all-station forecast heatmap board schedule
+            forecast_heatmap_schedule,
             # Walk-forward backfill schedule
             station_backfill_schedule,
         ],
