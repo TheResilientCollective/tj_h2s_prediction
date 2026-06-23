@@ -23,6 +23,12 @@ import pandas as pd
 
 from h2s.forecasting.performance_report import TOLERANCE_HOURS, VERDICT_COST
 
+# Reference URL for the full rubric documentation.
+RUBRIC_DOC_URL = (
+    "https://github.com/theresilientcollective/tj_h2s_prediction/blob/main/"
+    "projects/h2s/docs/FORECAST_PERFORMANCE_RUBRIC.md"
+)
+
 # The interpretation guide handed to the LLM (and mirrored in the local text).
 RUBRIC_GUIDANCE = [
     "Under-predicting a real ORANGE (>=30 ppb) event as GREEN is the worst "
@@ -154,4 +160,6 @@ def build_narrative_text(report: dict, variant: Optional[str] = None) -> str:
                 f"predicted {ex['predicted_ppb']} ppb vs measured {ex['actual_ppb']} ppb "
                 f"[{ex['verdict']}]"
             )
+
+    lines.append(f"See <{RUBRIC_DOC_URL}|the rubric docs> for verdict definitions & tuning notes.")
     return "\n".join(lines)
