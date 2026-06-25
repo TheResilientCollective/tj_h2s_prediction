@@ -337,8 +337,8 @@ CATEGORY_ORDER = [
 # Hex palette: green → pale yellow → amber (smell) → red (hazard); grey = no data.
 CATEGORY_COLORS = {
     CATEGORY_GREEN:       '#2ecc71',
-    CATEGORY_YELLOW_LOW:  '#f7dc6f',
-    CATEGORY_YELLOW_HIGH: '#f39c12',
+    CATEGORY_YELLOW_LOW:  '#fbeea0',   # lighter yellow (was #f7dc6f)
+    CATEGORY_YELLOW_HIGH: '#d4ac0d',   # darker yellow/gold, not amber (was #f39c12)
     CATEGORY_ORANGE:      '#e74c3c',
     CATEGORY_UNKNOWN:     '#bdc3c7',
 }

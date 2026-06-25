@@ -23,7 +23,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
-from matplotlib.colors import ListedColormap  # noqa: E402
+from matplotlib.colors import LinearSegmentedColormap, ListedColormap  # noqa: E402
 
 from h2s.constants import (  # noqa: E402
     CATEGORY_COLORS,
@@ -42,8 +42,16 @@ _CAT_CMAP = ListedColormap(
     [CATEGORY_COLORS[c] for c in CATEGORY_ORDER] + [CATEGORY_COLORS[CATEGORY_UNKNOWN]]
 )
 
-# Sequential ramp for probabilities (white → deep red).
-_PROB_CMAP = plt.get_cmap("YlOrRd")
+# Per-exceedance probability ramps, keyed to the 4-tier hazard palette so each
+# row's colour matches the threshold it represents:
+#   P>5  — light green → light yellow   (safe → caution)
+#   P>10 — white → light yellow → dark yellow   (resident-smell tier)
+#   P>30 — white → light orange → dark orange   (hazard tier)
+_PROB_CMAPS = {
+    "p5":  LinearSegmentedColormap.from_list("p5",  ["#d5f5e3", "#abebc6", "#f9f7c5"]),
+    "p10": LinearSegmentedColormap.from_list("p10", ["#ffffff", "#fcf0a8", "#d4ac0d"]),
+    "p30": LinearSegmentedColormap.from_list("p30", ["#ffffff", "#fad7a0", "#d35400"]),
+}
 
 _PROB_ROWS = [("p5", "P>5"), ("p10", "P>10"), ("p30", "P>30")]
 
@@ -253,8 +261,17 @@ def generate_probability_heatmap(
     fig_h = max(3.0, 0.42 * n_rows + 1.6)
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
     fig.patch.set_facecolor("#f8f9fa")
-    ax.imshow(np.nan_to_num(probs, nan=0.0), aspect="auto", cmap=_PROB_CMAP,
-              vmin=0.0, vmax=1.0, interpolation="nearest")
+
+    # Each row is coloured by its own exceedance ramp; build the RGBA image
+    # cell-by-cell. No-data cells render white.
+    rgba = np.ones((n_rows, n_cols, 4))
+    for r, (_station, col, _lbl) in enumerate(row_specs):
+        cmap = _PROB_CMAPS.get(col, plt.get_cmap("YlOrRd"))
+        for c in range(n_cols):
+            p = probs[r, c]
+            if not np.isnan(p):
+                rgba[r, c] = cmap(float(np.clip(p, 0.0, 1.0)))
+    ax.imshow(rgba, aspect="auto", interpolation="nearest")
 
     for r in range(n_rows):
         for c in range(n_cols):
@@ -262,8 +279,10 @@ def generate_probability_heatmap(
             if np.isnan(p):
                 ax.text(c, r, "·", ha="center", va="center", fontsize=7, color="#888")
                 continue
+            rr, gg, bb = rgba[r, c, :3]
+            lum = 0.299 * rr + 0.587 * gg + 0.114 * bb
             ax.text(c, r, f"{round(p * 100)}", ha="center", va="center", fontsize=6.5,
-                    color="white" if p >= 0.55 else "#1a1a1a")
+                    color="white" if lum < 0.5 else "#1a1a1a")
 
     ax.set_xticks(range(n_cols))
     ax.set_xticklabels(hour_labels, fontsize=7)
