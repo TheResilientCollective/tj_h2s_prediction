@@ -33,6 +33,7 @@ from h2s.constants import (
     STATIONS,
     VALIDATION_PATH,
     VALIDATION_SCHEMA_VERSION,
+    date_path,
 )
 from h2s.training.validation import calculate_false_alarm_rate, calculate_metrics
 
@@ -171,9 +172,9 @@ def _build_site_metrics(
 def _write_validation_metrics(
     s3, date_str: str, pipeline: str, payload: dict[str, Any],
 ) -> None:
-    """Write metrics.json to ``{VALIDATION_PATH}/{date}/{pipeline}/metrics.json``."""
+    """Write metrics.json to ``{VALIDATION_PATH}/{YYYY/MM/DD}/{pipeline}/metrics.json``."""
     body = json.dumps(payload, default=str, indent=2)
-    path = f"{VALIDATION_PATH}/{date_str}/{pipeline}/metrics.json"
+    path = f"{VALIDATION_PATH}/{date_path(date_str)}/{pipeline}/metrics.json"
     s3.putFile_text(data=body, path=path, content_type="application/json")
 
 

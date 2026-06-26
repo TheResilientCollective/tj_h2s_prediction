@@ -151,11 +151,13 @@ def _s3_resource():
 def load_station_models(s3, station_key: str, variant: str) -> dict | None:
     """Load one station's variant model set + feature schema from S3.
 
-    Tries the suffixed names first (`regression_evidence.pkl`, current per-station
-    deployment). For the ``evidence`` variant it falls back to the legacy
-    un-suffixed names (`regression.pkl`) so the backtest also works against older
-    single-variant deployments — those have no Lean and may lack clf_30ppb, which
-    degrade gracefully (Lean skipped, p30 → NaN).
+    Pins a single variant: loads only the suffixed names (`regression_evidence.pkl`,
+    `features_evidence.json`). There is deliberately NO un-suffixed legacy fallback
+    — the stale 2026-05-20 `{task}.pkl` / `features.json` pickles are 44-feature and
+    would silently corrupt inference if loaded against the 33-feature Evidence (or
+    19-feature Lean) schema. Mirrors the production loader and the hardened
+    `backfill_validation.py`. A missing pickle stays None (clf_30ppb may be absent
+    before a station's first post-Phase-1 retrain → p30 NaN).
 
     Returns {task: model, '_features': [...], '_legacy': bool, '_metadata': {...}} or None if no
     regression model is found.
@@ -169,27 +171,18 @@ def load_station_models(s3, station_key: str, variant: str) -> dict | None:
             return None
 
     models: dict = {}
-    legacy = False
     for task in _TASKS:
-        m = _load(f"{task}_{variant}.pkl")
-        if m is None and variant == "evidence":
-            m = _load(f"{task}.pkl")  # legacy un-suffixed deployment
-            if m is not None:
-                legacy = True
-        models[task] = m
+        models[task] = _load(f"{task}_{variant}.pkl")
     if models.get("regression") is None:
         return None
 
     feats = None
-    candidates = [f"features_{variant}.json"]
-    if variant == "evidence":
-        candidates.append("features.json")
-    for fname in candidates:
-        try:
-            feats = json.loads(s3.getFile(path=f"{base}/{fname}", bucket=s3.S3_BUCKET).decode("utf-8"))
-            break
-        except Exception:
-            continue
+    try:
+        feats = json.loads(
+            s3.getFile(path=f"{base}/features_{variant}.json", bucket=s3.S3_BUCKET).decode("utf-8")
+        )
+    except Exception:
+        pass
     if feats is None:
         from h2s.constants import MODEL_FEATURES, MODEL_FEATURES_LEAN
         feats = MODEL_FEATURES if variant == "evidence" else MODEL_FEATURES_LEAN
@@ -213,7 +206,7 @@ def load_station_models(s3, station_key: str, variant: str) -> dict | None:
             pass
 
     models["_features"] = feats
-    models["_legacy"] = legacy
+    models["_legacy"] = False  # legacy un-suffixed fallback removed (variant pinned)
     models["_metadata"] = metadata
     return models
 
