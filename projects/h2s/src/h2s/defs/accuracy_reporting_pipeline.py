@@ -4,7 +4,7 @@ Reads the multi-station forecast validation store parquet
 (``FORECAST_VALIDATION_STORE_PATH``) and produces stakeholder-facing rollups:
 
     s3://{bucket}/tijuana/forecast/accuracy_reports/
-        daily/{YYYY-MM-DD}/scorecard.json
+        daily/{YYYY/MM/DD}/scorecard.json
         rolling/{7d,30d,90d}/scorecard.json
         monthly/{YYYY-MM}/scorecard.json
         alert_performance/{period}.json
@@ -41,7 +41,7 @@ import pandas as pd
 import dagster as dg
 from dagster import AssetExecutionContext
 
-from h2s.constants import FORECAST_VALIDATION_STORE_PATH
+from h2s.constants import FORECAST_VALIDATION_STORE_PATH, date_path
 from h2s.resources.minio import S3Resource
 
 # ---------------------------------------------------------------------------
@@ -530,7 +530,7 @@ def daily_accuracy_scorecard(context: AssetExecutionContext) -> dict[str, Any]:
         )
     card = build_period_scorecard(store, day, day, scope="daily")
     store.write_json(
-        f"{ACCURACY_PREFIX}/daily/{day.isoformat()}/scorecard.json",
+        f"{ACCURACY_PREFIX}/daily/{date_path(day)}/scorecard.json",
         card.to_dict(),
     )
     context.log.info(

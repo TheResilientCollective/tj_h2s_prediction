@@ -13,7 +13,7 @@ Three modes:
 
 Usage:
     cd projects/h2s
-    source .env
+    set -a && source .env && set +a
 
     # Forecast-based validation (uses existing predictions on S3)
     uv run python scripts/backfill_validation.py
@@ -21,9 +21,12 @@ Usage:
     # Hindcast — hourly model against historical observations (NESTOR only)
     uv run python scripts/backfill_validation.py --hindcast
 
-    # Daily station — per-station models, all 3 stations
+    # Daily station — per-station models, all 3 stations (Evidence variant by default)
     uv run python scripts/backfill_validation.py --daily-station
     uv run python scripts/backfill_validation.py --daily-station --start 2025-01-01 --end 2026-04-23
+
+    # Hindcast with the Lean variant instead of Evidence
+    uv run python scripts/backfill_validation.py --daily-station --variant lean
 
     # Dry run / overwrite
     uv run python scripts/backfill_validation.py --daily-station --dry-run
@@ -46,6 +49,7 @@ from h2s.constants import (
     STATION_MODELS_S3_BASE,
     STATIONS,
     VALIDATION_PATH,
+    date_path,
     H2S_CLASS_NAMES,
     H2S_CLASS_TO_INT,
     RISK_TO_3CLASS,
@@ -73,7 +77,7 @@ def metrics_exist(s3: S3Resource, date_str: str) -> bool:
     """Check if usable metrics.json already exists for this date."""
     import urllib.request
 
-    url = s3.publicUrl(path=f"{VALIDATION_PATH}/{date_str}/metrics.json")
+    url = s3.publicUrl(path=f"{VALIDATION_PATH}/{date_path(date_str)}/metrics.json")
     try:
         with urllib.request.urlopen(url, timeout=5) as resp:
             data = json.loads(resp.read())
@@ -192,7 +196,7 @@ def compute_and_write_metrics(
     }
 
     body = json.dumps(payload, indent=2).encode("utf-8")
-    base = f"{VALIDATION_PATH}/{date_str}"
+    base = f"{VALIDATION_PATH}/{date_path(date_str)}"
     for path in [f"{base}/metrics.json", f"{base}/{pipeline_label}/metrics.json"]:
         s3.putFile(body, path, bucket=s3.S3_BUCKET, content_type="application/json")
 
@@ -241,17 +245,21 @@ def hindcast_predictions(predictor, day_obs: pd.DataFrame) -> pd.DataFrame | Non
 # Daily station hindcast: per-station models against historical observations
 # ---------------------------------------------------------------------------
 
-def load_station_models(s3: S3Resource) -> dict:
-    """Load per-station models (regression + clf_5ppb + clf_10ppb) from S3.
+def load_station_models(s3: S3Resource, variant: str = "evidence") -> dict:
+    """Load per-station models (regression + clf_5/10/30ppb) from S3 for one variant.
 
-    Tries suffixed variant names first (evidence/lean), then falls back to
-    un-suffixed legacy names for backwards compatibility.
+    Mirrors the production daily pipeline (`multi_station_model_artifacts`):
+    a single variant is pinned so the models and the feature schema always
+    agree. Evidence (33 feat) and Lean (19 feat) have different feature shapes,
+    so mixing tasks across variants would corrupt the design matrix. There is
+    deliberately no un-suffixed legacy fallback — production now deploys the
+    suffixed Evidence/Lean set, and the stale 2026-05-20 `{task}.pkl` pickles
+    must not be silently picked up.
     """
     import pickle
 
     artifacts = {}
     tasks = ["regression", "clf_5ppb", "clf_10ppb", "clf_30ppb"]
-    variants = ["evidence", "lean"]
 
     for site_name, info in STATIONS.items():
         station_key = info["key"]
@@ -259,43 +267,21 @@ def load_station_models(s3: S3Resource) -> dict:
         station_models = {}
 
         for task in tasks:
-            model = None
-            # Try suffixed variant names first (current deployment)
-            for variant in variants:
-                s3_path = f"{base_path}/{task}_{variant}.pkl"
-                try:
-                    model_bytes = s3.getFile(path=s3_path, bucket=s3.S3_BUCKET)
-                    model = pickle.loads(model_bytes)
-                    break
-                except Exception:
-                    pass
+            s3_path = f"{base_path}/{task}_{variant}.pkl"
+            try:
+                model_bytes = s3.getFile(path=s3_path, bucket=s3.S3_BUCKET)
+                station_models[task] = pickle.loads(model_bytes)
+            except Exception as e:
+                # clf_30ppb may be absent for a station before its first
+                # post-Phase-1 retrain — warn and continue.
+                print(f"    Warning: {station_key}/{task}_{variant}: {e}")
 
-            # Fall back to un-suffixed legacy name
-            if model is None:
-                s3_path = f"{base_path}/{task}.pkl"
-                try:
-                    model_bytes = s3.getFile(path=s3_path, bucket=s3.S3_BUCKET)
-                    model = pickle.loads(model_bytes)
-                except Exception as e:
-                    print(f"    Warning: {station_key}/{task}: {e}")
-
-            if model is not None:
-                station_models[task] = model
-
-        # Load feature list (try variants first, then legacy)
+        # Feature schema for the SAME variant (keeps inference shape == training shape)
         try:
-            feat_bytes = None
-            for variant in variants:
-                try:
-                    feat_bytes = s3.getFile(path=f"{base_path}/features_{variant}.json", bucket=s3.S3_BUCKET)
-                    break
-                except Exception:
-                    pass
-            if feat_bytes is None:
-                feat_bytes = s3.getFile(path=f"{base_path}/features.json", bucket=s3.S3_BUCKET)
+            feat_bytes = s3.getFile(path=f"{base_path}/features_{variant}.json", bucket=s3.S3_BUCKET)
             station_models["_feature_cols"] = json.loads(feat_bytes.decode("utf-8"))
         except Exception:
-            pass
+            print(f"    Warning: {station_key}/features_{variant}.json not found; using MODEL_FEATURES default")
 
         if station_models:
             artifacts[site_name] = station_models
@@ -477,7 +463,7 @@ def compute_and_write_station_metrics(
     }
 
     body = json.dumps(payload, indent=2).encode("utf-8")
-    path = f"{VALIDATION_PATH}/{date_str}/daily_station/metrics.json"
+    path = f"{VALIDATION_PATH}/{date_path(date_str)}/daily_station/metrics.json"
     s3.putFile(body, path, bucket=s3.S3_BUCKET, content_type="application/json")
     print(f"    Wrote {len(sites)} stations to daily_station/metrics.json")
     return True
@@ -549,6 +535,13 @@ def main():
         action="store_true",
         help="Run per-station models against historical observations (all 3 stations)",
     )
+    parser.add_argument(
+        "--variant",
+        default="evidence",
+        choices=["evidence", "lean"],
+        help="Per-station model variant to hindcast with "
+        "(default: evidence, matching production daily-pipeline routing)",
+    )
     args = parser.parse_args()
 
     start = date.fromisoformat(args.start)
@@ -576,8 +569,8 @@ def main():
         print(f"  Model loaded: {len(predictor.feature_cols)} features")
 
     if args.daily_station:
-        print("Loading per-station models from S3...")
-        station_models = load_station_models(s3)
+        print(f"Loading per-station models from S3 (variant={args.variant})...")
+        station_models = load_station_models(s3, variant=args.variant)
         print(f"  Loaded models for {len(station_models)} stations: {list(station_models.keys())}")
 
     # Scan dates and collect work
@@ -597,7 +590,7 @@ def main():
             # Check daily_station metrics existence
             if not args.overwrite:
                 import urllib.request
-                url = s3.publicUrl(path=f"{VALIDATION_PATH}/{ds}/daily_station/metrics.json")
+                url = s3.publicUrl(path=f"{VALIDATION_PATH}/{date_path(ds)}/daily_station/metrics.json")
                 try:
                     with urllib.request.urlopen(url, timeout=5):
                         cur += timedelta(days=1)

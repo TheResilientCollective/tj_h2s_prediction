@@ -23,6 +23,23 @@ LATEST_BASEPATH = 'latest/tijuana'
 LATEST_FORECAST = 'tijuana/forecast'
 VALIDATION_PATH = 'tijuana/forecast/validation'
 
+
+def date_path(d) -> str:
+    """Hierarchical ``YYYY/MM/DD`` segment for date-partitioned S3 keys.
+
+    Accepts a ``datetime.date`` (or ``datetime``) or an ISO ``YYYY-MM-DD``
+    string. Used so validation / accuracy-report keys are laid out as
+    ``.../2026/06/25/...`` rather than a flat ``.../2026-06-25/...``.
+    """
+    from datetime import date as _date, datetime as _datetime
+
+    if isinstance(d, str):
+        d = _date.fromisoformat(d)
+    elif isinstance(d, _datetime):
+        d = d.date()
+    return f"{d.year:04d}/{d.month:02d}/{d.day:02d}"
+
+
 STATION_MODELS_S3_BASE = 'tijuana/forecast/models/stations'
 TRAINING_SNAPSHOTS_PATH = 'tijuana/forecast/training_snapshots'
 
