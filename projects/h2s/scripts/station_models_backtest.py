@@ -34,6 +34,12 @@ Usage (S3 deployed models — requires env vars from .env):
         --data ../../data/modeldata_h2s_nofill.parquet \\
         --output ./output/station_backtest/
 
+Usage (also upload the rendered report tree to S3):
+    # models load from S3_BUCKET; reports upload to --s3-bucket under
+    # tijuana/forecast/backtest/station_models/ (override with --s3-prefix)
+    S3_BUCKET=resilentpublic uv run python scripts/station_models_backtest.py \\
+        --s3-bucket resilentpublic
+
 Usage (report-only from saved records):
     uv run python scripts/station_models_backtest.py \\
         --report-only ./output/station_backtest/records.parquet \\
@@ -60,7 +66,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from h2s.constants import STATIONS  # noqa: E402
+from h2s.constants import BACKTEST_RESULTS_BASE, STATIONS  # noqa: E402
 from h2s.training.calibration_eval import recall_at_threshold, spearman_rank  # noqa: E402
 from h2s.training.multi_station_trainer import prepare_multi_station_features  # noqa: E402
 
@@ -146,6 +152,39 @@ def _s3_resource():
         S3_ACCESS_KEY=os.environ["S3_ACCESS_KEY"],
         S3_SECRET_KEY=os.environ["S3_SECRET_KEY"],
     )
+
+
+# Default S3 destination for the rendered backtest (kept under a `station_models`
+# subprefix so it never collides with other reports written to BACKTEST_RESULTS_BASE).
+_DEFAULT_S3_PREFIX = f"{BACKTEST_RESULTS_BASE}/station_models"
+
+_CONTENT_TYPES = {
+    ".html": "text/html",
+    ".json": "application/json",
+    ".parquet": "application/octet-stream",
+    ".png": "image/png",
+    ".csv": "text/csv",
+}
+
+
+def upload_reports_to_s3(out_dir: Path, bucket: str, prefix: str) -> int:
+    """Upload every file under *out_dir* to ``s3://{bucket}/{prefix}/`` preserving
+    the relative tree. Returns the number of objects written."""
+    s3 = _s3_resource()
+    prefix = prefix.rstrip("/")
+    n = 0
+    for f in sorted(out_dir.rglob("*")):
+        if not f.is_file():
+            continue
+        key = f"{prefix}/{f.relative_to(out_dir).as_posix()}"
+        s3.putFile(
+            f.read_bytes(), key, bucket=bucket,
+            content_type=_CONTENT_TYPES.get(f.suffix, "application/octet-stream"),
+        )
+        n += 1
+    print(f"  Uploaded {n} files → s3://{bucket}/{prefix}/")
+    print(f"  Index: {s3.publicUrl(path=f'{prefix}/index.html', bucket=bucket)}")
+    return n
 
 
 def load_station_models(s3, station_key: str, variant: str) -> dict | None:
@@ -853,6 +892,11 @@ def main() -> None:
     p.add_argument("--variants", nargs="*", default=list(_VARIANTS), help="evidence / lean")
     p.add_argument("--start", help="Filter from date (YYYY-MM-DD)")
     p.add_argument("--end", help="Filter to date (YYYY-MM-DD inclusive)")
+    p.add_argument("--s3-bucket", metavar="BUCKET",
+                   help="Upload the rendered report tree to this S3 bucket "
+                        "(e.g. test / resilentpublic). Models still load from S3_BUCKET.")
+    p.add_argument("--s3-prefix", default=_DEFAULT_S3_PREFIX,
+                   help=f"Destination key prefix for --s3-bucket (default: {_DEFAULT_S3_PREFIX})")
     args = p.parse_args()
     out_dir = Path(args.output)
 
@@ -877,6 +921,8 @@ def main() -> None:
                 print(f"  Warning: Could not load metadata: {e}")
 
         generate_reports(records, out_dir, models_metadata)
+        if args.s3_bucket:
+            upload_reports_to_s3(out_dir, args.s3_bucket, args.s3_prefix)
         return
 
     print("Loading observation data...")
@@ -936,6 +982,10 @@ def main() -> None:
 
     print("Generating reports...")
     generate_reports(records, out_dir, models_metadata)
+
+    if args.s3_bucket:
+        print(f"Uploading reports to s3://{args.s3_bucket}/{args.s3_prefix.rstrip('/')}/ ...")
+        upload_reports_to_s3(out_dir, args.s3_bucket, args.s3_prefix)
 
 
 if __name__ == "__main__":
