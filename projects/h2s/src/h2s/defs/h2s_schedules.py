@@ -57,7 +57,8 @@ from h2s.defs.h2s_validation_pipeline import (
 @dg.schedule(
     job=station_model_training_job,
     cron_schedule="0 2 1 * *",
-    description="Monthly station model training — all 3 stations on 1st of month at 2 AM UTC",
+    execution_timezone="America/Los_Angeles",
+    description="Monthly station model training — all 3 stations on 1st of month at 2 AM ",
     default_status=dg.DefaultScheduleStatus.RUNNING,
     tags={"environment": "production", "schedule_type": "station_model_training"},
 )
@@ -80,7 +81,8 @@ def station_model_training_schedule(context: dg.ScheduleEvaluationContext):
 @dg.schedule(
     job=station_forecast_analysis_job,
     cron_schedule=SCHEDULE_6HR,
-    description="Station forecast analysis: H2S source attribution + 24h forecast + dashboard (every 6 hours: 00, 06, 12, 18 UTC)",
+    execution_timezone="America/Los_Angeles",
+    description="Station forecast analysis: H2S source attribution + 24h forecast + dashboard (every 6 hours: 00, 06, 12, 18 )",
     default_status=dg.DefaultScheduleStatus.RUNNING,
     tags={"environment": "production", "schedule_type": "station_forecast_analysis"},
 )
@@ -283,6 +285,7 @@ dispersion_hysplit_execution_job = dg.define_asset_job(
 @dg.schedule(
     job=dispersion_inversion_job,
     cron_schedule="30 2 * * 1",
+    execution_timezone="America/Los_Angeles",
     description="Weekly Lagrangian inversion + HYSPLIT backward bundle (Monday 02:30 UTC)",
     default_status=dg.DefaultScheduleStatus.STOPPED,
     tags={"environment": "production", "schedule_type": "dispersion_inversion"},
@@ -302,6 +305,7 @@ def dispersion_inversion_schedule(context: dg.ScheduleEvaluationContext):
 @dg.schedule(
     job=dispersion_forecast_job,
     cron_schedule=SCHEDULE_6HR,
+    execution_timezone="America/Los_Angeles",
     description="6-hourly Gaussian forward forecast + alert check + HYSPLIT forward bundle",
     default_status=dg.DefaultScheduleStatus.RUNNING,
     tags={"environment": "production", "schedule_type": "dispersion_forecast"},
@@ -349,15 +353,16 @@ emissions_calibration_job = dg.define_asset_job(
 
 
 # ============================================================================
-# SCHEDULE 11: Weekly emissions calibration (Monday 03:30 UTC)
+# SCHEDULE 11: Weekly emissions calibration (Monday 03:30 )
 # ============================================================================
 # Materializes the previous week's partition (the just-completed Monday-start
-# week). Offset 30 min from dispersion_inversion_schedule (Monday 02:30 UTC).
+# week). Offset 30 min from dispersion_inversion_schedule (Monday 02:30 ).
 
 @dg.schedule(
     job=emissions_calibration_job,
     cron_schedule="30 3 * * 1",
-    description="Weekly rolling emissions calibration (Monday 03:30 UTC)",
+    execution_timezone="America/Los_Angeles",
+    description="Weekly rolling emissions calibration (Monday 03:30 )",
     default_status=dg.DefaultScheduleStatus.STOPPED,
     tags={"environment": "production", "schedule_type": "emissions_calibration"},
 )
@@ -390,13 +395,14 @@ daily_station_validation_job = dg.define_asset_job(
 
 
 # ============================================================================
-# SCHEDULE 12: Daily Station Validation (9 AM UTC — 1h after hourly validation)
+# SCHEDULE 12: Daily Station Validation (9 AM  — 1h after hourly validation)
 # ============================================================================
 
 @dg.schedule(
     job=daily_station_validation_job,
     cron_schedule="0 9 * * *",
-    description="Daily station forecast validation at 9 AM UTC",
+    execution_timezone="America/Los_Angeles",
+    description="Daily station forecast validation at 9 AM ",
     default_status=dg.DefaultScheduleStatus.RUNNING,
     tags={"environment": "production", "schedule_type": "validation"},
 )
@@ -426,9 +432,10 @@ from h2s.defs.h2s_backfill_pipeline import (  # noqa: E402
 @dg.schedule(
     job=station_backfill_training_job,
     cron_schedule="0 2 2 * *",
+    execution_timezone="America/Los_Angeles",
     description=(
         "Monthly walk-forward backfill: train on pre-cutoff data, evaluate OOS "
-        "(2nd of month at 2 AM UTC — day after station_model_training_schedule)"
+        "(2nd of month at 2 AM  — day after station_model_training_schedule)"
     ),
     default_status=dg.DefaultScheduleStatus.STOPPED,
     tags={"environment": "production", "schedule_type": "backfill_training"},

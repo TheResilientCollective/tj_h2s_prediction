@@ -156,6 +156,7 @@ forecast_heatmap_job = dg.define_asset_job(
 forecast_heatmap_schedule = dg.ScheduleDefinition(
     job=forecast_heatmap_job,
     cron_schedule="45 8 * * *",  # daily 08:45 UTC, just after the digest
+    execution_timezone="America/Los_Angeles",
     default_status=dg.DefaultScheduleStatus.RUNNING,
     description="Daily: post the all-station forecast heatmap board to the ops Slack channel",
 )

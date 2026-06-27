@@ -29,6 +29,7 @@ cascade_alerts_job = dg.define_asset_job(
 cascade_alerts_schedule = dg.ScheduleDefinition(
     job=cascade_alerts_job,
     cron_schedule=SCHEDULE_6HR,
+    execution_timezone = "America/Los_Angeles",
     default_status=dg.DefaultScheduleStatus.RUNNING,
     description="Every 6 h: refresh products and evaluate the Tier 1–3 forecast cascade",
 )

@@ -718,7 +718,7 @@ weekly_scorecard_job = dg.define_asset_job(
 @dg.schedule(
     job=accuracy_reporting_job,
     cron_schedule="0 10 * * *",  # after all validation schedules (hourly 8AM, station 9AM, MH 9:30AM).
-    execution_timezone="UTC",
+    execution_timezone="America/Los_Angeles",
     default_status=dg.DefaultScheduleStatus.RUNNING,
 )
 def daily_accuracy_schedule(context: dg.ScheduleEvaluationContext):
@@ -732,7 +732,7 @@ def daily_accuracy_schedule(context: dg.ScheduleEvaluationContext):
 @dg.schedule(
     job=monthly_accuracy_job,
     cron_schedule="0 9 1 * *",  # first day of the month, after rollups settle.
-    execution_timezone="UTC",
+    execution_timezone="America/Los_Angeles",
     default_status=dg.DefaultScheduleStatus.RUNNING,
 )
 def monthly_accuracy_schedule(context: dg.ScheduleEvaluationContext):
@@ -742,7 +742,7 @@ def monthly_accuracy_schedule(context: dg.ScheduleEvaluationContext):
 @dg.schedule(
     job=weekly_scorecard_job,
     cron_schedule="0 16 * * 1",  # Mondays 09:00 America/Los_Angeles = 16:00 UTC.
-    execution_timezone="UTC",
+    execution_timezone="America/Los_Angeles",
     default_status=dg.DefaultScheduleStatus.RUNNING,
 )
 def weekly_scorecard_schedule(context: dg.ScheduleEvaluationContext):

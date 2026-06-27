@@ -260,6 +260,7 @@ station_forecast_validation_rebuild_job = dg.define_asset_job(
 forecast_validation_schedule = dg.ScheduleDefinition(
     job=forecast_validation_job,
     cron_schedule="0 9 * * *",
+    execution_timezone="America/Los_Angeles",
     default_status=dg.DefaultScheduleStatus.STOPPED,
     description="Daily 09:00 UTC: refresh the forecast validation store + skill curves",
 )

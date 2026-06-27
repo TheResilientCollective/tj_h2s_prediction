@@ -248,6 +248,7 @@ forecast_performance_job = dg.define_asset_job(
 forecast_performance_schedule = dg.ScheduleDefinition(
     job=forecast_performance_job,
     cron_schedule="0 14 * * 1",  # weekly Monday 14:00 UTC
+    execution_timezone="America/Los_Angeles",
     default_status=dg.DefaultScheduleStatus.STOPPED,
     description="Weekly: post the forecast performance rubric report + AI narrative to Slack",
 )

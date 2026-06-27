@@ -141,6 +141,7 @@ forecast_digest_job = dg.define_asset_job(
 forecast_digest_schedule = dg.ScheduleDefinition(
     job=forecast_digest_job,
     cron_schedule="30 8 * * *",  # daily 08:30 UTC
+    execution_timezone="America/Los_Angeles",
     default_status=dg.DefaultScheduleStatus.RUNNING,
     description="Daily: post the all-station 24 h forecast digest to the ops Slack channel",
 )
