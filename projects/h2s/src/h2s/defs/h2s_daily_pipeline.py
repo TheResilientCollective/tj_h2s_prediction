@@ -24,6 +24,7 @@ import pandas as pd
 
 from h2s.constants import (
     ALIGNMENT_THRESHOLD_DEG,
+    CLF_30PPB_STATIONS,
     DAILY_SUMMARY_PATH,
     H2S_SOURCE_THRESHOLD,
     FLOW_COL,
@@ -483,11 +484,13 @@ def station_forecasts(
         # replaces the previous decay-heuristic single-shot predict, so the daily
         # forecast now matches the cascade/products and the Phase-5 store.
         h2s_history = ss['H2S'].tail(24).tolist() if len(ss) > 0 else [last_state['h2s']]
+        # Emit P(>30) only for trusted stations; elsewhere clf_30ppb=None → p30
+        # is NaN (see CLF_30PPB_STATIONS in constants).
         models = VariantModels(
             regression=station_models['regression'],
             clf_5ppb=station_models.get('clf_5ppb'),
             clf_10ppb=station_models.get('clf_10ppb'),
-            clf_30ppb=station_models.get('clf_30ppb'),
+            clf_30ppb=station_models.get('clf_30ppb') if site in CLF_30PPB_STATIONS else None,
         )
         product_rows = run_products(sfc, h2s_history, models, list(feature_cols))
         sfc_by_lead = {i + 1: sfc.iloc[i] for i in range(len(sfc))}

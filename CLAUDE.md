@@ -316,15 +316,29 @@ posts a forecast-vs-measured close-out. Both replaced the retired met-regime
 gate + sigmoid-score `tiered_alerts` system. The observation tiers
 (`watch` 30 / `critical` 100, in `h2s_alert_system`) are unchanged.
 
-**Per-station clf_30ppb status (2026-06):** clf_30ppb is enabled for all three
-stations (`PROB_30_ALERT = 0.25`). Walk-forward backtest orange recall @ 0.25:
-NESTOR ~0.95, IB_CIVIC_CTR ~0.91, **SAN_YSIDRO ~0.43 — below the 0.50 target
-(known limitation)**: sparse 30 ppb positives and a low-calibrated probability
-scale; a per-station threshold (~0.10–0.15) would clear it but per-station
-`PROB_30_ALERT` is deferred. BorderlineSMOTE oversampling was evaluated and
-*degraded* recall (AUC was already 0.96–0.98), so it is OFF by default
-(opt-in via `enable_smote_clf_30ppb`). See
-`projects/h2s/docs/RETRAIN_STATION_CLF30PPB_BRIEF.md` §11.
+**Per-station clf_30ppb status (2026-06): NESTOR-BES only.** P(>30 ppb) / the
+ORANGE call is **emitted for NESTOR-BES only** — gated by `CLF_30PPB_STATIONS`
+in `constants.py`. clf_30ppb is still *trained and deployed* for all three
+stations (the artifact set stays uniform), but the products
+(`h2s_products_pipeline`) and daily (`h2s_daily_pipeline`) engines pass
+`clf_30ppb=None` for the other stations, so their `p30` is **NaN** — the same
+path the schema already takes for a missing classifier. IB_CIVIC_CTR and
+SAN_YSIDRO therefore fall back to the ≥10 ppb (yellow-high) tier as their top
+operational alert; `classify_risk` already reverts to the `prob_10`-driven
+orange decision when `prob_30` is absent. The cascade (`cascade_alerts`) was
+already NESTOR-only (`NB_SITE`), so it is unaffected.
+
+*Why:* per-station orange recall is only dependable where there are enough ≥30
+training positives. NESTOR-BES has ~344 (holdout recall ~0.77, walk-forward
+~0.95 @0.25); IB_CIVIC_CTR (~51) and SAN_YSIDRO (~40) collapse at a fixed
+operating point (SAN_YSIDRO ~0.16 holdout / ~0.43 walk-forward — below the 0.50
+target). A **pooled cross-station ≥30 model** (435 combined positives) recovers
+their recall in experiments and is the path to re-enabling them: add the
+station's `site_name` to `CLF_30PPB_STATIONS` once that model ships. See
+`projects/h2s/experiments/underfitting_results/` (FINDINGS + pooled results) and
+`projects/h2s/docs/RETRAIN_STATION_CLF30PPB_BRIEF.md` §11. BorderlineSMOTE
+oversampling was evaluated and *degraded* recall (AUC was already 0.96–0.98), so
+it is OFF by default (opt-in via `enable_smote_clf_30ppb`).
 
 ### Forecast Validation Store + Skill Curves
 

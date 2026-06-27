@@ -155,6 +155,20 @@ PROB_5_ALERT = 0.5
 PROB_10_ALERT = 0.5
 PROB_30_ALERT = 0.25  # p(H2S>30ppb) threshold to trigger ORANGE (lowered for better sensitivity)
 
+# Stations whose P(>30 ppb) / ORANGE call we trust enough to emit. clf_30ppb is
+# still trained + deployed for every station (the artifact set stays uniform),
+# but the products/daily engines emit p30 ONLY for these stations; everywhere
+# else p30 is NaN — the same path the schema already takes for a missing
+# classifier. Rationale (2026-06): per-station >=30 recall is only dependable
+# where there are enough orange positives to learn from. NESTOR-BES has ~344
+# training positives (recall ~0.77–0.95); IB_CIVIC_CTR (~51) and SAN_YSIDRO
+# (~40) collapse at a fixed operating point (SAN_YSIDRO ~0.16–0.43), so a
+# per-station orange call there is more noise than signal. Those stations fall
+# back to the >=10 ppb (yellow-high) tier as their top operational alert. A
+# pooled cross-station >=30 model recovers their recall and is the path to
+# re-enabling them — add the station's site_name here once that lands.
+CLF_30PPB_STATIONS = frozenset({"NESTOR - BES"})
+
 # ==============================================================================
 # Forecast Products (docs/feature/rename_workplan.md)
 # ==============================================================================
