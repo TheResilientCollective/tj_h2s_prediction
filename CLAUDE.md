@@ -28,6 +28,28 @@ so the 4-tier view needs no retraining. The underlying 3-class models
 
 **Model Performance (hourly pipeline):** 61.3% orange detection rate, 5.4% false alarm rate.
 
+### Two-head agreement classification (confirmed vs. provisional)
+
+Each site carries two independent hazard signals already present in every
+product row: the regression **magnitude** (`h2s_pred` ppb) and the classifier
+**probability** (`p5/p10/p30`). `classify_risk_agreement()` in `constants.py`
+combines them so a hard alert needs corroboration while a lone signal is never a
+silent miss:
+
+- **Both heads at the same tier → CONFIRMED** at that tier (`risk_possible=None`).
+- **Heads disagree → headline is the LOWER (confirmed) tier**, and the higher
+  single-head tier is surfaced as `risk_possible` with
+  `risk_confidence="provisional"`. A single head never escalates the headline.
+- Applies across **all tiers** (5 / 10 / 30 ppb).
+
+The daily forecast rows (`h2s_daily_pipeline`) carry `risk` (confirmed
+headline), `risk_possible`, `risk_confidence`, and `risk_legacy` (the old
+OR-logic `classify_risk`, kept for continuity). The dashboard tile and summary
+JSON expose `hours_possible_orange` / `(+N?)` so provisional hazards stay
+visible. This composes with the per-station clf_30ppb gate below: where `p30` is
+NaN, the probability head cannot reach ORANGE, so magnitude-only orange at those
+stations is always *provisional*, never confirmed.
+
 ## Project Structure
 
 ```

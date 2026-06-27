@@ -37,6 +37,7 @@ from h2s.constants import (
     STATIONS,
     WIND_COL,
     classify_risk,
+    classify_risk_agreement,
 )
 from h2s.forecasting.recursive import VariantModels, run_products
 
@@ -506,7 +507,14 @@ def station_forecasts(
             h2s_pred = float(prow['h2s_pred'])
             p5 = float(prow['p5']) if pd.notna(prow['p5']) else 0.0
             p10 = float(prow['p10']) if pd.notna(prow['p10']) else 0.0
-            p30 = float(prow['p30']) if pd.notna(prow['p30']) else 0.0
+            # Keep p30 NaN when the classifier is gated/absent so the probability
+            # head simply can't reach ORANGE (rather than reading as a hard 0).
+            p30 = float(prow['p30']) if pd.notna(prow['p30']) else float('nan')
+
+            # Two-head agreement: headline = level both heads confirm; a lone
+            # head surfaces as risk_possible / provisional (never escalates the
+            # headline). classify_risk retained as risk_legacy for continuity.
+            risk, risk_possible, risk_confidence = classify_risk_agreement(p5, p10, h2s_pred, p30)
 
             results.append({
                 'time': prow['time'],
@@ -516,8 +524,11 @@ def station_forecasts(
                 'h2s_pred': round(h2s_pred, 1),
                 'prob_5': round(p5 * 100, 1),
                 'prob_10': round(p10 * 100, 1),
-                'prob_30': round(p30 * 100, 1),
-                'risk': classify_risk(p5, p10, h2s_pred, p30),
+                'prob_30': round(p30 * 100, 1) if pd.notna(p30) else None,
+                'risk': risk,
+                'risk_possible': risk_possible,
+                'risk_confidence': risk_confidence,
+                'risk_legacy': classify_risk(p5, p10, h2s_pred, p30 if pd.notna(p30) else 0.0),
                 'wind_speed': round(float(row[SPEED_COL]) if SPEED_COL in row.index else 0.0, 1),
                 'wind_dir': round(float(wd)),
                 'temp': round(float(row['temperature_2m']) if 'temperature_2m' in row.index else 0.0, 1),
@@ -634,10 +645,14 @@ def station_forecast_dashboard(
         oranges = int((sf['risk'] == 'ORANGE').sum()) if len(sf) > 0 else 0
         yellow_highs = int((sf['risk'] == 'YELLOW_HIGH').sum()) if len(sf) > 0 else 0
         yellow_lows = int((sf['risk'] == 'YELLOW_LOW').sum()) if len(sf) > 0 else 0
+        # Provisional (single-head) oranges — surfaced so a lone strong signal is
+        # never silently hidden, even though it does not set the headline tier.
+        poss_oranges = int((sf['risk_possible'] == 'ORANGE').sum()) if 'risk_possible' in sf.columns and len(sf) > 0 else 0
         cc = '#e74c3c' if oranges > 0 else '#e67e22' if yellow_highs > 0 else '#f39c12' if yellow_lows > 0 else '#27ae60'
         ax.text(0.5, 0.75, site, ha='center', fontsize=13, fontweight='bold', color='white', transform=ax.transAxes)
         ax.text(0.5, 0.45, f'Last: {lh:.0f} ppb | Fcst max: {max_fc:.0f} ppb', ha='center', fontsize=9, color='#ccc', transform=ax.transAxes)
-        ax.text(0.5, 0.15, f'P(>5): {max_p5:.0f}% | O:{oranges} YH:{yellow_highs} YL:{yellow_lows}', ha='center', fontsize=9, color='#aaa', transform=ax.transAxes)
+        poss_str = f' (+{poss_oranges}?)' if poss_oranges > 0 else ''
+        ax.text(0.5, 0.15, f'P(>5): {max_p5:.0f}% | O:{oranges}{poss_str} YH:{yellow_highs} YL:{yellow_lows}', ha='center', fontsize=9, color='#aaa', transform=ax.transAxes)
         for s_ in ax.spines.values():
             s_.set_color(cc)
             s_.set_linewidth(3)
@@ -916,15 +931,27 @@ def station_forecast_summary(
             if len(sf) == 0:
                 continue
             risk_counts = sf['risk'].value_counts().to_dict()
+            possible_counts = (
+                sf['risk_possible'].value_counts().to_dict()
+                if 'risk_possible' in sf.columns else {}
+            )
+            # NaN-safe: prob_30 is None for gated stations (all-None → max is NaN).
+            max_p30 = float(sf['prob_30'].max()) if 'prob_30' in sf.columns else 0.0
+            if max_p30 != max_p30:  # NaN
+                max_p30 = 0.0
             summary['forecast_24h'][info['short']] = {
                 'max_h2s': round(float(sf['h2s_pred'].max()), 1),
                 'max_prob_5': round(float(sf['prob_5'].max()), 1),
                 'max_prob_10': round(float(sf['prob_10'].max()), 1),
-                'max_prob_30': round(float(sf['prob_30'].max()), 1) if 'prob_30' in sf.columns else 0.0,
+                'max_prob_30': round(max_p30, 1),
                 'hours_orange': int(risk_counts.get('ORANGE', 0)),
                 'hours_yellow_high': int(risk_counts.get('YELLOW_HIGH', 0)),
                 'hours_yellow_low': int(risk_counts.get('YELLOW_LOW', 0)),
                 'hours_green': int(risk_counts.get('GREEN', 0)),
+                # Provisional (single-head) hazards — headline stays at the
+                # confirmed tier; these flag a lone signal that needs confirming.
+                'hours_possible_orange': int(possible_counts.get('ORANGE', 0)),
+                'hours_possible_yellow_high': int(possible_counts.get('YELLOW_HIGH', 0)),
             }
 
     # Active sources from attribution
