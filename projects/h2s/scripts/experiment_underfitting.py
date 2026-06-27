@@ -39,23 +39,36 @@ from h2s.training.multi_station_trainer import (
 
 
 class ExperimentResult(NamedTuple):
-    """Results from one experiment configuration."""
+    """Results from one experiment configuration.
+
+    Metric fields use the neutral name ``pos`` (positive class) so the same
+    record works for any threshold: ``pos`` = H2S ≥ threshold ppb.
+    """
     name: str
     station: str
     variant: str
+    threshold: int          # 5, 10, or 30 ppb
     n_train: int
     n_test: int
-    n_orange_train: int
-    n_orange_test: int
-    orange_recall_train: float
-    orange_recall_test: float
-    orange_precision_train: float
-    orange_precision_test: float
-    orange_auc_train: float
-    orange_auc_test: float
-    orange_f1_train: float
-    orange_f1_test: float
+    n_pos_train: int
+    n_pos_test: int
+    pos_recall_train: float
+    pos_recall_test: float
+    pos_precision_train: float
+    pos_precision_test: float
+    pos_auc_train: float
+    pos_auc_test: float
+    pos_f1_train: float
+    pos_f1_test: float
     model_obj: dict  # Model pickle-able dict
+
+
+# (threshold ppb -> target column, train_and_select task name)
+_THRESHOLD_SPEC = {
+    5:  ('exceed_5', 'clf_5ppb'),
+    10: ('exceed_10', 'clf_10ppb'),
+    30: ('exceed_30', 'clf_30ppb'),
+}
 
 
 def load_training_data(data_path: str = "../../data/modeldata_h2s_nofill.parquet") -> pd.DataFrame:
@@ -70,10 +83,13 @@ def split_and_train(
     features: list[str],
     station: str,
     variant_name: str,
+    threshold: int = 30,
     experiment_filter=None,
     random_state: int = 42,
 ) -> ExperimentResult:
-    """Train a model on the given data subset."""
+    """Train a binary classifier for one threshold on the given data subset."""
+    target_col, task = _THRESHOLD_SPEC[threshold]
+
     if experiment_filter is not None:
         df_train = df[experiment_filter(df)].copy()
     else:
@@ -92,11 +108,14 @@ def split_and_train(
 
     X_train = df_train_split[features].copy()
     X_test = df_test[features].copy()
-    y_orange_train = df_train_split['exceed_30'].values
-    y_orange_test = df_test['exceed_30'].values
+    y_train = df_train_split[target_col].values
+    y_test = df_test[target_col].values
 
-    # Train the orange classifier
-    model, choice, metrics = train_and_select(X_train, X_test, y_orange_train, y_orange_test, task='clf_30ppb')
+    if len(np.unique(y_train)) < 2:
+        raise ValueError(f"Train split single-class for {target_col} (all {y_train[0]})")
+
+    # Train the threshold classifier
+    model, choice, metrics = train_and_select(X_train, X_test, y_train, y_test, task=task)
 
     # Predictions
     y_pred_train = model.predict(X_train)
@@ -109,18 +128,19 @@ def split_and_train(
         name=variant_name,
         station=station,
         variant=variant_name,
+        threshold=threshold,
         n_train=len(df_train_split),
         n_test=len(df_test),
-        n_orange_train=(y_orange_train == 1).sum(),
-        n_orange_test=(y_orange_test == 1).sum(),
-        orange_recall_train=recall_score(y_orange_train, y_pred_train, zero_division=0),
-        orange_recall_test=recall_score(y_orange_test, y_pred_test, zero_division=0),
-        orange_precision_train=precision_score(y_orange_train, y_pred_train, zero_division=0),
-        orange_precision_test=precision_score(y_orange_test, y_pred_test, zero_division=0),
-        orange_auc_train=roc_auc_score(y_orange_train, y_prob_train) if len(np.unique(y_orange_train)) > 1 else 0.5,
-        orange_auc_test=roc_auc_score(y_orange_test, y_prob_test) if len(np.unique(y_orange_test)) > 1 else 0.5,
-        orange_f1_train=f1_score(y_orange_train, y_pred_train, zero_division=0),
-        orange_f1_test=f1_score(y_orange_test, y_pred_test, zero_division=0),
+        n_pos_train=(y_train == 1).sum(),
+        n_pos_test=(y_test == 1).sum(),
+        pos_recall_train=recall_score(y_train, y_pred_train, zero_division=0),
+        pos_recall_test=recall_score(y_test, y_pred_test, zero_division=0),
+        pos_precision_train=precision_score(y_train, y_pred_train, zero_division=0),
+        pos_precision_test=precision_score(y_test, y_pred_test, zero_division=0),
+        pos_auc_train=roc_auc_score(y_train, y_prob_train) if len(np.unique(y_train)) > 1 else 0.5,
+        pos_auc_test=roc_auc_score(y_test, y_prob_test) if len(np.unique(y_test)) > 1 else 0.5,
+        pos_f1_train=f1_score(y_train, y_pred_train, zero_division=0),
+        pos_f1_test=f1_score(y_test, y_pred_test, zero_division=0),
         model_obj={"model": model, "choice": choice, "metrics": metrics, "features": features},
     )
     return results
@@ -137,10 +157,17 @@ def analyze_data_distribution(df: pd.DataFrame) -> dict:
             'pct_night': 100 * (s['is_night'] == 1).sum() / len(s),
             'n_nonzero_h2s': (s['H2S'] > 0).sum(),
             'pct_nonzero_h2s': 100 * (s['H2S'] > 0).sum() / len(s),
-            'n_orange': (s['exceed_30'] == 1).sum(),
-            'pct_orange': 100 * (s['exceed_30'] == 1).sum() / len(s),
-            'n_night_with_orange': ((s['is_night'] == 1) & (s['exceed_30'] == 1)).sum(),
-            'pct_night_with_orange_of_all_orange': 100 * ((s['is_night'] == 1) & (s['exceed_30'] == 1)).sum() / max(1, (s['exceed_30'] == 1).sum()),
+            # Per-threshold prevalence (positive base rate)
+            'n_exceed_5': (s['exceed_5'] == 1).sum(),
+            'pct_exceed_5': 100 * (s['exceed_5'] == 1).sum() / len(s),
+            'n_exceed_10': (s['exceed_10'] == 1).sum(),
+            'pct_exceed_10': 100 * (s['exceed_10'] == 1).sum() / len(s),
+            'n_exceed_30': (s['exceed_30'] == 1).sum(),
+            'pct_exceed_30': 100 * (s['exceed_30'] == 1).sum() / len(s),
+            # Nighttime concentration of positives per threshold
+            'pct_night_of_exceed_5': 100 * ((s['is_night'] == 1) & (s['exceed_5'] == 1)).sum() / max(1, (s['exceed_5'] == 1).sum()),
+            'pct_night_of_exceed_10': 100 * ((s['is_night'] == 1) & (s['exceed_10'] == 1)).sum() / max(1, (s['exceed_10'] == 1).sum()),
+            'pct_night_of_exceed_30': 100 * ((s['is_night'] == 1) & (s['exceed_30'] == 1)).sum() / max(1, (s['exceed_30'] == 1).sum()),
             'h2s_mean': s['H2S'].mean(),
             'h2s_std': s['H2S'].std(),
             'h2s_max': s['H2S'].max(),
@@ -151,8 +178,20 @@ def analyze_data_distribution(df: pd.DataFrame) -> dict:
     return stats
 
 
-def run_experiments(df: pd.DataFrame, output_dir: Path = None):
-    """Run all experiment variants."""
+# Training-subset approaches. Each maps a name to a row filter (or None for
+# all data). The "dual_green_periods" approach is omitted: filtering to green
+# data makes every threshold target single-class (no positives), so it cannot
+# train a binary classifier.
+_APPROACHES = [
+    ("baseline_all_data", None),
+    ("nighttime_only", lambda d: d['is_night'] == 1),
+    ("nonzero_h2s_only", lambda d: d['H2S'] > 0),
+    ("dual_h2s_nights", lambda d: (d['is_night'] == 1) & (d['H2S'] > 0)),
+]
+
+
+def run_experiments(df: pd.DataFrame, output_dir: Path = None, thresholds=(5, 10, 30)):
+    """Run all approaches × thresholds × stations."""
     if output_dir is None:
         output_dir = Path('./experiments/underfitting_results')
     output_dir = Path(output_dir)
@@ -160,107 +199,59 @@ def run_experiments(df: pd.DataFrame, output_dir: Path = None):
 
     results = []
 
-    # Map partition keys to display names
-    partition_to_display = {v: v for v in STATION_PARTITION_MAP.values()}
-
-    # 1. BASELINE: All data (lean features)
-    print("\n=== BASELINE: All Data (Lean Features) ===")
-    for partition_key, station_name in STATION_PARTITION_MAP.items():
-        try:
-            r = split_and_train(df, MODEL_FEATURES_LEAN, station_name, "baseline_all_data")
-            results.append(r)
-            print(f"{station_name}: n_train={r.n_train}, orange_recall_test={r.orange_recall_test:.3f}, orange_auc_test={r.orange_auc_test:.3f}")
-        except Exception as e:
-            print(f"{station_name}: FAILED - {e}")
-
-    # 2. NIGHTTIME-ONLY: Focus on when H2S actually occurs
-    print("\n=== NIGHTTIME-ONLY: Lean Features ===")
-    for partition_key, station_name in STATION_PARTITION_MAP.items():
-        try:
-            r = split_and_train(
-                df,
-                MODEL_FEATURES_LEAN,
-                station_name,
-                "nighttime_only",
-                experiment_filter=lambda d: d['is_night'] == 1
-            )
-            results.append(r)
-            print(f"{station_name}: n_train={r.n_train}, orange_recall_test={r.orange_recall_test:.3f}, orange_auc_test={r.orange_auc_test:.3f}")
-        except Exception as e:
-            print(f"{station_name}: FAILED - {e}")
-
-    # 3. NON-ZERO H2S: Event-focused training
-    print("\n=== NON-ZERO H2S: Lean Features ===")
-    for partition_key, station_name in STATION_PARTITION_MAP.items():
-        try:
-            r = split_and_train(
-                df,
-                MODEL_FEATURES_LEAN,
-                station_name,
-                "nonzero_h2s_only",
-                experiment_filter=lambda d: d['H2S'] > 0
-            )
-            results.append(r)
-            print(f"{station_name}: n_train={r.n_train}, orange_recall_test={r.orange_recall_test:.3f}, orange_auc_test={r.orange_auc_test:.3f}")
-        except Exception as e:
-            print(f"{station_name}: FAILED - {e}")
-
-    # 4. DUAL MODEL - Part A: H2S Nights (high concentration training)
-    print("\n=== DUAL MODEL - H2S Nights: Lean Features ===")
-    for partition_key, station_name in STATION_PARTITION_MAP.items():
-        try:
-            r = split_and_train(
-                df,
-                MODEL_FEATURES_LEAN,
-                station_name,
-                "dual_h2s_nights",
-                experiment_filter=lambda d: (d['is_night'] == 1) & (d['H2S'] > 0)
-            )
-            results.append(r)
-            print(f"{station_name}: n_train={r.n_train}, orange_recall_test={r.orange_recall_test:.3f}, orange_auc_test={r.orange_auc_test:.3f}")
-        except Exception as e:
-            print(f"{station_name}: FAILED - {e}")
-
-    # 5. DUAL MODEL - Part B: Green Periods (safe-state learning)
-    print("\n=== DUAL MODEL - Green Periods: Lean Features ===")
-    for partition_key, station_name in STATION_PARTITION_MAP.items():
-        try:
-            r = split_and_train(
-                df,
-                MODEL_FEATURES_LEAN,
-                station_name,
-                "dual_green_periods",
-                experiment_filter=lambda d: (d['H2S'] <= 5) | (d['H2S'].isna())
-            )
-            results.append(r)
-            print(f"{station_name}: n_train={r.n_train}, orange_recall_test={r.orange_recall_test:.3f}, orange_auc_test={r.orange_auc_test:.3f}")
-        except Exception as e:
-            print(f"{station_name}: FAILED - {e}")
+    for threshold in thresholds:
+        print(f"\n{'#' * 70}")
+        print(f"# THRESHOLD: H2S ≥ {threshold} ppb")
+        print(f"{'#' * 70}")
+        for approach_name, filt in _APPROACHES:
+            print(f"\n=== {approach_name} (≥{threshold} ppb, Lean Features) ===")
+            for partition_key, station_name in STATION_PARTITION_MAP.items():
+                try:
+                    r = split_and_train(
+                        df, MODEL_FEATURES_LEAN, station_name, approach_name,
+                        threshold=threshold, experiment_filter=filt,
+                    )
+                    results.append(r)
+                    print(
+                        f"{station_name}: n_train={r.n_train}, pos%={100 * r.n_pos_test / max(1, r.n_test):.1f}, "
+                        f"recall_test={r.pos_recall_test:.3f}, auc_test={r.pos_auc_test:.3f}"
+                    )
+                except Exception as e:
+                    print(f"{station_name}: FAILED - {e}")
 
     return results
 
 
 def print_summary(results: list[ExperimentResult]):
-    """Print summary table of results."""
-    print("\n" + "=" * 120)
-    print("EXPERIMENT SUMMARY: Orange (≥30 ppb) Detection Metrics")
-    print("=" * 120)
+    """Print summary tables, one block per threshold × station."""
+    thresholds = sorted(set(r.threshold for r in results))
+    for threshold in thresholds:
+        print("\n" + "=" * 120)
+        print(f"EXPERIMENT SUMMARY: H2S ≥ {threshold} ppb Detection Metrics")
+        print("=" * 120)
 
-    # Group by station
-    for station in sorted(set(r.station for r in results)):
-        print(f"\n{station}:")
-        print("-" * 110)
-        print(f"{'Experiment':<25} {'Train N':<10} {'Test N':<10} {'Orange%':<10} {'Recall':<10} {'Precision':<10} {'AUC':<10} {'F1':<10}")
-        print("-" * 110)
+        for station in sorted(set(r.station for r in results)):
+            rows = [x for x in results if x.station == station and x.threshold == threshold]
+            if not rows:
+                continue
+            print(f"\n{station}  (≥{threshold} ppb):")
+            print("-" * 110)
+            print(f"{'Experiment':<25} {'Train N':<10} {'Test N':<10} {'Pos%':<10} {'Recall':<10} {'Precision':<10} {'AUC':<10} {'F1':<10}")
+            print("-" * 110)
 
-        for r in sorted([x for x in results if x.station == station], key=lambda x: x.name):
-            orange_pct_test = 100 * r.n_orange_test / max(1, r.n_test)
-            print(
-                f"{r.name:<25} {r.n_train:<10} {r.n_test:<10} "
-                f"{orange_pct_test:<10.1f} {r.orange_recall_test:<10.3f} "
-                f"{r.orange_precision_test:<10.3f} {r.orange_auc_test:<10.3f} "
-                f"{r.orange_f1_test:<10.3f}"
-            )
+            baseline = next((x for x in rows if x.name == 'baseline_all_data'), None)
+            for r in sorted(rows, key=lambda x: x.name):
+                pos_pct_test = 100 * r.n_pos_test / max(1, r.n_test)
+                delta = ""
+                if baseline is not None and r.name != 'baseline_all_data':
+                    d = r.pos_recall_test - baseline.pos_recall_test
+                    delta = f"  ({'+' if d >= 0 else ''}{d * 100:.1f} pp)"
+                print(
+                    f"{r.name:<25} {r.n_train:<10} {r.n_test:<10} "
+                    f"{pos_pct_test:<10.1f} {r.pos_recall_test:<10.3f} "
+                    f"{r.pos_precision_test:<10.3f} {r.pos_auc_test:<10.3f} "
+                    f"{r.pos_f1_test:<10.3f}{delta}"
+                )
 
 
 def save_results(results: list[ExperimentResult], output_dir: Path):
@@ -273,18 +264,19 @@ def save_results(results: list[ExperimentResult], output_dir: Path):
         {
             'name': r.name,
             'station': r.station,
+            'threshold': int(r.threshold),
             'n_train': int(r.n_train),
             'n_test': int(r.n_test),
-            'n_orange_train': int(r.n_orange_train),
-            'n_orange_test': int(r.n_orange_test),
-            'orange_recall_train': float(r.orange_recall_train),
-            'orange_recall_test': float(r.orange_recall_test),
-            'orange_precision_train': float(r.orange_precision_train),
-            'orange_precision_test': float(r.orange_precision_test),
-            'orange_auc_train': float(r.orange_auc_train),
-            'orange_auc_test': float(r.orange_auc_test),
-            'orange_f1_train': float(r.orange_f1_train),
-            'orange_f1_test': float(r.orange_f1_test),
+            'n_pos_train': int(r.n_pos_train),
+            'n_pos_test': int(r.n_pos_test),
+            'pos_recall_train': float(r.pos_recall_train),
+            'pos_recall_test': float(r.pos_recall_test),
+            'pos_precision_train': float(r.pos_precision_train),
+            'pos_precision_test': float(r.pos_precision_test),
+            'pos_auc_train': float(r.pos_auc_train),
+            'pos_auc_test': float(r.pos_auc_test),
+            'pos_f1_train': float(r.pos_f1_train),
+            'pos_f1_test': float(r.pos_f1_test),
         }
         for r in results
     ]
@@ -313,7 +305,13 @@ def main():
         action='store_true',
         help='Only analyze data distribution, do not train'
     )
+    parser.add_argument(
+        '--thresholds',
+        default='5,10,30',
+        help='Comma-separated ppb thresholds to evaluate (default: 5,10,30)'
+    )
     args = parser.parse_args()
+    thresholds = tuple(int(t) for t in args.thresholds.split(','))
 
     print("Loading training data...")
     df = load_training_data(args.data_path)
@@ -332,7 +330,7 @@ def main():
         return
 
     print("\n\nStarting experiments (this may take a few minutes)...")
-    results = run_experiments(df, Path(args.output_dir))
+    results = run_experiments(df, Path(args.output_dir), thresholds=thresholds)
 
     print_summary(results)
     save_results(results, Path(args.output_dir))
