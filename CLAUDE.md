@@ -28,6 +28,28 @@ so the 4-tier view needs no retraining. The underlying 3-class models
 
 **Model Performance (hourly pipeline):** 61.3% orange detection rate, 5.4% false alarm rate.
 
+### Two-head agreement classification (confirmed vs. provisional)
+
+Each site carries two independent hazard signals already present in every
+product row: the regression **magnitude** (`h2s_pred` ppb) and the classifier
+**probability** (`p5/p10/p30`). `classify_risk_agreement()` in `constants.py`
+combines them so a hard alert needs corroboration while a lone signal is never a
+silent miss:
+
+- **Both heads at the same tier → CONFIRMED** at that tier (`risk_possible=None`).
+- **Heads disagree → headline is the LOWER (confirmed) tier**, and the higher
+  single-head tier is surfaced as `risk_possible` with
+  `risk_confidence="provisional"`. A single head never escalates the headline.
+- Applies across **all tiers** (5 / 10 / 30 ppb).
+
+The daily forecast rows (`h2s_daily_pipeline`) carry `risk` (confirmed
+headline), `risk_possible`, `risk_confidence`, and `risk_legacy` (the old
+OR-logic `classify_risk`, kept for continuity). The dashboard tile and summary
+JSON expose `hours_possible_orange` / `(+N?)` so provisional hazards stay
+visible. This composes with the per-station clf_30ppb gate below: where `p30` is
+NaN, the probability head cannot reach ORANGE, so magnitude-only orange at those
+stations is always *provisional*, never confirmed.
+
 ## Project Structure
 
 ```
@@ -305,26 +327,40 @@ probabilities, never errors.
 ### Forecast Cascade + Alerting
 
 `cascade_alerts_job` (every 6h, RUNNING) runs `station_forecast_job` then
-evaluates the Tier 1–3 cascade at NESTOR-BES off the **Evidence** product
-probabilities — Tier 1 P(>5) in nowcast, Tier 2 P(>10) in nearcast, Tier 3
-P(>30) in forecast — and posts an escalating report to the ops Slack channel
-when a tier's peak probability clears its cutoff (`CASCADE_TRIGGERS`, all 0.5).
-Tiers fire independently (no nesting), and both variants (Evidence/Lean) are
-shown in the report. A separate observed >10 ppb "Alert Performance" state
+evaluates the Tier 1–3 cascade at NESTOR-BES off the **Lean** product
+probabilities (`TRIGGER_VARIANT = PRIMARY_VARIANT = "lean"`) — Tier 1 P(>5) in
+nowcast, Tier 2 P(>10) in nearcast, Tier 3 P(>30) in forecast — and posts an
+escalating report to the ops Slack channel when a tier's peak probability clears
+its cutoff (`CASCADE_TRIGGERS`, all 0.5). Tiers fire independently (no nesting),
+and both variants (Lean drives, Evidence shown alongside) appear in the report. A separate observed >10 ppb "Alert Performance" state
 machine (`h2s_alert_performance_sensor`, 5-min poll) opens/closes events and
 posts a forecast-vs-measured close-out. Both replaced the retired met-regime
 gate + sigmoid-score `tiered_alerts` system. The observation tiers
 (`watch` 30 / `critical` 100, in `h2s_alert_system`) are unchanged.
 
-**Per-station clf_30ppb status (2026-06):** clf_30ppb is enabled for all three
-stations (`PROB_30_ALERT = 0.25`). Walk-forward backtest orange recall @ 0.25:
-NESTOR ~0.95, IB_CIVIC_CTR ~0.91, **SAN_YSIDRO ~0.43 — below the 0.50 target
-(known limitation)**: sparse 30 ppb positives and a low-calibrated probability
-scale; a per-station threshold (~0.10–0.15) would clear it but per-station
-`PROB_30_ALERT` is deferred. BorderlineSMOTE oversampling was evaluated and
-*degraded* recall (AUC was already 0.96–0.98), so it is OFF by default
-(opt-in via `enable_smote_clf_30ppb`). See
-`projects/h2s/docs/RETRAIN_STATION_CLF30PPB_BRIEF.md` §11.
+**Per-station clf_30ppb status (2026-06): NESTOR-BES only.** P(>30 ppb) / the
+ORANGE call is **emitted for NESTOR-BES only** — gated by `CLF_30PPB_STATIONS`
+in `constants.py`. clf_30ppb is still *trained and deployed* for all three
+stations (the artifact set stays uniform), but the products
+(`h2s_products_pipeline`) and daily (`h2s_daily_pipeline`) engines pass
+`clf_30ppb=None` for the other stations, so their `p30` is **NaN** — the same
+path the schema already takes for a missing classifier. IB_CIVIC_CTR and
+SAN_YSIDRO therefore fall back to the ≥10 ppb (yellow-high) tier as their top
+operational alert; `classify_risk` already reverts to the `prob_10`-driven
+orange decision when `prob_30` is absent. The cascade (`cascade_alerts`) was
+already NESTOR-only (`NB_SITE`), so it is unaffected.
+
+*Why:* per-station orange recall is only dependable where there are enough ≥30
+training positives. NESTOR-BES has ~344 (holdout recall ~0.77, walk-forward
+~0.95 @0.25); IB_CIVIC_CTR (~51) and SAN_YSIDRO (~40) collapse at a fixed
+operating point (SAN_YSIDRO ~0.16 holdout / ~0.43 walk-forward — below the 0.50
+target). A **pooled cross-station ≥30 model** (435 combined positives) recovers
+their recall in experiments and is the path to re-enabling them: add the
+station's `site_name` to `CLF_30PPB_STATIONS` once that model ships. See
+`projects/h2s/experiments/underfitting_results/` (FINDINGS + pooled results) and
+`projects/h2s/docs/RETRAIN_STATION_CLF30PPB_BRIEF.md` §11. BorderlineSMOTE
+oversampling was evaluated and *degraded* recall (AUC was already 0.96–0.98), so
+it is OFF by default (opt-in via `enable_smote_clf_30ppb`).
 
 ### Forecast Validation Store + Skill Curves
 
@@ -598,11 +634,11 @@ s3://test/
 │   │   ├── xgboost_smote/model.json
 │   │   ├── random_forest/model.joblib
 │   │   ├── stations/{station_key}/              # IB_CIVIC_CTR, NESTOR__BES, SAN_YSIDRO
-│   │   │   ├── clf_5ppb_evidence.pkl            # Evidence variant — 33 feat, production default
+│   │   │   ├── clf_5ppb_evidence.pkl            # Evidence variant — 33 feat, shown alongside
 │   │   │   ├── clf_10ppb_evidence.pkl
-│   │   │   ├── clf_30ppb_evidence.pkl           # P(>30ppb) for the Tier-3 cascade trigger
+│   │   │   ├── clf_30ppb_evidence.pkl           # P(>30ppb); NESTOR-only emission (CLF_30PPB_STATIONS)
 │   │   │   ├── regression_evidence.pkl
-│   │   │   ├── clf_5ppb_lean.pkl                # Lean variant — 19 feat, deployed in parallel
+│   │   │   ├── clf_5ppb_lean.pkl                # Lean variant — 19 feat, PRIMARY_VARIANT (drives reports+alerts)
 │   │   │   ├── clf_10ppb_lean.pkl
 │   │   │   ├── clf_30ppb_lean.pkl
 │   │   │   ├── regression_lean.pkl

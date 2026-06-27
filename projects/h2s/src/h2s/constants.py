@@ -155,6 +155,20 @@ PROB_5_ALERT = 0.5
 PROB_10_ALERT = 0.5
 PROB_30_ALERT = 0.25  # p(H2S>30ppb) threshold to trigger ORANGE (lowered for better sensitivity)
 
+# Stations whose P(>30 ppb) / ORANGE call we trust enough to emit. clf_30ppb is
+# still trained + deployed for every station (the artifact set stays uniform),
+# but the products/daily engines emit p30 ONLY for these stations; everywhere
+# else p30 is NaN — the same path the schema already takes for a missing
+# classifier. Rationale (2026-06): per-station >=30 recall is only dependable
+# where there are enough orange positives to learn from. NESTOR-BES has ~344
+# training positives (recall ~0.77–0.95); IB_CIVIC_CTR (~51) and SAN_YSIDRO
+# (~40) collapse at a fixed operating point (SAN_YSIDRO ~0.16–0.43), so a
+# per-station orange call there is more noise than signal. Those stations fall
+# back to the >=10 ppb (yellow-high) tier as their top operational alert. A
+# pooled cross-station >=30 model recovers their recall and is the path to
+# re-enabling them — add the station's site_name here once that lands.
+CLF_30PPB_STATIONS = frozenset({"NESTOR - BES"})
+
 # ==============================================================================
 # Forecast Products (docs/feature/rename_workplan.md)
 # ==============================================================================
@@ -334,6 +348,82 @@ def classify_risk(prob_5: float, prob_10: float, h2s_pred: float, prob_30: float
 
 
 # ------------------------------------------------------------------------------
+# Two-head agreement classification (confirmed vs. provisional)
+# ------------------------------------------------------------------------------
+# Each site carries two independent hazard signals that already ride in every
+# product row: the regression MAGNITUDE (h2s_pred ppb) and the classifier
+# PROBABILITY (p5/p10/p30). The agreement rubric reports the level BOTH heads
+# confirm as the headline tier, and surfaces the higher single-head level as a
+# "possible_<tier>" flag (never escalating the headline on one signal alone).
+#
+# - Both heads at the same tier  → CONFIRMED at that tier (risk_possible=None).
+# - Heads disagree               → headline = the LOWER (confirmed) tier;
+#                                   risk_possible = the HIGHER tier;
+#                                   risk_confidence = "provisional".
+#
+# Rationale: a hard alert needs corroboration (fewer false orange calls), while a
+# lone strong signal still surfaces as a watch (never a silent miss). Composes
+# with the per-station clf_30ppb gate — where p30 is NaN (non-CLF_30PPB_STATIONS),
+# the probability head cannot reach ORANGE, so magnitude-only orange there is
+# always provisional, never confirmed.
+
+RISK_ORDER = [RISK_GREEN, RISK_YELLOW_LOW, RISK_YELLOW_HIGH, RISK_ORANGE]
+_RISK_RANK = {r: i for i, r in enumerate(RISK_ORDER)}
+
+
+def magnitude_risk_tier(h2s_pred: float) -> str:
+    """RISK_* tier implied by the regression magnitude (cuts 5/10/30 ppb)."""
+    if h2s_pred is None or h2s_pred != h2s_pred:  # NaN-safe
+        return RISK_GREEN
+    if h2s_pred >= H2S_THRESHOLD_HIGH:
+        return RISK_ORANGE
+    if h2s_pred >= H2S_THRESHOLD_MED:
+        return RISK_YELLOW_HIGH
+    if h2s_pred >= H2S_THRESHOLD_LOW:
+        return RISK_YELLOW_LOW
+    return RISK_GREEN
+
+
+def probability_risk_tier(prob_5: float, prob_10: float, prob_30: float = float("nan")) -> str:
+    """RISK_* tier implied by the classifier probabilities.
+
+    Each probability maps to its own exceedance boundary at the matching alert
+    cutoff: p30→ORANGE, p10→YELLOW_HIGH, p5→YELLOW_LOW. NaN probabilities (e.g.
+    a gated clf_30ppb) simply cannot raise their tier — ``nan > x`` is False — so
+    the head caps below that level rather than erroring.
+    """
+    if prob_30 > PROB_30_ALERT:
+        return RISK_ORANGE
+    if prob_10 > PROB_10_ALERT:
+        return RISK_YELLOW_HIGH
+    if prob_5 > PROB_5_ALERT:
+        return RISK_YELLOW_LOW
+    return RISK_GREEN
+
+
+def classify_risk_agreement(
+    prob_5: float, prob_10: float, h2s_pred: float, prob_30: float = float("nan"),
+) -> tuple[str, str | None, str]:
+    """Two-head agreement classification.
+
+    Returns ``(risk, risk_possible, risk_confidence)``:
+      - ``risk``           — headline tier = the level BOTH heads reach (the
+                             lower of the two single-head tiers).
+      - ``risk_possible``  — the higher single-head tier when the heads
+                             disagree, else ``None``.
+      - ``risk_confidence``— ``"confirmed"`` when both heads agree, else
+                             ``"provisional"``.
+    """
+    mag = magnitude_risk_tier(h2s_pred)
+    prob = probability_risk_tier(prob_5, prob_10, prob_30)
+    lower = mag if _RISK_RANK[mag] <= _RISK_RANK[prob] else prob
+    higher = mag if _RISK_RANK[mag] >= _RISK_RANK[prob] else prob
+    if mag == prob:
+        return lower, None, "confirmed"
+    return lower, higher, "provisional"
+
+
+# ------------------------------------------------------------------------------
 # 4-tier reporting categories (green / yellow-low / yellow-high / orange)
 # ------------------------------------------------------------------------------
 # Surfaces every hazard level — not just orange (>30). The yellow-HIGH tier
@@ -506,6 +596,18 @@ MODEL_FEATURES_MINIMAL = [
     'h2s_rolling_6h',          # consistently top-3 XGB importance in training reports
     'h2s_rolling_24h',
 ]
+
+# ==============================================================================
+# Primary deployed variant
+# ==============================================================================
+# Both variants (Evidence 33-feat, Lean 19-feat) are trained and deployed in
+# parallel, but the operational surfaces — daily forecast/dashboard, the Tier
+# 1–3 cascade trigger, the heatmap board, the digest, the performance report,
+# and the accuracy rollups — route through ONE primary variant. As of 2026-06
+# that is **lean**: it carries the headline forecasts and alerts, while Evidence
+# is still produced and shown alongside (e.g. the cascade report) for comparison.
+# Changing this one constant re-points every report + the alert trigger.
+PRIMARY_VARIANT = "lean"
 
 # ==============================================================================
 # Dispersion Modeling S3 Paths

@@ -29,6 +29,7 @@ import dagster as dg
 import pandas as pd
 
 from h2s.constants import (
+    CLF_30PPB_STATIONS,
     FLOW_COL,
     MODEL_FEATURES,
     MODEL_FEATURES_LEAN,
@@ -217,11 +218,14 @@ def h2s_products(
                     sfc[col] = 0.0
 
             tasks = station[variant]
+            # Emit P(>30) only for stations whose orange call we trust; elsewhere
+            # clf_30ppb=None → p30 is NaN (see CLF_30PPB_STATIONS in constants).
+            emit_clf30 = site_name in CLF_30PPB_STATIONS
             models = VariantModels(
                 regression=tasks["regression"],
                 clf_5ppb=tasks.get("clf_5ppb"),
                 clf_10ppb=tasks.get("clf_10ppb"),
-                clf_30ppb=tasks.get("clf_30ppb"),
+                clf_30ppb=tasks.get("clf_30ppb") if emit_clf30 else None,
             )
             product_rows = run_products(sfc, h2s_history, models, feature_cols)
             product_rows["station"] = site_name

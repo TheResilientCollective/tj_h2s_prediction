@@ -24,6 +24,7 @@ import pandas as pd
 
 from h2s.constants import (
     ALIGNMENT_THRESHOLD_DEG,
+    CLF_30PPB_STATIONS,
     DAILY_SUMMARY_PATH,
     H2S_SOURCE_THRESHOLD,
     FLOW_COL,
@@ -32,10 +33,12 @@ from h2s.constants import (
     SOURCES,
     SPEED_COL,
     STATION_MODELS_S3_BASE,
+    PRIMARY_VARIANT,
     STATION_PARTITION_MAP,
     STATIONS,
     WIND_COL,
     classify_risk,
+    classify_risk_agreement,
 )
 from h2s.forecasting.recursive import VariantModels, run_products
 
@@ -208,8 +211,8 @@ def multi_station_model_artifacts(context: dg.AssetExecutionContext) -> dict:
 
     Returns nested dict: {station_name: {task: model}} where `task` is the
     bare task name (regression / clf_5ppb / clf_10ppb / clf_30ppb). The
-    daily pipeline routes through the Evidence variant; Lean is deployed
-    alongside but is available for explicit opt-in (see `_VARIANT` below).
+    daily pipeline routes through the primary variant (lean — see
+    PRIMARY_VARIANT); Evidence is deployed alongside (see `_VARIANT` below).
 
     Falls back gracefully if models for a station (or an individual task,
     e.g. clf_30ppb before the first post-Phase-1 deployment) are not yet
@@ -218,10 +221,9 @@ def multi_station_model_artifacts(context: dg.AssetExecutionContext) -> dict:
     s3 = context.resources.s3
     artifacts = {}
     tasks = ['regression', 'clf_5ppb', 'clf_10ppb', 'clf_30ppb']
-    # The variant the daily pipeline routes through. Changing this to
-    # 'lean' (or a future variant) is the only edit needed to switch
-    # production routing — no path-string sprawl.
-    _VARIANT = 'evidence'
+    # The variant the daily pipeline routes through — the shared PRIMARY_VARIANT
+    # (lean) so the daily forecast/dashboard matches the reports and cascade.
+    _VARIANT = PRIMARY_VARIANT
 
     for site_name, info in STATIONS.items():
         station_key = info['key']
@@ -483,11 +485,13 @@ def station_forecasts(
         # replaces the previous decay-heuristic single-shot predict, so the daily
         # forecast now matches the cascade/products and the Phase-5 store.
         h2s_history = ss['H2S'].tail(24).tolist() if len(ss) > 0 else [last_state['h2s']]
+        # Emit P(>30) only for trusted stations; elsewhere clf_30ppb=None → p30
+        # is NaN (see CLF_30PPB_STATIONS in constants).
         models = VariantModels(
             regression=station_models['regression'],
             clf_5ppb=station_models.get('clf_5ppb'),
             clf_10ppb=station_models.get('clf_10ppb'),
-            clf_30ppb=station_models.get('clf_30ppb'),
+            clf_30ppb=station_models.get('clf_30ppb') if site in CLF_30PPB_STATIONS else None,
         )
         product_rows = run_products(sfc, h2s_history, models, list(feature_cols))
         sfc_by_lead = {i + 1: sfc.iloc[i] for i in range(len(sfc))}
@@ -503,7 +507,14 @@ def station_forecasts(
             h2s_pred = float(prow['h2s_pred'])
             p5 = float(prow['p5']) if pd.notna(prow['p5']) else 0.0
             p10 = float(prow['p10']) if pd.notna(prow['p10']) else 0.0
-            p30 = float(prow['p30']) if pd.notna(prow['p30']) else 0.0
+            # Keep p30 NaN when the classifier is gated/absent so the probability
+            # head simply can't reach ORANGE (rather than reading as a hard 0).
+            p30 = float(prow['p30']) if pd.notna(prow['p30']) else float('nan')
+
+            # Two-head agreement: headline = level both heads confirm; a lone
+            # head surfaces as risk_possible / provisional (never escalates the
+            # headline). classify_risk retained as risk_legacy for continuity.
+            risk, risk_possible, risk_confidence = classify_risk_agreement(p5, p10, h2s_pred, p30)
 
             results.append({
                 'time': prow['time'],
@@ -513,8 +524,11 @@ def station_forecasts(
                 'h2s_pred': round(h2s_pred, 1),
                 'prob_5': round(p5 * 100, 1),
                 'prob_10': round(p10 * 100, 1),
-                'prob_30': round(p30 * 100, 1),
-                'risk': classify_risk(p5, p10, h2s_pred, p30),
+                'prob_30': round(p30 * 100, 1) if pd.notna(p30) else None,
+                'risk': risk,
+                'risk_possible': risk_possible,
+                'risk_confidence': risk_confidence,
+                'risk_legacy': classify_risk(p5, p10, h2s_pred, p30 if pd.notna(p30) else 0.0),
                 'wind_speed': round(float(row[SPEED_COL]) if SPEED_COL in row.index else 0.0, 1),
                 'wind_dir': round(float(wd)),
                 'temp': round(float(row['temperature_2m']) if 'temperature_2m' in row.index else 0.0, 1),
@@ -631,10 +645,14 @@ def station_forecast_dashboard(
         oranges = int((sf['risk'] == 'ORANGE').sum()) if len(sf) > 0 else 0
         yellow_highs = int((sf['risk'] == 'YELLOW_HIGH').sum()) if len(sf) > 0 else 0
         yellow_lows = int((sf['risk'] == 'YELLOW_LOW').sum()) if len(sf) > 0 else 0
+        # Provisional (single-head) oranges — surfaced so a lone strong signal is
+        # never silently hidden, even though it does not set the headline tier.
+        poss_oranges = int((sf['risk_possible'] == 'ORANGE').sum()) if 'risk_possible' in sf.columns and len(sf) > 0 else 0
         cc = '#e74c3c' if oranges > 0 else '#e67e22' if yellow_highs > 0 else '#f39c12' if yellow_lows > 0 else '#27ae60'
         ax.text(0.5, 0.75, site, ha='center', fontsize=13, fontweight='bold', color='white', transform=ax.transAxes)
         ax.text(0.5, 0.45, f'Last: {lh:.0f} ppb | Fcst max: {max_fc:.0f} ppb', ha='center', fontsize=9, color='#ccc', transform=ax.transAxes)
-        ax.text(0.5, 0.15, f'P(>5): {max_p5:.0f}% | O:{oranges} YH:{yellow_highs} YL:{yellow_lows}', ha='center', fontsize=9, color='#aaa', transform=ax.transAxes)
+        poss_str = f' (+{poss_oranges}?)' if poss_oranges > 0 else ''
+        ax.text(0.5, 0.15, f'P(>5): {max_p5:.0f}% | O:{oranges}{poss_str} YH:{yellow_highs} YL:{yellow_lows}', ha='center', fontsize=9, color='#aaa', transform=ax.transAxes)
         for s_ in ax.spines.values():
             s_.set_color(cc)
             s_.set_linewidth(3)
@@ -913,15 +931,27 @@ def station_forecast_summary(
             if len(sf) == 0:
                 continue
             risk_counts = sf['risk'].value_counts().to_dict()
+            possible_counts = (
+                sf['risk_possible'].value_counts().to_dict()
+                if 'risk_possible' in sf.columns else {}
+            )
+            # NaN-safe: prob_30 is None for gated stations (all-None → max is NaN).
+            max_p30 = float(sf['prob_30'].max()) if 'prob_30' in sf.columns else 0.0
+            if max_p30 != max_p30:  # NaN
+                max_p30 = 0.0
             summary['forecast_24h'][info['short']] = {
                 'max_h2s': round(float(sf['h2s_pred'].max()), 1),
                 'max_prob_5': round(float(sf['prob_5'].max()), 1),
                 'max_prob_10': round(float(sf['prob_10'].max()), 1),
-                'max_prob_30': round(float(sf['prob_30'].max()), 1) if 'prob_30' in sf.columns else 0.0,
+                'max_prob_30': round(max_p30, 1),
                 'hours_orange': int(risk_counts.get('ORANGE', 0)),
                 'hours_yellow_high': int(risk_counts.get('YELLOW_HIGH', 0)),
                 'hours_yellow_low': int(risk_counts.get('YELLOW_LOW', 0)),
                 'hours_green': int(risk_counts.get('GREEN', 0)),
+                # Provisional (single-head) hazards — headline stays at the
+                # confirmed tier; these flag a lone signal that needs confirming.
+                'hours_possible_orange': int(possible_counts.get('ORANGE', 0)),
+                'hours_possible_yellow_high': int(possible_counts.get('YELLOW_HIGH', 0)),
             }
 
     # Active sources from attribution

@@ -7,9 +7,9 @@ fired, escalating in audience and horizon:
   Tier 2 (MULTI-SITE-RISK)→ adds the forecast-window outlook
   Tier 3 (EXCEEDANCE-RISK)→ adds the all-station P(>30 ppb) board + health-team flag
 
-Evidence drives the triggers; Lean probabilities are shown beside them (``E`` /
-``L``) so a reader can see the two feature sets agree — the published
-"not overdetermined" check.
+Lean (the primary variant) drives the triggers; Evidence probabilities are
+shown beside them (``E`` / ``L``) so a reader can see the two feature sets
+agree — the published "not overdetermined" check.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from h2s.constants import (
     PRODUCT_NOWCAST,
     STATIONS,
 )
-from h2s.defs.cascade_alerts.cascade import CascadeResult, NB_SITE
+from h2s.defs.cascade_alerts.cascade import CascadeResult, NB_SITE, TRIGGER_VARIANT
 from h2s.defs.h2s_alert_system import _fmt_time
 
 _TIER_EMOJI = {"tier_1": "🟢", "tier_2": "🟡", "tier_3": "🔴"}
@@ -92,8 +92,8 @@ def _tier1_lines(df: pd.DataFrame, result: CascadeResult) -> list[str]:
         f"(P(>5 ppb) nowcast = {_fmt_pct(ev.trigger_prob)} > {_fmt_pct(ev.prob_cutoff)})",
         f"   Next 6 h: ~{result.est_hours_h2s_6h} h of detectable H2S (≥5 ppb) predicted",
     ]
-    now_pk = _peak(df, NB_SITE, "evidence", PRODUCT_NOWCAST, "p5")
-    near_pk = _peak(df, NB_SITE, "evidence", PRODUCT_NEARCAST, "p10")
+    now_pk = _peak(df, NB_SITE, TRIGGER_VARIANT, PRODUCT_NOWCAST, "p5")
+    near_pk = _peak(df, NB_SITE, TRIGGER_VARIANT, PRODUCT_NEARCAST, "p10")
     if now_pk:
         lines.append(
             f"   Nowcast (0–3h):  peak {now_pk['h2s']:.0f} ppb @ {_hhmm(now_pk['time'])}   "
@@ -114,7 +114,7 @@ def _tier2_lines(df: pd.DataFrame, result: CascadeResult) -> list[str]:
         f"{_TIER_EMOJI['tier_2']} *Tier 2 — {ALERT_TIERS['tier_2']['label']}*  "
         f"(P(>10 ppb) nearcast = {_fmt_pct(ev.trigger_prob)} > {_fmt_pct(ev.prob_cutoff)})",
     ]
-    fc_pk = _peak(df, NB_SITE, "evidence", PRODUCT_FORECAST, "p10")
+    fc_pk = _peak(df, NB_SITE, TRIGGER_VARIANT, PRODUCT_FORECAST, "p10")
     if fc_pk:
         lines.append(
             f"   Forecast (6–24h): peak {fc_pk['h2s']:.0f} ppb @ {_hhmm(fc_pk['time'])}   "
@@ -133,7 +133,7 @@ def _tier3_lines(df: pd.DataFrame, result: CascadeResult) -> list[str]:
         "   All-station forecast P(>30 ppb):",
     ]
     for site_name, info in STATIONS.items():
-        pk = _peak(df, site_name, "evidence", PRODUCT_FORECAST, "p30")
+        pk = _peak(df, site_name, TRIGGER_VARIANT, PRODUCT_FORECAST, "p30")
         peak_note = f"   (peak {pk['h2s']:.0f} ppb @ {_hhmm(pk['time'])})" if pk else ""
         lines.append(
             f"     {info['short']:<3} {site_name:<13} "
@@ -170,7 +170,7 @@ def build_cascade_message(
         body += _TIER_LINE_BUILDERS[tier](products_df, result)
         body.append("")
     footer = [
-        "_Evidence variant drives triggers; Lean (L) shown for the "
+        "_Lean variant drives triggers; Evidence (E) shown for the "
         "not-overdetermined comparison. Cutoffs are pre-validation starting "
         "points (Phase 5 will tune them)._",
     ]

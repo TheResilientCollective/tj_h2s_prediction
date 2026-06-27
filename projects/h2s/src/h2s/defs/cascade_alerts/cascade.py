@@ -35,13 +35,15 @@ from h2s.constants import (
     H2S_THRESHOLD_HIGH,
     H2S_THRESHOLD_LOW,
     H2S_THRESHOLD_MED,
+    PRIMARY_VARIANT,
 )
 
-# NESTOR-BES is the bellwether station that drives the cascade. The Evidence
-# variant (33 feat, production default) fires triggers; Lean is reported
-# alongside but never gates.
+# NESTOR-BES is the bellwether station that drives the cascade. The primary
+# variant (lean, 19 feat — see PRIMARY_VARIANT in constants) fires triggers and
+# drives the reports that import TRIGGER_VARIANT; Evidence is reported alongside
+# but never gates.
 NB_SITE = "NESTOR - BES"
-TRIGGER_VARIANT = "evidence"
+TRIGGER_VARIANT = PRIMARY_VARIANT
 
 # Map a tier's exceedance threshold (ppb) to its probability column.
 THRESHOLD_PROB_COL: dict[int, str] = {

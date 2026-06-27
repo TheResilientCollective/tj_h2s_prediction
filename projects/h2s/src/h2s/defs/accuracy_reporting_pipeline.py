@@ -13,8 +13,8 @@ Reads the multi-station forecast validation store parquet
 The validation store is built by ``station_forecast_validation_rebuild_job``
 (or the daily ``forecast_validation_job``). Scorecards are computed directly
 from the ``h2s_pred`` / ``actual_h2s`` / ``p30`` columns, so they reflect the
-multi-station forecast products (Evidence variant by default) rather than the
-retired per-day metrics.json files.
+multi-station forecast products (PRIMARY_VARIANT = lean by default) rather than
+the retired per-day metrics.json files.
 
 Downstream consumers (Quarto report, Panel dashboard, geodemic Analytics page,
 weekly Slack scorecard) read these rollups directly and stay dumb.
@@ -41,7 +41,7 @@ import pandas as pd
 import dagster as dg
 from dagster import AssetExecutionContext
 
-from h2s.constants import FORECAST_VALIDATION_STORE_PATH, date_path
+from h2s.constants import FORECAST_VALIDATION_STORE_PATH, PRIMARY_VARIANT, date_path
 from h2s.resources.minio import S3Resource
 
 # ---------------------------------------------------------------------------
@@ -377,11 +377,11 @@ class AccuracyStore:
         self,
         start: date,
         end: date,
-        variant: str = "evidence",
+        variant: str = PRIMARY_VARIANT,
     ) -> pd.DataFrame:
         """Return validation rows for target hours in [start, end] (inclusive).
 
-        Filters to the given *variant* (default "evidence").  All rows are
+        Filters to the given *variant* (default PRIMARY_VARIANT = lean).  All rows are
         already matched (inner-joined) observations, so ``actual_h2s`` is
         always present.
         """
@@ -436,7 +436,7 @@ def build_period_scorecard(
     start: date,
     end: date,
     scope: str,
-    variant: str = "evidence",
+    variant: str = PRIMARY_VARIANT,
 ) -> PeriodScorecard:
     """Build a scorecard for [start, end] from the multi-station validation store.
 

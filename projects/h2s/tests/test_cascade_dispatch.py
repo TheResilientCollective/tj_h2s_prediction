@@ -73,11 +73,13 @@ class TestMessage:
         assert "MULTI-SITE-RISK" not in msg     # tier 2 not fired → no section
 
     def test_all_tiers_message_has_all_station_board(self):
+        # Lean is the trigger variant (PRIMARY_VARIANT), so it carries the
+        # tier-firing probabilities; Evidence is shown alongside.
         specs = []
         for st in ("NESTOR - BES", "SAN YSIDRO", "IB CIVIC CTR"):
-            specs.append({"station": st, "variant": "evidence",
-                          "prob_overrides": {2: (0.9, 0.1, 0.1), 5: (0.1, 0.7, 0.1), 9: (0.1, 0.1, 0.6)}})
             specs.append({"station": st, "variant": "lean",
+                          "prob_overrides": {2: (0.9, 0.1, 0.1), 5: (0.1, 0.7, 0.1), 9: (0.1, 0.1, 0.6)}})
+            specs.append({"station": st, "variant": "evidence",
                           "prob_overrides": {9: (0.1, 0.1, 0.5)}})
         df = _frame(specs)
         result = evaluate_cascade(df)
@@ -87,15 +89,17 @@ class TestMessage:
         assert "SAN YSIDRO" in msg and "IB CIVIC CTR" in msg
         assert "pending hook" in msg            # health-team future routing flagged
 
-    def test_missing_lean_renders_na_not_crash(self):
-        df = _frame([{"station": NB_SITE, "variant": "evidence",
+    def test_missing_evidence_renders_na_not_crash(self):
+        # Lean drives the trigger; the missing Evidence column must render n/a,
+        # not crash, in the both-variants board.
+        df = _frame([{"station": NB_SITE, "variant": "lean",
                       "prob_overrides": {2: (0.8, 0.1, 0.1)}}])
         result = evaluate_cascade(df)
         msg = build_cascade_message(result, df, pd.Timestamp("2026-06-14 13:00", tz="UTC"))
-        assert "L n/a" in msg
+        assert "E n/a" in msg
 
     def test_nan_p30_renders_na(self):
-        df = _frame([{"station": NB_SITE, "variant": "evidence",
+        df = _frame([{"station": NB_SITE, "variant": "lean",
                       "prob_overrides": {2: (0.8, 0.1, 0.1)}}])
         df["p30"] = np.nan
         result = evaluate_cascade(df)
