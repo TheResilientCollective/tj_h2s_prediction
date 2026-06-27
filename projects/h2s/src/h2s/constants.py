@@ -598,6 +598,18 @@ MODEL_FEATURES_MINIMAL = [
 ]
 
 # ==============================================================================
+# Primary deployed variant
+# ==============================================================================
+# Both variants (Evidence 33-feat, Lean 19-feat) are trained and deployed in
+# parallel, but the operational surfaces — daily forecast/dashboard, the Tier
+# 1–3 cascade trigger, the heatmap board, the digest, the performance report,
+# and the accuracy rollups — route through ONE primary variant. As of 2026-06
+# that is **lean**: it carries the headline forecasts and alerts, while Evidence
+# is still produced and shown alongside (e.g. the cascade report) for comparison.
+# Changing this one constant re-points every report + the alert trigger.
+PRIMARY_VARIANT = "lean"
+
+# ==============================================================================
 # Dispersion Modeling S3 Paths
 # ==============================================================================
 

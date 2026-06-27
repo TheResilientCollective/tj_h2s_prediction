@@ -327,12 +327,12 @@ probabilities, never errors.
 ### Forecast Cascade + Alerting
 
 `cascade_alerts_job` (every 6h, RUNNING) runs `station_forecast_job` then
-evaluates the Tier 1–3 cascade at NESTOR-BES off the **Evidence** product
-probabilities — Tier 1 P(>5) in nowcast, Tier 2 P(>10) in nearcast, Tier 3
-P(>30) in forecast — and posts an escalating report to the ops Slack channel
-when a tier's peak probability clears its cutoff (`CASCADE_TRIGGERS`, all 0.5).
-Tiers fire independently (no nesting), and both variants (Evidence/Lean) are
-shown in the report. A separate observed >10 ppb "Alert Performance" state
+evaluates the Tier 1–3 cascade at NESTOR-BES off the **Lean** product
+probabilities (`TRIGGER_VARIANT = PRIMARY_VARIANT = "lean"`) — Tier 1 P(>5) in
+nowcast, Tier 2 P(>10) in nearcast, Tier 3 P(>30) in forecast — and posts an
+escalating report to the ops Slack channel when a tier's peak probability clears
+its cutoff (`CASCADE_TRIGGERS`, all 0.5). Tiers fire independently (no nesting),
+and both variants (Lean drives, Evidence shown alongside) appear in the report. A separate observed >10 ppb "Alert Performance" state
 machine (`h2s_alert_performance_sensor`, 5-min poll) opens/closes events and
 posts a forecast-vs-measured close-out. Both replaced the retired met-regime
 gate + sigmoid-score `tiered_alerts` system. The observation tiers
@@ -634,11 +634,11 @@ s3://test/
 │   │   ├── xgboost_smote/model.json
 │   │   ├── random_forest/model.joblib
 │   │   ├── stations/{station_key}/              # IB_CIVIC_CTR, NESTOR__BES, SAN_YSIDRO
-│   │   │   ├── clf_5ppb_evidence.pkl            # Evidence variant — 33 feat, production default
+│   │   │   ├── clf_5ppb_evidence.pkl            # Evidence variant — 33 feat, shown alongside
 │   │   │   ├── clf_10ppb_evidence.pkl
-│   │   │   ├── clf_30ppb_evidence.pkl           # P(>30ppb) for the Tier-3 cascade trigger
+│   │   │   ├── clf_30ppb_evidence.pkl           # P(>30ppb); NESTOR-only emission (CLF_30PPB_STATIONS)
 │   │   │   ├── regression_evidence.pkl
-│   │   │   ├── clf_5ppb_lean.pkl                # Lean variant — 19 feat, deployed in parallel
+│   │   │   ├── clf_5ppb_lean.pkl                # Lean variant — 19 feat, PRIMARY_VARIANT (drives reports+alerts)
 │   │   │   ├── clf_10ppb_lean.pkl
 │   │   │   ├── clf_30ppb_lean.pkl
 │   │   │   ├── regression_lean.pkl

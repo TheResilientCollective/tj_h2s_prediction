@@ -33,6 +33,7 @@ from h2s.constants import (
     SOURCES,
     SPEED_COL,
     STATION_MODELS_S3_BASE,
+    PRIMARY_VARIANT,
     STATION_PARTITION_MAP,
     STATIONS,
     WIND_COL,
@@ -210,8 +211,8 @@ def multi_station_model_artifacts(context: dg.AssetExecutionContext) -> dict:
 
     Returns nested dict: {station_name: {task: model}} where `task` is the
     bare task name (regression / clf_5ppb / clf_10ppb / clf_30ppb). The
-    daily pipeline routes through the Evidence variant; Lean is deployed
-    alongside but is available for explicit opt-in (see `_VARIANT` below).
+    daily pipeline routes through the primary variant (lean — see
+    PRIMARY_VARIANT); Evidence is deployed alongside (see `_VARIANT` below).
 
     Falls back gracefully if models for a station (or an individual task,
     e.g. clf_30ppb before the first post-Phase-1 deployment) are not yet
@@ -220,10 +221,9 @@ def multi_station_model_artifacts(context: dg.AssetExecutionContext) -> dict:
     s3 = context.resources.s3
     artifacts = {}
     tasks = ['regression', 'clf_5ppb', 'clf_10ppb', 'clf_30ppb']
-    # The variant the daily pipeline routes through. Changing this to
-    # 'lean' (or a future variant) is the only edit needed to switch
-    # production routing — no path-string sprawl.
-    _VARIANT = 'evidence'
+    # The variant the daily pipeline routes through — the shared PRIMARY_VARIANT
+    # (lean) so the daily forecast/dashboard matches the reports and cascade.
+    _VARIANT = PRIMARY_VARIANT
 
     for site_name, info in STATIONS.items():
         station_key = info['key']
