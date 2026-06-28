@@ -145,7 +145,7 @@ forecast_skill_scorecard_job = dg.define_asset_job(
 
 forecast_skill_scorecard_schedule = dg.ScheduleDefinition(
     job=forecast_skill_scorecard_job,
-    cron_schedule="0 13 * * 1",  # weekly Monday 13:00 UTC
+    cron_schedule="0 10 * * 1",  # weekly Monday 10:00
     execution_timezone="America/Los_Angeles",
     default_status=dg.DefaultScheduleStatus.RUNNING,
     description="Weekly: rebuild forecast skill curves and post the scorecard to Slack",

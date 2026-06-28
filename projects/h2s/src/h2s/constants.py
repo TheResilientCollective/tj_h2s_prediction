@@ -5,7 +5,7 @@ S3 paths, station/source geography, hazard classification,
 and model feature lists — single source of truth.
 """
 # forecast schedule constant. When a forecast is updated (aka for when noaa hysplit files updated.
-SCHEDULE_6HR="0 */6 * * *"
+SCHEDULE_6HR="20 5,11,17,23 * * *"
 # ==============================================================================
 # S3 Path Constants
 # ==============================================================================

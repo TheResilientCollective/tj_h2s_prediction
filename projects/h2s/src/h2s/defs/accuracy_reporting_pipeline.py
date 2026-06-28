@@ -741,7 +741,7 @@ def monthly_accuracy_schedule(context: dg.ScheduleEvaluationContext):
 
 @dg.schedule(
     job=weekly_scorecard_job,
-    cron_schedule="0 16 * * 1",  # Mondays 09:00 America/Los_Angeles = 16:00 UTC.
+    cron_schedule="0 9 * * 1",  # Mondays 09:00 America/Los_Angeles = 16:00 UTC.
     execution_timezone="America/Los_Angeles",
     default_status=dg.DefaultScheduleStatus.RUNNING,
 )

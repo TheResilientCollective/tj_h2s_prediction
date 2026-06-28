@@ -286,7 +286,7 @@ dispersion_hysplit_execution_job = dg.define_asset_job(
     job=dispersion_inversion_job,
     cron_schedule="30 2 * * 1",
     execution_timezone="America/Los_Angeles",
-    description="Weekly Lagrangian inversion + HYSPLIT backward bundle (Monday 02:30 UTC)",
+    description="Weekly Lagrangian inversion + HYSPLIT backward bundle (Monday 02:30 )",
     default_status=dg.DefaultScheduleStatus.STOPPED,
     tags={"environment": "production", "schedule_type": "dispersion_inversion"},
 )
@@ -400,9 +400,9 @@ daily_station_validation_job = dg.define_asset_job(
 
 @dg.schedule(
     job=daily_station_validation_job,
-    cron_schedule="0 9 * * *",
+    cron_schedule="0 7 * * *",
     execution_timezone="America/Los_Angeles",
-    description="Daily station forecast validation at 9 AM ",
+    description="Daily station forecast validation at 7 AM ",
     default_status=dg.DefaultScheduleStatus.RUNNING,
     tags={"environment": "production", "schedule_type": "validation"},
 )
