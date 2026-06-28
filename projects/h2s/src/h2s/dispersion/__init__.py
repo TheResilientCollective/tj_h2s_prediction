@@ -16,12 +16,21 @@ from h2s.dispersion.gaussian import (
     run_forward_model_gridded,
     run_forward_model_detailed,
     run_forward_model_gridded_detailed,
+    run_forward_model_from_geometry,
+    run_forward_model_gridded_from_geometry,
     aggregate_grid_frames_max,
     footprint_to_grid_data,
     ForwardModelResult,
     SENSORS as DISPERSION_SENSORS,
     SOURCES as DISPERSION_SOURCE_ZONES,
     CANDIDATE_SOURCES as DISPERSION_CANDIDATE_SOURCES,
+)
+from h2s.dispersion.geometry import (
+    SubPoint,
+    SourceSpec,
+    load_source_geometry,
+    all_sub_points,
+    zone_sub_points,
 )
 from h2s.dispersion.hysplit_controls import generate_hysplit_bundle
 from h2s.dispersion.emission_inversion import (
@@ -36,6 +45,17 @@ from h2s.dispersion.emission_inversion import (
     batch_inversion_stacked,
     inversion_to_forward_sources,
     q_field_to_parquet_rows,
+    # Phase 2 — geometry-aware inversion
+    build_sensitivity_matrix_from_geometry,
+    project_footprint_to_sources,
+    calibration_loop_from_geometry,
+    batch_inversion_from_geometry,
+)
+from h2s.dispersion.calibration_metrics import (
+    compute_dispersion_metrics,
+    compute_threshold_skill,
+    score_inversion_result,
+    loso_cross_validate,
 )
 
 __all__ = [
@@ -48,12 +68,20 @@ __all__ = [
     "run_forward_model_gridded",
     "run_forward_model_detailed",
     "run_forward_model_gridded_detailed",
+    "run_forward_model_from_geometry",
+    "run_forward_model_gridded_from_geometry",
     "aggregate_grid_frames_max",
     "footprint_to_grid_data",
     "ForwardModelResult",
     "DISPERSION_SENSORS",
     "DISPERSION_SOURCE_ZONES",
     "DISPERSION_CANDIDATE_SOURCES",
+    # Source geometry loader (Phase 0 calibration loop)
+    "SubPoint",
+    "SourceSpec",
+    "load_source_geometry",
+    "all_sub_points",
+    "zone_sub_points",
     "generate_hysplit_bundle",
     # Channel-snapped emission inversion
     "CHANNEL_WAYPOINTS",
@@ -67,4 +95,14 @@ __all__ = [
     "batch_inversion_stacked",
     "inversion_to_forward_sources",
     "q_field_to_parquet_rows",
+    # Phase 2 — geometry-aware inversion
+    "build_sensitivity_matrix_from_geometry",
+    "project_footprint_to_sources",
+    "calibration_loop_from_geometry",
+    "batch_inversion_from_geometry",
+    # Phase 3 — skill metrics + LOSO cross-validation
+    "compute_dispersion_metrics",
+    "compute_threshold_skill",
+    "score_inversion_result",
+    "loso_cross_validate",
 ]

@@ -1,0 +1,126 @@
+# H2S dispersion source geometry — single source of truth
+#
+# Both the Gaussian forward model and the NNLS inversion read this file.
+# geometry = "point" | "line" | "polygon"
+#
+# For "line" and "polygon", discretize_spacing_m controls how finely the
+# geometry is sub-sampled into Gaussian plume point sources.  Each sub-point
+# carries weight = its arc-length / total arc-length, so total Q is conserved.
+#
+# q_prior is the initial guess used when inversion has not yet run (g/s).
+# zone maps to the 3-zone rollup in constants.py (east / west / south).
+#
+# *** MOVE VERTICES AS NEEDED — this is the file to edit in the field ***
+
+# ---------------------------------------------------------------------------
+# East drain corridor  (the SY-critical source)
+# ---------------------------------------------------------------------------
+# Today these four waypoints collapse to individual CANDIDATE_SOURCES points
+# 250–600 m from San Ysidro.  As a line, total Q spreads over ~1.5 km of
+# concrete channel, dropping the per-sub-point sensitivity at SY and fixing
+# the overprediction.  Move the endpoints to match the real drain alignment.
+
+[sources.east_drain_corridor]
+geometry              = "line"
+discretize_spacing_m  = 120
+q_prior               = 20.0
+zone                  = "east"
+vertices = [
+    [32.548531, -117.064293],   # Dairy Mart Bridge
+    [32.539743, -117.064269],   # Silva Drain
+    [32.542103, -117.054117],   # TJ Crossing CDLP W
+    [32.542166, -117.050325],   # TJ Crossing CDLP E
+]
+
+# ---------------------------------------------------------------------------
+# TJ River main stem — west reach
+# ---------------------------------------------------------------------------
+# From beach outlet east to Hollister Bridge S.  Saturn Blvd Bridge appears
+# here as an interior vertex AND as a discrete point source below.  The line
+# captures diffuse off-gassing along the concrete channel; the point source
+# captures the discrete bridge crossing.
+
+[sources.river_main_stem_west]
+geometry              = "line"
+discretize_spacing_m  = 150
+q_prior               = 10.0
+zone                  = "west"
+vertices = [
+    [32.556206, -117.126178],   # TJ River Beach Outlet
+    [32.559383, -117.092992],   # Saturn Blvd Bridge (also a point source below)
+    [32.554177, -117.084135],   # Hollister Bridge N
+    [32.551466, -117.084021],   # Hollister Bridge S
+]
+
+# ---------------------------------------------------------------------------
+# Smuggler's Gulch / Goat Canyon corridor (south)
+# ---------------------------------------------------------------------------
+
+[sources.smugglers_goat_canyon]
+geometry              = "line"
+discretize_spacing_m  = 150
+q_prior               = 137.0
+zone                  = "south"
+vertices = [
+    [32.538600, -117.086230],   # Smuggler's Gulch
+    [32.536900, -117.099160],   # Goat Canyon
+    [32.543476, -117.108026],   # Goat Canyon PS
+]
+
+# ---------------------------------------------------------------------------
+# Saturn Blvd Bridge — discrete point source
+# ---------------------------------------------------------------------------
+# Kept as a point per design — discrete bridge crossing with a distinct
+# emission character (turbulent degassing over the structure).
+
+[sources.saturn_blvd_bridge]
+geometry = "point"
+q_prior  = 5.0
+zone     = "west"
+location = [32.559383, -117.092992]
+
+# ---------------------------------------------------------------------------
+# Imperial Beach estuary — area (polygon) source
+# ---------------------------------------------------------------------------
+# Represents the Tijuana River Estuary mudflats / low marsh that off-gas H2S
+# on tidal exposure.  The bounding ring below is a PLACEHOLDER —
+# replace vertices with the real marsh/mudflat outline.
+# Set tide_modulated = true (Phase 4) to scale Q by tidal_state.
+
+[sources.imperial_beach_estuary]
+geometry              = "polygon"
+discretize_spacing_m  = 150
+q_prior               = 10.0
+zone                  = "west"
+tide_modulated        = false   # Phase 4: link to tidal_state
+vertices = [
+    [32.566000, -117.130000],   # SW corner — PLACEHOLDER, move to real boundary
+    [32.578000, -117.130000],   # NW corner
+    [32.578000, -117.118000],   # NE corner
+    [32.566000, -117.118000],   # SE corner
+]
+
+# ---------------------------------------------------------------------------
+# Optional standalone points
+# ---------------------------------------------------------------------------
+# These were in CANDIDATE_SOURCES.  Keep as points for now; fold into a line
+# if the inversion shows them loading up on correlated events (decision §9
+# of DISPERSION_CALIBRATION_PLAN.md).
+
+[sources.oneonta_slough]
+geometry = "point"
+q_prior  = 0.0
+zone     = "west"
+location = [32.570082, -117.126724]
+
+[sources.hollister_ps]
+geometry = "point"
+q_prior  = 0.0
+zone     = "west"
+location = [32.547600, -117.088374]
+
+[sources.del_sol_canyon]
+geometry = "point"
+q_prior  = 0.0
+zone     = "east"
+location = [32.539300, -117.068850]

@@ -127,6 +127,22 @@ class InversionConfig:
     # None / np.inf to disable.
     q_required_max_g_s: float = 500.0
 
+    # Phase 3: per-sensor row weighting + optional additive bias term
+    #
+    # sensor_row_weight="equal_mass": each active sensor contributes equal
+    #   total weight to the NNLS objective regardless of how many timesteps
+    #   it has signal.  This prevents a sensor that happens to be noisy or
+    #   simply has more qualifying rows from dominating the Q estimate.
+    #   "none" leaves all rows with unit weight (legacy behaviour).
+    #
+    # fit_sensor_bias=True: appends one non-negative per-sensor offset b_s to
+    #   the unknowns (extra NNLS columns, no L1 penalty).  Useful to absorb
+    #   local micro-environment error at a sensor (e.g. SY pocket).  The bias
+    #   is reported separately under "sensor_bias_ppb" and excluded from Q.
+    #   Enable cautiously — a large bias masks genuine geometry error.
+    sensor_row_weight: str  = "equal_mass"  # "equal_mass" | "none"
+    fit_sensor_bias: bool   = False
+
 
 # ---------------------------------------------------------------------------
 # Channel grid construction
@@ -293,6 +309,7 @@ def solve_nnls(
     A: np.ndarray,
     C_obs: np.ndarray,
     cfg: InversionConfig,
+    n_unregularized: int = 0,
 ) -> np.ndarray:
     """Solve Q ≥ 0 : argmin ‖A·Q − C_obs‖² + λ₁‖Q‖² + λ_s‖D·Q‖² via NNLS.
 
@@ -308,31 +325,40 @@ def solve_nnls(
 
     Parameters
     ----------
-    A : (n_rows, n_segments) ndarray
+    A : (n_rows, n_cols) ndarray
         Sensitivity rows from one or more (sensor, timestep) events stacked.
     C_obs : (n_rows,) ndarray
         Observed ppb at matching rows (background already subtracted).
     cfg : InversionConfig
+    n_unregularized : int
+        Number of rightmost columns exempt from L1 and smoothness
+        regularisation (Phase 3 bias columns).  Default 0 → all columns
+        are regularised (legacy behaviour).
 
     Returns
     -------
-    Q : (n_segments,) ndarray, units g/s, all non-negative.
+    Q : (n_cols,) ndarray, units g/s, all non-negative.
     """
-    n_seg = A.shape[1]
+    n_col = A.shape[1]
+    n_reg = n_col - n_unregularized        # columns that get L1 penalty
     col_scale = np.maximum(A.max(axis=0), 1e-8)
     A_scaled = A / col_scale[np.newaxis, :]
 
-    l1_block = cfg.lambda_l1 * np.eye(n_seg)
-    blocks = [A_scaled, l1_block]
-    rhs = [C_obs, np.zeros(n_seg)]
+    # L1 penalty applies only to the regularised columns
+    l1_block = np.zeros((n_col, n_col))
+    if n_reg > 0:
+        l1_block[:n_reg, :n_reg] = cfg.lambda_l1 * np.eye(n_reg)
 
-    if cfg.lambda_smooth > 0 and n_seg > 1:
-        D = np.zeros((n_seg - 1, n_seg))
-        for i in range(n_seg - 1):
+    blocks = [A_scaled, l1_block]
+    rhs = [C_obs, np.zeros(n_col)]
+
+    if cfg.lambda_smooth > 0 and n_reg > 1:
+        D = np.zeros((n_reg - 1, n_col))
+        for i in range(n_reg - 1):
             D[i, i] = 1.0
             D[i, i + 1] = -1.0
         blocks.append(cfg.lambda_smooth * D)
-        rhs.append(np.zeros(n_seg - 1))
+        rhs.append(np.zeros(n_reg - 1))
 
     A_aug = np.vstack(blocks)
     b_aug = np.concatenate(rhs)
@@ -794,6 +820,7 @@ def q_field_to_parquet_rows(
     return rows
 
 
+
 # Public constants for downstream callers / diagnostics
 __all__ = [
     "CHANNEL_WAYPOINTS",
@@ -807,4 +834,571 @@ __all__ = [
     "batch_inversion_stacked",
     "inversion_to_forward_sources",
     "q_field_to_parquet_rows",
+    # Phase 2 — geometry-aware inversion
+    "build_sensitivity_matrix_from_geometry",
+    "project_footprint_to_sources",
+    "calibration_loop_from_geometry",
+    "batch_inversion_from_geometry",
 ]
+
+
+# ===========================================================================
+# Phase 2 — Geometry-aware inversion
+# ===========================================================================
+#
+# Replaces the free ~100-segment channel basis with ~6-10 named sources from
+# source_geometry.toml.  The key change: A[sensor, source] is the sum of
+# single-sub-point sensitivities weighted by sub-point.weight, so the
+# inversion solves for one Q per named source rather than one per segment.
+#
+# With ~10 unknowns and 3 sensors × N events rows, the stacked system is
+# strongly overdetermined for N ≥ 4 events, and the regularisation no longer
+# needs to suppress spurious near-sensor spikes (those are damped by the
+# geometry — see DISPERSION_CALIBRATION_PLAN.md §1.1).
+
+
+def build_sensitivity_matrix_from_geometry(
+    specs: dict,
+    met_row: pd.Series,
+    sensor_names: list[str],
+    cfg: "InversionConfig",
+    source_ids: list[str] | None = None,
+) -> tuple[np.ndarray, list[str]]:
+    """Build grouped A[sensor, source] sensitivity matrix from named geometry.
+
+    For each source *s* and sensor *i*:
+
+        A[i, s] = Σ_{p ∈ subpoints(s)}  ppb_at_i_from_1_g/s_at_p  ×  p.weight
+
+    This is the linear map from total-source Q_s (g/s) to predicted ppb at
+    sensor *i*.  A point source (one sub-point, weight=1) gives the same result
+    as the old ``build_sensitivity_matrix`` with that single segment.
+
+    Compared to the channel-segment matrix:
+    - Columns: ~10 named sources vs ~100 free segments.
+    - SY column for ``east_drain_corridor`` is lower than for a single point at
+      the nearest segment, because Q is spread over the full line length.
+
+    Parameters
+    ----------
+    specs:
+        Output of :func:`h2s.dispersion.geometry.load_source_geometry`.
+    met_row:
+        Single-row pandas Series with ``wind_speed_10m``, ``wind_direction_10m``,
+        ``temperature_2m``, ``is_night``.
+    sensor_names:
+        Ordered list of sensor keys (row order in the returned matrix).
+    cfg:
+        Uses ``cfg.gauss_meandering_deg`` for the Gifford wind-meandering
+        correction; all other ``InversionConfig`` fields are irrelevant here.
+    source_ids:
+        Column ordering.  Defaults to ``list(specs.keys())``.
+
+    Returns
+    -------
+    A : (n_sensors, n_sources) ndarray, units ppb per (g/s).
+    source_ids : list[str] — canonical column order (same as input if supplied).
+    """
+    sids = list(source_ids) if source_ids is not None else list(specs.keys())
+    n_sensors = len(sensor_names)
+    n_sources = len(sids)
+
+    ws      = float(met_row.get("wind_speed_10m",     1.0))
+    wd_deg  = float(met_row.get("wind_direction_10m", 180.0))
+    temp_c  = float(met_row.get("temperature_2m",     18.0))
+    is_night = bool(met_row.get("is_night",            1))
+    stab    = stability_class(ws, is_night)
+
+    wd_rad = np.radians(wd_deg)
+    u = -ws * np.sin(wd_rad)
+    v = -ws * np.cos(wd_rad)
+
+    A = np.zeros((n_sensors, n_sources), dtype=float)
+
+    for j, sid in enumerate(sids):
+        spec = specs.get(sid)
+        if spec is None:
+            continue
+        for i, sname in enumerate(sensor_names):
+            sc = SENSORS[sname]
+            col_ppb = 0.0
+            for sp in spec.sub_points:
+                c_ug = gaussian_plume_concentration(
+                    source_lat=sp.lat, source_lon=sp.lon,
+                    emission_rate_g_s=1.0,
+                    receptor_lat=sc["lat"],
+                    receptor_lon=sc["lon"],
+                    wind_u=u, wind_v=v,
+                    stab=stab,
+                    sigma_theta_deg=cfg.gauss_meandering_deg,
+                )
+                col_ppb += ug_m3_to_ppb(c_ug, temp_c) * sp.weight
+            A[i, j] = col_ppb
+
+    return A, sids
+
+
+def project_footprint_to_sources(
+    combined_footprint: np.ndarray,
+    specs: dict,
+    kernel_m: float = 350.0,
+    source_ids: list[str] | None = None,
+) -> np.ndarray:
+    """Project a 2-D Lagrangian footprint onto named sources.
+
+    For each source *s*, sums the footprint weighted by a Gaussian kernel
+    centred on each of *s*'s sub-points (weighted by sub-point.weight so the
+    contribution is proportional to the source's spatial emission density):
+
+        prior[s] = Σ_{p ∈ subpoints(s)}  Σ_{grid}(footprint × kernel(p))  × p.weight
+
+    The result is normalised to a probability distribution over sources,
+    giving the LOCATE prior for ``calibration_loop_from_geometry``.
+
+    Parameters
+    ----------
+    combined_footprint:
+        2-D array of shape ``(GRID["nlat"], GRID["nlon"])`` — the
+        concentration-weighted multi-sensor footprint.
+    specs:
+        Output of :func:`h2s.dispersion.geometry.load_source_geometry`.
+    kernel_m:
+        Gaussian kernel radius in metres (350 m matches the ~100 m grid cell).
+    source_ids:
+        Column ordering; defaults to ``list(specs.keys())``.
+
+    Returns
+    -------
+    np.ndarray of shape ``(n_sources,)``, sums to 1 (or uniform fallback).
+    """
+    lat_edges = np.linspace(GRID["lat_min"], GRID["lat_max"], GRID["nlat"] + 1)
+    lon_edges = np.linspace(GRID["lon_min"], GRID["lon_max"], GRID["nlon"] + 1)
+    lat_c = (lat_edges[:-1] + lat_edges[1:]) / 2.0
+    lon_c = (lon_edges[:-1] + lon_edges[1:]) / 2.0
+    lon_grid, lat_grid = np.meshgrid(lon_c, lat_c)
+
+    sigma_lat = kernel_m / M_PER_DEG_LAT
+    sigma_lon = kernel_m / M_PER_DEG_LON
+
+    sids = list(source_ids) if source_ids is not None else list(specs.keys())
+    weights = np.zeros(len(sids), dtype=float)
+
+    for j, sid in enumerate(sids):
+        spec = specs.get(sid)
+        if spec is None:
+            continue
+        for sp in spec.sub_points:
+            kernel = np.exp(
+                -0.5 * (
+                    ((lat_grid - sp.lat) / sigma_lat) ** 2
+                    + ((lon_grid - sp.lon) / sigma_lon) ** 2
+                )
+            )
+            weights[j] += float(np.sum(combined_footprint * kernel)) * sp.weight
+
+    total = float(weights.sum())
+    if total > 0:
+        return weights / total
+    return np.ones(len(sids), dtype=float) / len(sids)
+
+
+def calibration_loop_from_geometry(
+    footprints: dict[str, np.ndarray],
+    h2s_obs: dict[str, float],
+    met_row: pd.Series,
+    specs: dict,
+    cfg: "InversionConfig",
+    source_ids: list[str] | None = None,
+) -> dict:
+    """LOCATE → INVERT → ITERATE for one event timestep using named geometry.
+
+    Analogous to :func:`calibration_loop` but solves for one Q per named
+    source (~10) instead of one per channel segment (~100).
+
+    The footprint prior (LOCATE step) groups sub-points by source, giving a
+    per-source prior that biases the initial NNLS toward geometrically
+    plausible sources before residual iteration refines the solution.
+
+    Returns
+    -------
+    dict with keys ``Q_by_source``, ``Q_total_g_s``, ``active_sources``,
+    ``predicted_ppb``, ``residual_ppb``, ``converged``, ``iterations``,
+    ``source_ids``, ``source_prior``, ``sensors_used``.
+    """
+    sids = list(source_ids) if source_ids is not None else list(specs.keys())
+    n_sources = len(sids)
+
+    sensors_used = [
+        s for s in SENSORS
+        if h2s_obs.get(s, 0.0) > cfg.background_ppb and s in footprints
+    ]
+    if not sensors_used:
+        return {
+            "Q": np.zeros(n_sources),
+            "source_ids": sids,
+            "Q_by_source": {sid: 0.0 for sid in sids},
+            "Q_total_g_s": 0.0,
+            "active_sources": [],
+            "predicted_ppb": {},
+            "residual_ppb": {},
+            "converged": False,
+            "iterations": 0,
+            "history": [],
+            "source_prior": [],
+            "sensors_used": [],
+            "reason": "no_signal",
+        }
+
+    C_obs = np.array(
+        [max(h2s_obs[s] - cfg.background_ppb, 0.0) for s in sensors_used],
+        dtype=float,
+    )
+
+    # LOCATE: concentration-weighted combined footprint → per-source prior
+    fp_weights = C_obs / max(C_obs.sum(), 1e-6)
+    fp_shape = footprints[sensors_used[0]].shape
+    combined_fp = np.zeros(fp_shape, dtype=float)
+    for w, s in zip(fp_weights, sensors_used):
+        combined_fp += w * footprints[s]
+
+    source_prior = project_footprint_to_sources(
+        combined_fp, specs, cfg.footprint_kernel_m, source_ids=sids
+    )
+
+    # INVERT
+    A, _ = build_sensitivity_matrix_from_geometry(
+        specs, met_row, sensors_used, cfg, source_ids=sids
+    )
+
+    if A.max() < 1e-6:
+        return {
+            "Q": np.zeros(n_sources),
+            "source_ids": sids,
+            "Q_by_source": {sid: 0.0 for sid in sids},
+            "Q_total_g_s": 0.0,
+            "active_sources": [],
+            "predicted_ppb": {s: round(cfg.background_ppb, 1) for s in sensors_used},
+            "residual_ppb": {s: round(h2s_obs[s] - cfg.background_ppb, 1) for s in sensors_used},
+            "converged": False,
+            "iterations": 0,
+            "history": [],
+            "source_prior": source_prior.tolist(),
+            "sensors_used": sensors_used,
+            "reason": "zero_sensitivity",
+        }
+
+    Q = solve_nnls(A, C_obs, cfg)
+
+    # ITERATE: residual-weighted correction (same logic as calibration_loop)
+    history = []
+    converged = False
+    A_max = float(A.max())
+
+    for iteration in range(cfg.max_iter):
+        C_pred = A @ Q
+        residuals = C_obs - C_pred
+        max_resid = float(np.max(np.abs(residuals)))
+
+        history.append({
+            "iter": iteration,
+            "Q_total_g_s": float(Q.sum()),
+            "max_residual_ppb": max_resid,
+            "C_pred": [float(x) for x in C_pred],
+            "C_obs":  [float(x) for x in C_obs],
+        })
+
+        if max_resid < cfg.tol_ppb:
+            converged = True
+            break
+
+        pos_res = np.clip(residuals, 0.0, None)
+        pos_norm = pos_res / (float(np.abs(residuals).max()) + 1e-6)
+
+        if pos_norm.sum() > 0:
+            # Re-project the positive residual footprint onto sources
+            resid_fp = np.zeros(fp_shape, dtype=float)
+            for w, s in zip(pos_norm, sensors_used):
+                resid_fp += w * footprints[s]
+            resid_total = float(resid_fp.sum())
+            if resid_total > 0:
+                resid_fp /= resid_total
+            resid_prior = project_footprint_to_sources(
+                resid_fp, specs, cfg.footprint_kernel_m, source_ids=sids
+            )
+            resid_mean = float(np.mean(pos_res))
+            dQ = resid_prior * resid_mean / max(A_max, 0.01)
+            Q = np.maximum(Q + dQ, 0.0)
+        else:
+            scale = 1.0 - float(np.clip(max_resid / (float(C_obs.mean()) + 1.0), 0.0, 0.3))
+            Q = Q * scale
+
+    Q_total = float(Q.sum())
+    q_threshold = max(0.01 * Q_total, 0.5)
+    active_sources = [
+        {
+            "source_id": sids[i],
+            "Q_g_s": round(float(Q[i]), 2),
+            "fraction": round(float(Q[i] / Q_total), 4) if Q_total > 0 else 0.0,
+        }
+        for i in range(n_sources)
+        if Q[i] > q_threshold
+    ]
+    active_sources.sort(key=lambda x: -x["Q_g_s"])
+
+    C_pred_final = A @ Q
+    predicted = {
+        s: round(float(C_pred_final[i] + cfg.background_ppb), 1)
+        for i, s in enumerate(sensors_used)
+    }
+    residual = {
+        s: round(float(h2s_obs[s] - (C_pred_final[i] + cfg.background_ppb)), 1)
+        for i, s in enumerate(sensors_used)
+    }
+
+    Q_by_source = {sid: round(float(Q[j]), 3) for j, sid in enumerate(sids)}
+
+    return {
+        "Q": Q,
+        "source_ids": sids,
+        "Q_by_source": Q_by_source,
+        "Q_total_g_s": round(Q_total, 1),
+        "active_sources": active_sources,
+        "predicted_ppb": predicted,
+        "residual_ppb": residual,
+        "converged": converged,
+        "iterations": len(history),
+        "history": history,
+        "source_prior": source_prior.tolist(),
+        "sensors_used": sensors_used,
+    }
+
+
+def batch_inversion_from_geometry(
+    events: list[dict],
+    specs: dict,
+    cfg: "InversionConfig",
+    source_ids: list[str] | None = None,
+) -> dict:
+    """Block NNLS over a rolling window of events using named source geometry.
+
+    Analogous to :func:`batch_inversion_stacked` but solves for one Q per
+    named source (~10 unknowns) instead of one per channel segment (~100).
+    No footprint projection is needed — groups are defined by the geometry.
+
+    With 3 sensors × N qualifying event timesteps rows, the system is
+    overdetermined for N ≥ 4, giving a well-conditioned NNLS.
+
+    Parameters
+    ----------
+    events:
+        List of dicts, one per event timestep, each with:
+        - ``"time"``     : pd.Timestamp (tz-aware)
+        - ``"h2s_obs"``  : dict[sensor_name → ppb]
+        - ``"met_row"``  : pandas Series (wind/temp/is_night)
+
+        ``"footprints"`` is NOT required (unlike ``batch_inversion_stacked``).
+    specs:
+        Output of :func:`h2s.dispersion.geometry.load_source_geometry`.
+    cfg:
+        :class:`InversionConfig`.  ``segment_spacing_m`` is ignored
+        (spacing is now in ``source_geometry.toml``).
+    source_ids:
+        Column ordering; defaults to ``list(specs.keys())``.
+
+    Returns
+    -------
+    dict with keys:
+
+    - ``Q``                  : (n_sources,) ndarray, g/s
+    - ``source_ids``         : list[str] — column order of Q
+    - ``Q_by_source``        : dict[source_id → Q g/s] — feeds directly into
+                               :func:`run_forward_model_from_geometry`
+    - ``Q_total_g_s``        : float
+    - ``active_sources``     : list of {source_id, Q_g_s, fraction}
+    - ``n_events``, ``n_rows``, ``sensor_rmse_ppb``, ``per_event_predictions``
+    """
+    sids = list(source_ids) if source_ids is not None else list(specs.keys())
+    n_sources = len(sids)
+
+    rows_A: list[np.ndarray] = []
+    rows_C: list[float] = []
+    row_meta: list[dict] = []
+    per_event_sens: list[dict] = []
+
+    for ev in events:
+        h2s_obs    = ev["h2s_obs"]
+        met_row    = ev["met_row"]
+        event_time = ev["time"]
+
+        sensors_present = [
+            s for s in SENSORS
+            if h2s_obs.get(s, 0.0) > cfg.background_ppb
+        ]
+        if not sensors_present:
+            continue
+
+        A_ev, _ = build_sensitivity_matrix_from_geometry(
+            specs, met_row, sensors_present, cfg, source_ids=sids
+        )
+
+        if A_ev.max() < 1e-6:
+            per_event_sens.append({
+                "time":    str(event_time),
+                "sensors": sensors_present,
+                "max_A_ppb_per_g_s": 0.0,
+                "skipped": True,
+                "reason":  "zero_sensitivity",
+            })
+            continue
+
+        max_A_ev   = float(A_ev.max())
+        max_obs_ev = float(max(h2s_obs[s] for s in sensors_present) - cfg.background_ppb)
+        q_req_ev   = (max_obs_ev / max_A_ev) if max_A_ev > 1e-6 else None
+
+        threshold = getattr(cfg, "q_required_max_g_s", None)
+        skipped = (
+            threshold is not None
+            and threshold > 0
+            and (q_req_ev is None or q_req_ev > threshold)
+        )
+
+        per_event_sens.append({
+            "time":                str(event_time),
+            "sensors":             list(sensors_present),
+            "max_A_ppb_per_g_s":   round(max_A_ev, 5),
+            "max_obs_ppb":         round(max_obs_ev, 1),
+            "q_required_peak_g_s": round(q_req_ev, 1) if q_req_ev is not None else None,
+            "skipped":             bool(skipped),
+        })
+
+        if skipped:
+            continue
+
+        for i, sname in enumerate(sensors_present):
+            rows_A.append(A_ev[i, :])
+            rows_C.append(max(h2s_obs[sname] - cfg.background_ppb, 0.0))
+            row_meta.append({
+                "time":      event_time,
+                "sensor":    sname,
+                "C_obs_ppb": float(h2s_obs[sname]),
+            })
+
+    if not rows_A:
+        return {
+            "Q":          np.zeros(n_sources),
+            "source_ids": sids,
+            "Q_by_source":    {sid: 0.0 for sid in sids},
+            "Q_total_g_s":    0.0,
+            "active_sources": [],
+            "sensor_bias_ppb": {},
+            "n_events":       0,
+            "n_rows":         0,
+            "sensor_rmse_ppb":       {},
+            "per_event_predictions": [],
+            "per_event_sensitivity": per_event_sens,
+            "reason": "no_rows",
+        }
+
+    # --- Phase 3: equal-mass per-sensor row weighting ---
+    # Compute unweighted stacks first (needed for RMSE after solve).
+    A_stack_unw = np.vstack(rows_A)
+    C_stack_unw = np.array(rows_C, dtype=float)
+
+    if cfg.sensor_row_weight == "equal_mass":
+        sensor_counts: dict[str, int] = {}
+        for meta in row_meta:
+            sensor_counts[meta["sensor"]] = sensor_counts.get(meta["sensor"], 0) + 1
+        n_active_sensors = len(sensor_counts)
+        w = np.array(
+            [1.0 / (sensor_counts[meta["sensor"]] * n_active_sensors) for meta in row_meta],
+            dtype=float,
+        )
+        w_sqrt = np.sqrt(w)
+    else:
+        w_sqrt = np.ones(len(row_meta), dtype=float)
+
+    A_stack = A_stack_unw * w_sqrt[:, np.newaxis]
+    C_stack = C_stack_unw * w_sqrt
+
+    # --- Phase 3: optional per-sensor additive bias columns ---
+    bias_sensor_names: list[str] = []
+    n_bias_cols = 0
+    if cfg.fit_sensor_bias:
+        bias_sensor_names = sorted({meta["sensor"] for meta in row_meta})
+        n_bias_cols = len(bias_sensor_names)
+        bias_indicator = np.zeros((len(row_meta), n_bias_cols), dtype=float)
+        for i, meta in enumerate(row_meta):
+            j = bias_sensor_names.index(meta["sensor"])
+            bias_indicator[i, j] = w_sqrt[i]  # apply same row weight
+        A_stack = np.hstack([A_stack, bias_indicator])
+
+    Q_full = solve_nnls(A_stack, C_stack, cfg, n_unregularized=n_bias_cols)
+    Q = Q_full[:n_sources]
+    bias_vals = Q_full[n_sources:] if n_bias_cols > 0 else np.zeros(0)
+
+    # Unweighted per-row predictions for RMSE and per_event_predictions
+    if n_bias_cols > 0:
+        bias_per_row = np.array(
+            [float(bias_vals[bias_sensor_names.index(m["sensor"])]) for m in row_meta]
+        )
+        C_pred_unw = A_stack_unw @ Q + bias_per_row
+    else:
+        C_pred_unw = A_stack_unw @ Q
+
+    # Per-sensor reconstruction RMSE (unweighted residuals)
+    by_sensor: dict[str, list] = {}
+    for meta, c_obs, c_pred in zip(row_meta, C_stack_unw, C_pred_unw):
+        by_sensor.setdefault(meta["sensor"], []).append((float(c_obs), float(c_pred)))
+    sensor_rmse = {
+        sname: round(float(np.sqrt(np.mean([(o - p) ** 2 for o, p in pairs]))), 2)
+        for sname, pairs in by_sensor.items()
+        if pairs
+    }
+
+    Q_total = float(Q.sum())
+    q_threshold = max(0.01 * Q_total, 0.5)
+    active_sources = [
+        {
+            "source_id": sids[i],
+            "Q_g_s":     round(float(Q[i]), 2),
+            "fraction":  round(float(Q[i] / Q_total), 4) if Q_total > 0 else 0.0,
+        }
+        for i in range(n_sources)
+        if Q[i] > q_threshold
+    ]
+    active_sources.sort(key=lambda x: -x["Q_g_s"])
+
+    Q_by_source = {sid: round(float(Q[j]), 3) for j, sid in enumerate(sids)}
+
+    sensor_bias_ppb = {
+        name: round(float(bias_vals[i]), 3)
+        for i, name in enumerate(bias_sensor_names)
+    }
+
+    per_event_preds = [
+        {
+            "time":     str(meta["time"]),
+            "sensor":   meta["sensor"],
+            "obs_ppb":  round(meta["C_obs_ppb"], 1),
+            "pred_ppb": round(float(c_pred + cfg.background_ppb), 1),
+        }
+        for meta, c_pred in zip(row_meta, C_pred_unw)
+    ]
+
+    n_events = len({str(m["time"]) for m in row_meta})
+
+    return {
+        "Q":              Q,
+        "source_ids":     sids,
+        "Q_by_source":    Q_by_source,
+        "Q_total_g_s":    round(Q_total, 1),
+        "active_sources": active_sources,
+        "sensor_bias_ppb": sensor_bias_ppb,
+        "n_events":       n_events,
+        "n_events_skipped_geometry": sum(1 for e in per_event_sens if e.get("skipped")),
+        "n_rows":         len(rows_C),
+        "sensor_rmse_ppb":       sensor_rmse,
+        "per_event_predictions": per_event_preds,
+        "per_event_sensitivity": per_event_sens,
+    }
+

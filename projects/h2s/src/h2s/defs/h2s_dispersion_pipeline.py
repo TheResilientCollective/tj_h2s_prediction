@@ -68,6 +68,11 @@ from h2s.dispersion import (
     footprint_to_grid_data,
     run_inversion_window,
     source_attribution,
+    # Phase 4 — geometry-aware forward model + inversion
+    load_source_geometry,
+    run_forward_model_from_geometry,
+    run_forward_model_gridded_from_geometry,
+    batch_inversion_from_geometry,
 )
 from h2s.dispersion.gaussian import (
     run_forward_model_from_Q_field,
@@ -88,6 +93,7 @@ from h2s.dispersion.grid_config import (
     VIZ_BOUNDS,
 )
 from h2s.utils import store_assets
+from h2s.dispersion.emission_inversion import InversionConfig as _PhysicsInvCfg
 
 # Zone groupings: candidate source names → east / west / south
 _ZONE_MAP = {
@@ -120,6 +126,7 @@ class InversionConfig(dg.Config):
     n_particles: int = 2000
     hours_back: int = 2  # Valley-scale: sources are 1-7 km away, 37 min max travel time @ 3 m/s
     max_events: int = 0   # 0 = all events
+    obs_bucket: str = "resilentpublic"
 
 
 class HysplitConfig(dg.Config):
@@ -129,6 +136,7 @@ class HysplitConfig(dg.Config):
     h2s_threshold_ppb: float = 30.0
     date_start: str = "2026-02-01"
     date_end: str = "2026-04-01"
+    obs_bucket: str = "resilentpublic"
 
 
 class ForwardForecastConfig(dg.Config):
@@ -138,6 +146,143 @@ class ForwardForecastConfig(dg.Config):
     # via per-cell max (captures worst-case ppb per bucket). Set equal to
     # cadence_minutes to disable aggregation.
     animation_cadence_minutes: int = 60
+    obs_bucket: str = "resilentpublic"
+
+
+class DispersionAlertConfig(dg.Config):
+    slack_channel: str = ""   # overrides slack resource channel when non-empty
+
+
+class EmissionInversionConfig(dg.Config):
+    """Geometry-aware NNLS inversion options for emission_rate_inversion.
+
+    When use_geometry_nnls=True the asset loads obs data, builds event dicts
+    from the configured date window, and runs batch_inversion_from_geometry to
+    produce per-source Q values (one per named source in source_geometry.toml).
+    Results are written as emission_rates_by_geometry_g_s in the S3 payload
+    alongside the existing backward-compat zone/source keys.
+
+    Calibration flags
+    -----------------
+    fit_sensor_bias : bool
+        Add a non-negative per-sensor additive offset to the NNLS unknowns.
+        The bias absorbs the part of a sensor's signal that the geometry
+        cannot explain (e.g. IB's persistent local offset), so it doesn't
+        inflate Q for distant sources. Reported under sensor_bias_ppb.
+    require_anchor_sensor : str
+        When non-empty, only timesteps where this sensor's H2S ≥
+        h2s_threshold_ppb qualify as events. Set to "NESTOR - BES" to
+        exclude IB-only events from calibration.
+    anchor_wd_gate : bool
+        When require_anchor_sensor is set, solo-sensor events (exactly one
+        sensor above threshold, and it is NOT the anchor) are kept only when
+        wind direction is in [30, 270]° — i.e. coming FROM the
+        south/east/west quadrant rather than FROM the north/northwest.
+        This retains IB-solo events that are plausibly driven by a
+        south-zone source under southerly or easterly winds.
+    """
+    use_geometry_nnls: bool = False
+    date_start: str = "2026-02-01"
+    date_end: str = "2026-04-01"
+    h2s_threshold_ppb: float = 30.0
+    max_events: int = 0                # 0 = all qualifying events
+    gauss_meandering_deg: float = 20.0
+    lambda_l1: float = 0.3
+    background_ppb: float = 1.0
+    fit_sensor_bias: bool = False
+    require_anchor_sensor: str = ""    # e.g. "NESTOR - BES"
+    anchor_wd_gate: bool = False
+    obs_bucket: str = "resilentpublic"
+
+
+def _build_geometry_events(
+    df: pd.DataFrame,
+    date_start: str,
+    date_end: str,
+    h2s_threshold_ppb: float,
+    max_events: int = 0,
+    require_anchor_sensor: str = "",
+    anchor_wd_gate: bool = False,
+) -> tuple[list[dict], dict[str, int]]:
+    """Pivot long-format obs DataFrame into event dicts for batch_inversion_from_geometry.
+
+    Parameters
+    ----------
+    df : long-format obs with columns: time (tz-aware), site_name, H2S, and met
+         fields (wind_speed_10m, wind_direction_10m, is_night, ...).
+    date_start, date_end : date strings (inclusive) — matched against df["time"].
+    h2s_threshold_ppb : events where ANY sensor's H2S meets or exceeds this qualify.
+    max_events : cap on number of events returned (0 = all).
+    require_anchor_sensor : if non-empty, only timesteps where this sensor's
+        H2S ≥ h2s_threshold_ppb are kept.
+    anchor_wd_gate : when require_anchor_sensor is set, solo non-anchor events
+        are dropped unless wind_direction_10m ∈ [30, 270]° (FROM south/east,
+        plausible for sources south of IB pushing plume northward).
+
+    Returns
+    -------
+    (events, filter_counts) where filter_counts records how many timesteps were
+    dropped by each filter for diagnostic logging.
+    """
+    mask = (
+        (df["time"] >= date_start)
+        & (df["time"] <= date_end)
+        & (df["H2S"] >= h2s_threshold_ppb)
+        & df["H2S"].notna()
+    )
+    qualifying_times = df.loc[mask, "time"].drop_duplicates().sort_values()
+
+    # Anchor filter: require the named sensor to be above threshold
+    n_dropped_anchor = 0
+    if require_anchor_sensor:
+        anchor_mask = (
+            (df["time"] >= date_start)
+            & (df["time"] <= date_end)
+            & (df["site_name"] == require_anchor_sensor)
+            & (df["H2S"] >= h2s_threshold_ppb)
+            & df["H2S"].notna()
+        )
+        anchor_times = set(df.loc[anchor_mask, "time"])
+        before = len(qualifying_times)
+        qualifying_times = qualifying_times[qualifying_times.isin(anchor_times)]
+        n_dropped_anchor = before - len(qualifying_times)
+
+    if max_events > 0:
+        qualifying_times = qualifying_times.tail(max_events)
+
+    events: list[dict] = []
+    n_dropped_wd = 0
+    for ts in qualifying_times:
+        time_rows = df[df["time"] == ts]
+        h2s_obs: dict[str, float] = {}
+        for _, row in time_rows.iterrows():
+            sname = row.get("site_name", "")
+            val = row.get("H2S", float("nan"))
+            if sname and not pd.isna(val):
+                h2s_obs[str(sname)] = float(val)
+        if not h2s_obs:
+            continue
+
+        # Wind-direction plausibility gate: solo non-anchor events are only
+        # kept when wind is FROM the southern/eastern quadrant [30, 270]°,
+        # consistent with a south-zone source pushing plume northward to IB.
+        if anchor_wd_gate and require_anchor_sensor:
+            sensors_above = [s for s, v in h2s_obs.items() if v >= h2s_threshold_ppb]
+            if len(sensors_above) == 1 and sensors_above[0] != require_anchor_sensor:
+                met_row = time_rows.iloc[0]
+                wd = float(met_row.get("wind_direction_10m", 180))
+                if not (30 <= wd <= 270):
+                    n_dropped_wd += 1
+                    continue
+
+        events.append({"time": ts, "h2s_obs": h2s_obs, "met_row": time_rows.iloc[0]})
+
+    filter_counts = {
+        "dropped_anchor_filter": n_dropped_anchor,
+        "dropped_wd_gate":       n_dropped_wd,
+        "events_kept":           len(events),
+    }
+    return events, filter_counts
 
 
 # ==============================================================================
@@ -176,8 +321,8 @@ def lagrangian_source_attribution(
                                            description=description,
                                            )
 
-    log.info(f"Loading obs data from S3: {OBS_DATA_PATH}")
-    url = s3.publicUrl(OBS_DATA_PATH)
+    log.info(f"Loading obs data from S3: {OBS_DATA_PATH} (bucket={config.obs_bucket})")
+    url = s3.publicUrl(OBS_DATA_PATH, bucket=config.obs_bucket)
     df = pd.read_parquet(url)
     df["time"] = pd.to_datetime(df["time"], utc=True).dt.tz_convert("America/Los_Angeles")
     log.info(f"Loaded {len(df)} obs rows")
@@ -301,7 +446,10 @@ def lagrangian_source_attribution(
         )
     },
 )
-def emission_rate_inversion(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
+def emission_rate_inversion(
+    context: dg.AssetExecutionContext,
+    config: EmissionInversionConfig,
+) -> dg.MaterializeResult:
     log = context.log
     s3 = context.resources.s3
 
@@ -349,11 +497,69 @@ def emission_rate_inversion(context: dg.AssetExecutionContext) -> dg.Materialize
 
     log.info(f"Zone emission rates: {zone_rates} g/s  (method={method})")
 
+    # --- Phase 4: geometry-aware NNLS inversion ---
+    geom_payload: dict = {}
+    if config.use_geometry_nnls:
+        try:
+            log.info(f"Running geometry-aware NNLS inversion (obs bucket={config.obs_bucket})...")
+            obs_url = s3.publicUrl(OBS_DATA_PATH, bucket=config.obs_bucket)
+            obs_df = pd.read_parquet(obs_url)
+            obs_df["time"] = pd.to_datetime(obs_df["time"], utc=True).dt.tz_convert(
+                "America/Los_Angeles"
+            )
+            events, filter_counts = _build_geometry_events(
+                obs_df,
+                date_start=config.date_start,
+                date_end=config.date_end,
+                h2s_threshold_ppb=config.h2s_threshold_ppb,
+                max_events=config.max_events,
+                require_anchor_sensor=config.require_anchor_sensor,
+                anchor_wd_gate=config.anchor_wd_gate,
+            )
+            log.info(
+                f"Geometry NNLS: {filter_counts['events_kept']} events kept "
+                f"(anchor_filter dropped {filter_counts['dropped_anchor_filter']}, "
+                f"wd_gate dropped {filter_counts['dropped_wd_gate']})"
+            )
+            specs = load_source_geometry()
+            physics_cfg = _PhysicsInvCfg(
+                gauss_meandering_deg=config.gauss_meandering_deg,
+                lambda_l1=config.lambda_l1,
+                background_ppb=config.background_ppb,
+                fit_sensor_bias=config.fit_sensor_bias,
+            )
+            batch_result = batch_inversion_from_geometry(events, specs, physics_cfg)
+            geom_q_by_source = batch_result["Q_by_source"]
+
+            geom_payload = {
+                "emission_rates_by_geometry_g_s": geom_q_by_source,
+                "geometry_inversion_meta": {
+                    "n_events":              batch_result.get("n_events", 0),
+                    "n_rows":                batch_result.get("n_rows", 0),
+                    "Q_total_g_s":           batch_result.get("Q_total_g_s", 0.0),
+                    "active_sources":        batch_result.get("active_sources", []),
+                    "sensor_rmse_ppb":       batch_result.get("sensor_rmse_ppb", {}),
+                    "sensor_bias_ppb":       batch_result.get("sensor_bias_ppb", {}),
+                    "fit_sensor_bias":       config.fit_sensor_bias,
+                    "require_anchor_sensor": config.require_anchor_sensor,
+                    "anchor_wd_gate":        config.anchor_wd_gate,
+                    "filter_counts":         filter_counts,
+                },
+            }
+            method = "geometry_nnls"
+            log.info(
+                f"Geometry NNLS complete: Q_total={batch_result.get('Q_total_g_s')} g/s, "
+                f"{len([v for v in geom_q_by_source.values() if v > 0.5])} active sources"
+            )
+        except Exception as e:
+            log.error(f"Geometry NNLS failed: {e} — skipping geometry rates")
+
     payload = {
         "emission_rates_g_s": zone_rates,
         "emission_rates_per_source_g_s": source_rates,
         "timestamp": pd.Timestamp.utcnow().isoformat(),
         "method": method,
+        **geom_payload,
     }
     s3.putFile(
         json.dumps(payload, indent=2).encode(),
@@ -362,15 +568,21 @@ def emission_rate_inversion(context: dg.AssetExecutionContext) -> dg.Materialize
     )
     log.info(f"Uploaded emission rates → {EMISSION_RATES_PATH}")
 
-    return dg.MaterializeResult(metadata={
+    result_meta: dict = {
         "east_g_s":  dg.MetadataValue.float(float(zone_rates["east"])),
         "west_g_s":  dg.MetadataValue.float(float(zone_rates["west"])),
         "south_g_s": dg.MetadataValue.float(float(zone_rates["south"])),
         "n_sources": dg.MetadataValue.int(len(source_rates)),
         "method":    dg.MetadataValue.text(method),
         "s3_path":   dg.MetadataValue.text(EMISSION_RATES_PATH),
-    },
-    value=json.dumps(payload, indent=2)
+    }
+    if geom_payload:
+        gmeta = geom_payload["geometry_inversion_meta"]
+        result_meta["geom_Q_total_g_s"] = dg.MetadataValue.float(float(gmeta["Q_total_g_s"]))
+        result_meta["geom_n_events"]    = dg.MetadataValue.int(int(gmeta["n_events"]))
+    return dg.MaterializeResult(
+        metadata=result_meta,
+        value=json.dumps(payload, indent=2),
     )
 
 
@@ -397,27 +609,36 @@ def hysplit_controls_generation(
     log = context.log
     s3 = context.resources.s3
 
-    # Load emission rates
+    # Load emission rates; prefer geometry per-source rates when available
+    emission_rates: dict = dict(DISPERSION_DEFAULT_EMISSION_RATES_GS)
+    geom_specs = None
+    geom_source_q: dict[str, float] = {}
     try:
         rates_bytes = s3.getFile(EMISSION_RATES_PATH)
         rates_data = json.loads(rates_bytes)
         emission_rates = rates_data["emission_rates_g_s"]
+        geom_by_source = rates_data.get("emission_rates_by_geometry_g_s", {})
+        if geom_by_source and config.mode == "forward_disp":
+            geom_source_q = {k: float(v) for k, v in geom_by_source.items()}
+            geom_specs = load_source_geometry()
+            log.info(f"HYSPLIT forward bundle: geometry mode ({len(geom_source_q)} sources, "
+                     f"Q_total={sum(geom_source_q.values()):.1f} g/s)")
     except Exception as e:
         log.warning(f"Could not load emission rates ({e}) — using calibrated defaults")
-        emission_rates = dict(DISPERSION_DEFAULT_EMISSION_RATES_GS)
 
     run_tag = pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M")
 
     df = None
     if config.mode in ("backward_traj", "backward_disp"):
-        log.info(f"Loading obs data for backward mode from {OBS_DATA_PATH}")
-        url = s3.publicUrl(OBS_DATA_PATH)
+        log.info(f"Loading obs data for backward mode from {OBS_DATA_PATH} (bucket={config.obs_bucket})")
+        url = s3.publicUrl(OBS_DATA_PATH, bucket=config.obs_bucket)
         df = pd.read_parquet(url)
         df["time"] = pd.to_datetime(df["time"], utc=True).dt.tz_convert("America/Los_Angeles")
 
     start_utc = pd.Timestamp.utcnow().isoformat() if config.mode == "forward_disp" else None
 
-    log.info(f"Generating HYSPLIT bundle: mode={config.mode}, met_dir={config.met_dir}")
+    log.info(f"Generating HYSPLIT bundle: mode={config.mode}, met_dir={config.met_dir}, "
+             f"geometry={'yes' if geom_specs else 'no'}")
     zip_bytes = generate_hysplit_bundle(
         mode=config.mode,
         df=df,
@@ -428,6 +649,8 @@ def hysplit_controls_generation(
         h2s_threshold=config.h2s_threshold_ppb,
         date_start=config.date_start,
         date_end=config.date_end,
+        specs=geom_specs,
+        source_q_g_s=geom_source_q if geom_source_q else None,
     )
 
     # Count CONTROL files in zip for metadata
@@ -454,14 +677,23 @@ def hysplit_controls_generation(
         "Or submit to NOAA READY server via email."
     )
 
-    return dg.MaterializeResult(metadata={
+    meta: dict = {
         "mode":              dg.MetadataValue.text(config.mode),
         "n_control_files":   dg.MetadataValue.int(n_control),
         "zip_size_bytes":    dg.MetadataValue.int(len(zip_bytes)),
         "s3_versioned_path": dg.MetadataValue.text(versioned_path),
         "s3_latest_path":    dg.MetadataValue.text(latest_path),
         "run_tag":           dg.MetadataValue.text(run_tag),
-    })
+        "geometry_mode":     dg.MetadataValue.bool(geom_specs is not None),
+    }
+    if geom_specs is not None:
+        n_sub = sum(len(spec.sub_points) for spec in geom_specs.values()
+                    if geom_source_q.get(spec.source_id, 0.0) > 0.0)
+        meta["n_sub_points"] = dg.MetadataValue.int(n_sub)
+        meta["n_active_sources"] = dg.MetadataValue.int(
+            sum(1 for v in geom_source_q.values() if v > 0.0)
+        )
+    return dg.MaterializeResult(metadata=meta)
 
 
 # ==============================================================================
@@ -622,8 +854,8 @@ def gaussian_forward_forecast(
     s3 = context.resources.s3
 
     # Load FORECAST meteorology at 15-min cadence (not obs data)
-    log.info(f"Loading 15-min forecast met data from S3: {FORECAST_DATA_15MIN_PATH}")
-    url = s3.publicUrl(FORECAST_DATA_15MIN_PATH)
+    log.info(f"Loading 15-min forecast met data from S3: {FORECAST_DATA_15MIN_PATH} (bucket={config.obs_bucket})")
+    url = s3.publicUrl(FORECAST_DATA_15MIN_PATH, bucket=config.obs_bucket)
     fc_df = pd.read_parquet(url)
     fc_df["time"] = pd.to_datetime(fc_df["time"], utc=True).dt.tz_convert("America/Los_Angeles")
     log.info(f"Loaded {len(fc_df)} forecast rows, time range: {fc_df['time'].min()} → {fc_df['time'].max()}")
@@ -637,13 +869,29 @@ def gaussian_forward_forecast(
             fc_df["is_night"] = ((utc_h < 6) | (utc_h >= 20)).astype(int)
             log.warning("is_night derived from hour (UTC < 6 or >= 20) — no day_night column found")
 
-    # Load emission rates
+    # Load emission rates — prefer geometry NNLS when available (Phase 4)
+    use_geometry = False
+    geom_specs = None
+    source_q_g_s: dict[str, float] = {}
+    rates_method = "calibrated_default"
     try:
         rates_bytes = s3.getFile(EMISSION_RATES_PATH)
         rates_data = json.loads(rates_bytes)
-        emission_rates = rates_data["emission_rates_g_s"]
         rates_method = rates_data.get("method", "unknown")
-        log.info(f"Using inverted emission rates: {emission_rates} g/s (method={rates_method})")
+
+        geom_by_source = rates_data.get("emission_rates_by_geometry_g_s", {})
+        if geom_by_source:
+            source_q_g_s = {k: float(v) for k, v in geom_by_source.items()}
+            geom_specs = load_source_geometry()
+            use_geometry = True
+            rates_method = "geometry_nnls"
+            log.info(
+                f"Using geometry NNLS rates: {len(source_q_g_s)} sources, "
+                f"Q_total={sum(source_q_g_s.values()):.1f} g/s"
+            )
+        else:
+            emission_rates = rates_data["emission_rates_g_s"]
+            log.info(f"Using inverted emission rates: {emission_rates} g/s (method={rates_method})")
     except Exception as e:
         emission_rates = dict(DISPERSION_DEFAULT_EMISSION_RATES_GS)
         log.warning(f"Could not load emission rates ({e}) — using calibrated defaults: {emission_rates} g/s")
@@ -651,12 +899,18 @@ def gaussian_forward_forecast(
     start_time = fc_df["time"].min()
     log.info(
         f"Running Gaussian forward: start={start_time}, hours={config.forecast_hours}, "
-        f"cadence={config.cadence_minutes}min"
+        f"cadence={config.cadence_minutes}min, geometry={use_geometry}"
     )
-    result = run_forward_model(
-        fc_df, emission_rates, start_time, config.forecast_hours,
-        cadence_minutes=config.cadence_minutes,
-    )
+    if use_geometry and geom_specs is not None:
+        result = run_forward_model_from_geometry(
+            fc_df, geom_specs, source_q_g_s, start_time, config.forecast_hours,
+            cadence_minutes=config.cadence_minutes,
+        )
+    else:
+        result = run_forward_model(
+            fc_df, emission_rates, start_time, config.forecast_hours,
+            cadence_minutes=config.cadence_minutes,
+        )
 
     # Compute per-sensor peaks (ignoring NaN)
     peaks = {}
@@ -674,10 +928,16 @@ def gaussian_forward_forecast(
 
     # --- GeoDemic-compatible grid output ---
     log.info("Generating gridded forward forecast (GeoDemic GridData format)")
-    grid_frames = run_forward_model_gridded(
-        fc_df, emission_rates, start_time, config.forecast_hours,
-        cadence_minutes=config.cadence_minutes,
-    )
+    if use_geometry and geom_specs is not None:
+        grid_frames = run_forward_model_gridded_from_geometry(
+            fc_df, geom_specs, source_q_g_s, start_time, config.forecast_hours,
+            cadence_minutes=config.cadence_minutes,
+        )
+    else:
+        grid_frames = run_forward_model_gridded(
+            fc_df, emission_rates, start_time, config.forecast_hours,
+            cadence_minutes=config.cadence_minutes,
+        )
 
     # Aggregate 15-min frames into hourly (or configured cadence) per-cell max.
     # Each output frame cell = max ppb seen in that hour → operationally the
@@ -700,6 +960,7 @@ def gaussian_forward_forecast(
         s3.putFile(first_frame_json.encode(), path=grid_versioned, content_type="application/json")
         log.info(f"Uploaded grid (first-bucket max) → {DISPERSION_FORWARD_GRID_LATEST_PATH}")
 
+    payload_rates = source_q_g_s if use_geometry else {k: float(v) for k, v in emission_rates.items()}
     animation_payload = {
         "forecast_start": str(start_time),
         "n_frames": len(animation_frames),
@@ -707,7 +968,7 @@ def gaussian_forward_forecast(
         "source_cadence_minutes": config.cadence_minutes,
         "aggregation": "max",
         "forecast_hours": config.forecast_hours,
-        "emission_rates_g_s": {k: float(v) for k, v in emission_rates.items()},
+        "emission_rates_g_s": payload_rates,
         "frames": animation_frames,
     }
     frames_json = json.dumps(animation_payload)
@@ -724,9 +985,10 @@ def gaussian_forward_forecast(
     # 1. Concentration heatmap (first bucket, per-cell max over the hour)
     heatmap_path = "n/a"
     if animation_frames:
+        model_label = "geometry" if use_geometry else "3-zone"
         heatmap_buf = generate_concentration_heatmap(
             animation_frames[0],
-            title="H2S Concentration Forecast (3-source model, hourly max)",
+            title=f"H2S Concentration Forecast ({model_label} model, hourly max)",
             vmax=100.0,
             bounds=VIZ_BOUNDS,
         )
@@ -734,22 +996,30 @@ def gaussian_forward_forecast(
         s3.putFile(heatmap_buf.getvalue(), path=heatmap_path, content_type="image/png")
         log.info(f"Uploaded heatmap → {heatmap_path}")
 
-    # 2. Source emission map (3 zones)
+    # 2. Source emission map
+    if use_geometry:
+        viz_sources = CANDIDATE_SOURCES
+        viz_rates   = {k: float(v) for k, v in source_q_g_s.items() if v > 0}
+        viz_title   = f"H2S Source Emission Rates (geometry model, {len(viz_rates)} active)"
+    else:
+        viz_sources = SOURCES
+        viz_rates   = {k: float(v) for k, v in emission_rates.items()}
+        viz_title   = "H2S Source Emission Rates (3-zone model)"
     source_map_buf = generate_source_emission_map(
-        SOURCES,
-        emission_rates,
+        viz_sources,
+        viz_rates,
         sensors=SENSORS,
-        title="H2S Source Emission Rates (3-zone model)",
+        title=viz_title,
         bounds=VIZ_BOUNDS,
     )
     source_map_path = DISPERSION_VIZ_SOURCE_MAP_COARSE_PATH.format(date_str=date_str)
     s3.putFile(source_map_buf.getvalue(), path=source_map_path, content_type="image/png")
-    log.info(f"Uploaded source map (3-zone) → {source_map_path}")
+    log.info(f"Uploaded source map → {source_map_path}")
 
     # 3. Peak concentration timeseries
     timeseries_buf = generate_peak_concentration_timeseries(
         result,
-        title="Peak H2S Forecast (3-source model)",
+        title=f"Peak H2S Forecast ({'geometry' if use_geometry else '3-zone'} model)",
     )
     timeseries_path = DISPERSION_VIZ_TIMESERIES_COARSE_PATH.format(date_str=date_str)
     s3.putFile(timeseries_buf.getvalue(), path=timeseries_path, content_type="image/png")
@@ -758,13 +1028,14 @@ def gaussian_forward_forecast(
     return dg.MaterializeResult(metadata={
         "forecast_start":    dg.MetadataValue.text(str(start_time)),
         "forecast_hours":    dg.MetadataValue.int(config.forecast_hours),
+        "rates_method":      dg.MetadataValue.text(rates_method),
         "peak_ppb_NB":       dg.MetadataValue.float(float(peaks.get("NESTOR - BES", 0.0))),
         "peak_ppb_IB":       dg.MetadataValue.float(float(peaks.get("IB CIVIC CTR", 0.0))),
         "peak_ppb_SY":       dg.MetadataValue.float(float(peaks.get("SAN YSIDRO", 0.0))),
         "grid_peak_ppb":     dg.MetadataValue.float(float(grid_peak_ppb)),
         "grid_shape":        dg.MetadataValue.text(f"{GRID_NROWS}x{GRID_NCOLS}"),
         "grid_n_frames":     dg.MetadataValue.int(len(animation_frames)),
-        "emission_rates_g_s": dg.MetadataValue.json({k: float(v) for k, v in emission_rates.items()}),
+        "emission_rates_g_s": dg.MetadataValue.json(payload_rates),
         "s3_path":           dg.MetadataValue.text(versioned_path),
         "s3_grid_latest":    dg.MetadataValue.text(DISPERSION_FORWARD_GRID_LATEST_PATH),
         "viz_heatmap":       dg.MetadataValue.text(heatmap_path),
@@ -804,8 +1075,8 @@ def gaussian_forward_forecast_detailed(
     s3 = context.resources.s3
 
     # Load FORECAST meteorology at 15-min cadence (not obs data)
-    log.info(f"Loading 15-min forecast met data from S3: {FORECAST_DATA_15MIN_PATH}")
-    url = s3.publicUrl(FORECAST_DATA_15MIN_PATH)
+    log.info(f"Loading 15-min forecast met data from S3: {FORECAST_DATA_15MIN_PATH} (bucket={config.obs_bucket})")
+    url = s3.publicUrl(FORECAST_DATA_15MIN_PATH, bucket=config.obs_bucket)
     fc_df = pd.read_parquet(url)
     fc_df["time"] = pd.to_datetime(fc_df["time"], utc=True).dt.tz_convert("America/Los_Angeles")
     log.info(f"Loaded {len(fc_df)} forecast rows, time range: {fc_df['time'].min()} → {fc_df['time'].max()}")
@@ -1067,7 +1338,10 @@ def gaussian_forward_forecast_detailed(
         dg.AssetKey(["h2s", "gaussian_forward_forecast_detailed"]),
     ],
 )
-def dispersion_alert_check(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
+def dispersion_alert_check(
+    context: dg.AssetExecutionContext,
+    config: DispersionAlertConfig,
+) -> dg.MaterializeResult:
     log = context.log
     s3 = context.resources.s3
 
@@ -1177,11 +1451,13 @@ def dispersion_alert_check(context: dg.AssetExecutionContext) -> dg.MaterializeR
         try:
             slack = context.resources.slack
             client = slack.get_client()
-            client.chat_postMessage(channel=slack.channel, text=msg)
-            log.info(f"Slack alert sent: {tier_label}")
+            channel = config.slack_channel or slack.channel
+            client.chat_postMessage(channel=channel, text=msg)
+            log.info(f"Slack alert sent to {channel}: {tier_label}")
         except Exception as e:
             log.error(f"Slack send failed: {e}")
 
+    slack_channel_used = config.slack_channel or context.resources.slack.channel
     return dg.MaterializeResult(metadata={
         "alert_count":      dg.MetadataValue.int(len(alerts_triggered)),
         "max_tier":         dg.MetadataValue.text(alerts_triggered[0]["tier"] if alerts_triggered else "none"),
@@ -1190,6 +1466,7 @@ def dispersion_alert_check(context: dg.AssetExecutionContext) -> dg.MaterializeR
         ),
         "lookahead_hours":  dg.MetadataValue.int(lookahead_hours),
         "models_checked":   dg.MetadataValue.text(", ".join(forecasts.keys())),
+        "slack_channel":    dg.MetadataValue.text(slack_channel_used),
     })
 
 # ==============================================================================

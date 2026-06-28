@@ -25,7 +25,10 @@ import tempfile
 import argparse
 import pandas as pd
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from h2s.dispersion.geometry import SourceSpec
 
 
 # Embedded SETUP.CFG content for stable nocturnal BL conditions
@@ -189,56 +192,123 @@ def _write_forward_disp(
     run_dir: Path,
     met_dir: str,
     start_utc: str,
-    emission_rates_g_s: dict[str, float],
+    emission_rates_g_s: Optional[dict[str, float]] = None,
     run_hours: int = 72,
+    specs: Optional[dict] = None,
+    source_q_g_s: Optional[dict[str, float]] = None,
 ) -> Path:
     dt_utc = pd.Timestamp(start_utc, tz="UTC")
     tag = dt_utc.strftime("%Y%m%d_%H")
     ctrl_path = run_dir / f"CONTROL.fwd_{tag}"
     g = GRID_CFG
-    n_sources = len(SOURCES)
 
-    lines = [
-        f"{dt_utc.strftime('%y %m %d %H')}   ! forecast start UTC",
-        f"{n_sources}   ! number of sources: E/W/S",
-    ]
-    for zone, src in SOURCES.items():
-        lines.append(f"{src['lat']:.4f}  {src['lon']:.4f}  {src['agl']:.1f}   ! {src['name']}")
+    if specs is not None and source_q_g_s is not None:
+        # Geometry mode: expand each named source to its sub-points.
+        # One LOCATION record and one SPECIES per sub-point so each sub-point's
+        # weighted emission is resolved independently in the HYSPLIT output.
+        # Species ID format: {3-char source prefix}{2-digit index}, e.g. EAS00.
+        subpoints: list[tuple[str, float, float, float]] = []  # (sp_id, lat, lon, q_g_s)
+        for source_id, spec in specs.items():
+            q_source = float(source_q_g_s.get(source_id, 0.0))
+            if q_source <= 0.0:
+                continue
+            prefix = source_id[:3].upper()
+            for k, sp in enumerate(spec.sub_points):
+                sp_id = f"{prefix}{k:02d}"
+                subpoints.append((sp_id, sp.lat, sp.lon, q_source * sp.weight))
 
-    lines += [
-        f"{run_hours}   ! forward run hours",
-        "0", "10000.0",
-        "1", met_dir, _met_filename(dt_utc),
-        f"{n_sources}   ! species — one per source to track attribution",
-    ]
-    for zone in SOURCES:
-        q = emission_rates_g_s.get(zone, 20.0)
-        lines += [
-            f"H2S_{zone.upper()}",
-            f"{q:.1f}   ! {zone} emission rate g/s",
-            "1.0   ! 1-hr cycles (continuous)",
-            "0",
+        if not subpoints:
+            # All sources zero-Q — fall back to a dummy entry so CONTROL is valid
+            subpoints = [("H2S_NULL", 32.55, -117.09, 0.001)]
+
+        n = len(subpoints)
+        lines = [
+            f"{dt_utc.strftime('%y %m %d %H')}   ! forecast start UTC",
+            f"{n}   ! sub-point locations ({n} from geometry)",
         ]
+        for sp_id, lat, lon, _ in subpoints:
+            lines.append(f"{lat:.5f}  {lon:.5f}  2.0   ! {sp_id}")
 
-    lines += [
-        "1   ! concentration grid",
-        f"{g['sw_lat']:.3f}  {g['sw_lon']:.3f}",
-        f"{g['dlat']:.4f}  {g['dlon']:.4f}",
-        f"{g['nlat']}  {g['nlon']}",
-        str(run_dir / "output") + "/",
-        f"cdump_fwd_{tag}",
-        "1", "10.0",
-        f"{dt_utc.strftime('%y %m %d %H')}",
-        "00 00 00 01 00",
-        "1   ! time-averaged output",
-    ]
-    for zone in SOURCES:
         lines += [
-            f"H2S_{zone.upper()}",
-            "0.01  0.0  0.0",
-            "0.0   0.0  0.0",
-            "0.0", "34.08",
+            f"{run_hours}   ! forward run hours",
+            "0", "10000.0",
+            "1", met_dir, _met_filename(dt_utc),
+            f"{n}   ! species — one per sub-point",
         ]
+        for sp_id, lat, lon, q in subpoints:
+            lines += [
+                sp_id,
+                f"{q:.4f}   ! emission rate g/s",
+                "1.0",
+                "0",
+            ]
+
+        lines += [
+            "1   ! concentration grid",
+            f"{g['sw_lat']:.3f}  {g['sw_lon']:.3f}",
+            f"{g['dlat']:.4f}  {g['dlon']:.4f}",
+            f"{g['nlat']}  {g['nlon']}",
+            str(run_dir / "output") + "/",
+            f"cdump_fwd_{tag}",
+            "1", "10.0",
+            f"{dt_utc.strftime('%y %m %d %H')}",
+            "00 00 00 01 00",
+            "1   ! time-averaged output",
+        ]
+        for sp_id, *_ in subpoints:
+            lines += [
+                sp_id,
+                "0.01  0.0  0.0",
+                "0.0   0.0  0.0",
+                "0.0", "34.08",
+            ]
+
+    else:
+        # Legacy 3-zone mode
+        if emission_rates_g_s is None:
+            emission_rates_g_s = {}
+        n_sources = len(SOURCES)
+        lines = [
+            f"{dt_utc.strftime('%y %m %d %H')}   ! forecast start UTC",
+            f"{n_sources}   ! number of sources: E/W/S",
+        ]
+        for zone, src in SOURCES.items():
+            lines.append(f"{src['lat']:.4f}  {src['lon']:.4f}  {src['agl']:.1f}   ! {src['name']}")
+
+        lines += [
+            f"{run_hours}   ! forward run hours",
+            "0", "10000.0",
+            "1", met_dir, _met_filename(dt_utc),
+            f"{n_sources}   ! species — one per source to track attribution",
+        ]
+        for zone in SOURCES:
+            q = emission_rates_g_s.get(zone, 20.0)
+            lines += [
+                f"H2S_{zone.upper()}",
+                f"{q:.1f}   ! {zone} emission rate g/s",
+                "1.0   ! 1-hr cycles (continuous)",
+                "0",
+            ]
+
+        lines += [
+            "1   ! concentration grid",
+            f"{g['sw_lat']:.3f}  {g['sw_lon']:.3f}",
+            f"{g['dlat']:.4f}  {g['dlon']:.4f}",
+            f"{g['nlat']}  {g['nlon']}",
+            str(run_dir / "output") + "/",
+            f"cdump_fwd_{tag}",
+            "1", "10.0",
+            f"{dt_utc.strftime('%y %m %d %H')}",
+            "00 00 00 01 00",
+            "1   ! time-averaged output",
+        ]
+        for zone in SOURCES:
+            lines += [
+                f"H2S_{zone.upper()}",
+                "0.01  0.0  0.0",
+                "0.0   0.0  0.0",
+                "0.0", "34.08",
+            ]
 
     ctrl_path.write_text("\n".join(lines) + "\n")
     return ctrl_path
@@ -298,6 +368,8 @@ def generate_hysplit_bundle(
     date_start: str = "2026-02-01",
     date_end: str = "2026-04-01",
     run_hours: int = 72,
+    specs: Optional[dict] = None,
+    source_q_g_s: Optional[dict[str, float]] = None,
 ) -> bytes:
     """
     Generate a HYSPLIT run bundle and return it as zip archive bytes.
@@ -307,12 +379,18 @@ def generate_hysplit_bundle(
         df: Observation DataFrame for backward modes (None for forward).
             Must have columns: time_utc, H2S, site_name, stable_atm.
         met_dir: Path to met files directory (written into CONTROL files).
-        emission_rates_g_s: {zone: Q_g_s} for forward mode.
+        emission_rates_g_s: {zone: Q_g_s} for forward mode (legacy 3-zone).
         start_utc: ISO timestamp for forward mode (default: now).
         hours_back: Backward integration duration (hours).
         h2s_threshold: Min H2S for event selection in backward modes.
         date_start, date_end: Event selection window for backward modes.
         run_hours: Forward dispersion duration (hours).
+        specs: SourceSpec dict from load_source_geometry(). When provided
+            alongside source_q_g_s, the forward bundle uses geometry mode:
+            each source is expanded to its sub-points as individual LOCATION
+            records, one SPECIES entry per sub-point at Q_source * weight.
+        source_q_g_s: Per-source Q (g/s) keyed by source_id from geometry
+            config. Used with specs for geometry-aware forward bundles.
 
     Returns:
         Zip archive as bytes. Upload to S3 and extract to run.
@@ -348,9 +426,20 @@ def generate_hysplit_bundle(
         elif mode == "forward_disp":
             if start_utc is None:
                 start_utc = pd.Timestamp.utcnow().isoformat()
-            if emission_rates_g_s is None:
-                emission_rates_g_s = {"east": 20.0, "west": 10.0, "south": 137.0}
-            ctrl_files = [_write_forward_disp(run_dir, met_dir, start_utc, emission_rates_g_s, run_hours)]
+            if specs is not None and source_q_g_s is not None:
+                ctrl_files = [_write_forward_disp(
+                    run_dir, met_dir, start_utc,
+                    specs=specs, source_q_g_s=source_q_g_s,
+                    run_hours=run_hours,
+                )]
+            else:
+                if emission_rates_g_s is None:
+                    emission_rates_g_s = {"east": 20.0, "west": 10.0, "south": 137.0}
+                ctrl_files = [_write_forward_disp(
+                    run_dir, met_dir, start_utc,
+                    emission_rates_g_s=emission_rates_g_s,
+                    run_hours=run_hours,
+                )]
 
         else:
             raise ValueError(f"Unknown mode: {mode!r}. Use 'backward_traj', 'backward_disp', or 'forward_disp'.")
