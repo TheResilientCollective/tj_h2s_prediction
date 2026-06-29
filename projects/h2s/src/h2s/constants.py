@@ -6,6 +6,7 @@ and model feature lists — single source of truth.
 """
 # forecast schedule constant. When a forecast is updated (aka for when noaa hysplit files updated.
 SCHEDULE_6HR="20 5,11,17,23 * * *"
+SCHEDULE_1HR="20 * * * *"
 # ==============================================================================
 # S3 Path Constants
 # ==============================================================================

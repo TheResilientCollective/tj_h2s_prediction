@@ -25,7 +25,7 @@ from h2s.defs.h2s_daily_pipeline import (
     station_forecast_analysis_job,
 )
 
-from h2s.constants import SCHEDULE_6HR
+from h2s.constants import SCHEDULE_6HR,SCHEDULE_1HR
 from h2s.defs.h2s_dispersion_pipeline import (
     lagrangian_source_attribution,
     emission_rate_inversion,
@@ -80,7 +80,7 @@ def station_model_training_schedule(context: dg.ScheduleEvaluationContext):
 
 @dg.schedule(
     job=station_forecast_analysis_job,
-    cron_schedule=SCHEDULE_6HR,
+    cron_schedule=SCHEDULE_1HR,
     execution_timezone="America/Los_Angeles",
     description="Station forecast analysis: H2S source attribution + 24h forecast + dashboard (every 6 hours: 00, 06, 12, 18 )",
     default_status=dg.DefaultScheduleStatus.RUNNING,
