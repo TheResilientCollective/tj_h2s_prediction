@@ -6,6 +6,16 @@ The H2S prediction system uses a **multi-stage calibration loop** to keep models
 
 **Key Principle:** Approval is explicit (human runs deployment job), not automatic.
 
+> **2026-06 revision note:** training, selection, archive, and deployment mechanics
+> below are unchanged. What changed is *consumption*: both variants are still
+> trained and deployed every cycle, but the operational surfaces now route through
+> the **Lean** variant (`PRIMARY_VARIANT`), `clf_30ppb`'s `p30` is emitted for
+> NESTOR-BES only (`CLF_30PPB_STATIONS`), and the headline tier comes from
+> two-head agreement (`classify_risk_agreement`). See
+> [risk_classification.md](./risk_classification.md). The deployment job still
+> uploads all 4 tasks × 2 variants per station regardless of gating — the gate is
+> applied at emission time, not training time.
+
 ---
 
 ## Training & Selection Pipeline
@@ -157,13 +167,17 @@ OR
 **Action:**
 1. Load models from archive
 2. Validate checksums (integrity check)
-3. Upload to production S3:
+3. Upload to production S3 (flat layout, **variant suffix on each filename** —
+   not a per-variant subdirectory):
    ```
-   s3://resilientpublic/tijuana/forecast/models/stations/NESTOR__BES/Evidence/regression.pkl
-   s3://resilientpublic/tijuana/forecast/models/stations/NESTOR__BES/Evidence/clf_5ppb.pkl
-   ... (all 8 per-variant models)
+   s3://resilientpublic/tijuana/forecast/models/stations/NESTOR__BES/regression_evidence.pkl
+   s3://resilientpublic/tijuana/forecast/models/stations/NESTOR__BES/clf_5ppb_evidence.pkl
+   s3://resilientpublic/tijuana/forecast/models/stations/NESTOR__BES/regression_lean.pkl
+   s3://resilientpublic/tijuana/forecast/models/stations/NESTOR__BES/clf_5ppb_lean.pkl
+   ... (8 model pickles = 4 tasks × 2 variants, + features_{evidence,lean}.json)
    ```
-4. Stamp `deployment_metadata.json` with active model_version
+4. Stamp `deployment_metadata.json` with active model_version (carries a
+   `variants` block mapping each variant → its feature schema + model paths)
 5. Slack notification: "Models deployed for NESTOR__BES, IB_CIVIC_CTR, SAN_YSIDRO"
 
 **Gate:** Operator explicitly runs this job. If they don't, production models stay unchanged.

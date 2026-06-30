@@ -30,24 +30,17 @@ Dedicated classifiers train specifically to maximize P(predict>threshold | true>
 
 ## Input Features
 
-**Identical to Regression Model:**
+**Identical to the regression model** — the classifiers consume the *same* 33
+(Evidence) / 19 (Lean) feature columns, **including the H2S autoregressive lags**
+(`h2s_lag_1h/3h/6h`, `h2s_rolling_6h/24h`). See
+[regression_model.md](./regression_model.md) for the exact column lists. The
+operational primary is **Lean** (`PRIMARY_VARIANT = "lean"`).
 
-### Evidence Variant (33 features)
-- Meteorology (8): temperature, wind speed/direction, humidity, pressure, cloud cover, precipitation, dewpoint
-- Time cyclicals (6): hour_sin/cos, month_sin/cos
-- Wind cyclicals (2): wind_direction_sin/cos
-- Flow (3): flow, flow_log, flow_lag_6h
-- H2S lags (5): h2s_lag_1h, h2s_lag_3h, h2s_lag_6h, h2s_rolling_6h, h2s_rolling_24h
-- Wind rolling (6): wind_speed_10m_avg_2h/3h/4h, wind_gusts_10m_max_2h/3h/4h
-- Flow rolling (2): flow_rolling_24h
-- Derived (1): source_regime
-
-### Lean Variant (19 features)
-- Meteorology (8)
-- Time cyclicals (6)
-- H2S lags (5)
-
-**Note:** Classifiers do NOT use h2s_pred from the regression. Instead, they use raw h2s_lag features, which in recursive forecasting are updated with the regression's predictions (autoregressive chain).
+**Note:** Classifiers do NOT read the regression's `h2s_pred` as a feature.
+They use the same raw `h2s_lag_*` features which, in recursive forecasting, are
+updated with the regression's predictions (the autoregressive chain). So they
+"see" the regression's trajectory indirectly through the lags, but train and
+predict independently.
 
 ---
 
@@ -168,46 +161,58 @@ XGBoost with `objective='binary:logistic'` naturally produces calibrated probabi
 
 ---
 
-## Per-Station Performance (Walk-Forward Backtest)
+## Per-Station Performance (in-sample 80/20 split, Lean variant)
 
-### clf_5ppb (P(H2S > 5 ppb))
+The 5 ppb and 10 ppb classifiers are strong everywhere — positives are common
+enough (9–22% base rate) that the baseline already works. clf_30ppb is the hard
+one (0.6–4.6% base rate). Figures below are from the 2026-06-27 underfitting study
+(`experiments/underfitting_results/`).
 
-| Station | AUC | Recall@0.5 | Notes |
-|---------|-----|-----------|-------|
-| NESTOR__BES | 0.95+ | High | Tier 1: rarely missed |
-| IB_CIVIC_CTR | 0.94+ | High | Tier 1: stable |
-| SAN_YSIDRO | 0.93+ | High | Tier 1: consistent |
+### clf_5ppb (P(H2S > 5 ppb)) — Tier 1
 
-### clf_10ppb (P(H2S > 10 ppb))
+| Station | Base rate ≥5 | Baseline recall |
+|---------|--------------|-----------------|
+| NESTOR-BES | 21.6% | ~0.83 |
+| IB Civic Ctr | 9.3% | ~0.68–0.75 |
+| San Ysidro | 12.1% | ~0.70–0.78 |
 
-| Station | AUC | Recall@0.5 | Notes |
-|---------|-----|-----------|-------|
-| NESTOR__BES | 0.96+ | High | Tier 2: good discrimination |
-| IB_CIVIC_CTR | 0.95+ | High | Tier 2: stable |
-| SAN_YSIDRO | 0.94+ | High | Tier 2: consistent |
+### clf_10ppb (P(H2S > 10 ppb)) — Tier 2
 
-### clf_30ppb (P(H2S > 30 ppb)) — ⚠️ Known Limitation
+| Station | Base rate ≥10 | Baseline recall |
+|---------|---------------|-----------------|
+| NESTOR-BES | 12.0% | strong |
+| IB Civic Ctr | 4.0% | strong |
+| San Ysidro | 4.5% | strong |
 
-| Station | AUC | Recall@0.5 | Issue | Status |
-|---------|-----|-----------|-------|--------|
-| NESTOR__BES | 0.97+ | ~0.95 | ✓ High recall | Operational |
-| IB_CIVIC_CTR | 0.96+ | ~0.91 | ✓ Good recall | Operational |
-| SAN_YSIDRO | 0.96+ | **~0.43** | ⚠️ Sparse positives | **Known Limitation** |
+### clf_30ppb (P(H2S > 30 ppb)) — ⚠️ Gated to NESTOR-BES only
 
-**SAN_YSIDRO clf_30ppb Issue:**
-- Only ~43 observations >30 ppb in historical data
-- Low base rate (≈0.3%) makes calibration difficult
-- Model learns "default to no" → misses real orange events
-- AUC still high (0.96) because ranking quality is good, but recall at 0.5 threshold is low
+This is where the underfitting lives. **As of 2026-06 `p30` is emitted for
+NESTOR-BES only** (`CLF_30PPB_STATIONS = {"NESTOR - BES"}`); the other stations'
+`p30` is suppressed to NaN and they fall back to ≥10 ppb (yellow-high) as their
+top alert.
 
-**Proposed Solutions (Deferred to Phase 7):**
-- Per-station threshold: Use 0.10–0.15 for SAN_YSIDRO instead of global 0.5
-- Oversample >30 ppb with SMOTE (backtest showed it degraded recall; needs revisit)
-- Separate high-alert-specific model (not yet explored)
+| Station | AUC | Orange positives | Baseline recall | p30 emitted? |
+|---------|-----|------------------|-----------------|--------------|
+| NESTOR-BES | ~0.97 | ~344–550 (4.6%) | 0.77 (→0.86 night-trained) | ✅ Yes |
+| IB Civic Ctr | ~0.96 | ~51–84 (0.9%) | 0.70 | ❌ Gated off (NaN) |
+| San Ysidro | ~0.97–0.98 | ~40–85 (0.6%) | **0.16–0.43** (collapses) | ❌ Gated off (NaN) |
 
-**Current Workaround:**
-- Monitor p30 probabilities; escalate alerts if any station's p30 > 0.25 (lower threshold)
-- Or rely on observed >30 ppb alert performance sensor for closing out cascade events
+**Why San Ysidro collapses:** ~40 positives in a sea of negatives (0.6% base
+rate). AUC stays high (ranking is fine) but at any fixed operating point recall is
+unstable — more noise than signal. The 6/27/2026 Berry Elementary miss (103–219
+ppb overnight, predicted green) is the canonical failure.
+
+**The fix that shipped:** rather than emit an untrustworthy orange call, the
+revision (a) gates `p30` off for the sparse stations, and (b) requires **two-head
+agreement** so a magnitude-only orange surfaces as *provisional*, not a hard
+alert. See [risk_classification.md](./risk_classification.md).
+
+**The fix in progress:** a **pooled cross-station ≥30 model** lifts San Ysidro
+recall from 0.16 → 0.64–0.73 (default) / 0.84 (@0.25 cutoff) in experiments. When
+it lands, re-enabling a station = adding its name to `CLF_30PPB_STATIONS`.
+
+**SMOTE** was evaluated for clf_30ppb and *degraded* OOS recall (AUC was already
+0.96–0.98), so it is OFF by default (opt-in via `enable_smote_clf_30ppb`).
 
 ---
 
@@ -215,41 +220,32 @@ XGBoost with `objective='binary:logistic'` naturally produces calibrated probabi
 
 ### Cascade Alert Logic (cascade_alerts_job)
 
-Every 6 hours, evaluate three tiers off the Evidence variant, NESTOR-BES station:
+The cascade evaluates three tiers off the **primary variant** (Lean —
+`TRIGGER_VARIANT = PRIMARY_VARIANT`), NESTOR-BES station. Evidence is reported
+alongside but never gates.
 
 ```python
-# Load latest forecast products
-products = load_products_from_s3(run_ts)
+# Load latest forecast products, filter to the primary (Lean) variant, NESTOR-BES
+nestor = products[(products['variant'] == 'lean') & (products['station'] == 'NESTOR__BES')]
 
-# Filter to Evidence variant, NESTOR-BES
-nestor_evidence = products[
-    (products['variant'] == 'Evidence') & 
-    (products['station'] == 'NESTOR__BES')
-]
-
-# Tier 1: Nowcast p5 alert
-tier1_alert = any(nestor_evidence['lead_hour'].isin([1,2,3]) & (nestor_evidence['p5'] > 0.5))
-
-# Tier 2: Nearcast p10 alert
-tier2_alert = any(nestor_evidence['lead_hour'].isin([4,5,6]) & (nestor_evidence['p10'] > 0.5))
-
-# Tier 3: Forecast p30 alert
-tier3_alert = any(nestor_evidence['lead_hour'].isin([7,24]) & (nestor_evidence['p30'] > 0.5))
-
-# Post escalating report to Slack
-if tier1_alert or tier2_alert or tier3_alert:
-    post_cascade_report(tier1_alert, tier2_alert, tier3_alert, nestor_evidence)
+# Tier 1: Nowcast p5 ; Tier 2: Nearcast p10 ; Tier 3: Forecast p30
+tier1 = (nestor.query('1 <= lead_hour <= 3')['p5']  > 0.5).any()
+tier2 = (nestor.query('4 <= lead_hour <= 6')['p10'] > 0.5).any()
+tier3 = (nestor.query('7 <= lead_hour <= 24')['p30'] > 0.5).any()
 ```
 
 ### Cascade Thresholds (CASCADE_TRIGGERS in constants.py)
 
-| Tier | Product | Metric | Threshold | Window |
-|------|---------|--------|-----------|--------|
-| 1 | Nowcast | p5 | 0.5 | Leads 1–3 |
-| 2 | Nearcast | p10 | 0.5 | Leads 4–6 |
-| 3 | Forecast | p30 | 0.5 | Leads 7–24 |
+| Tier | Product | Metric | Cutoff | Window (lead h) |
+|------|---------|--------|--------|-----------------|
+| 1 | Nowcast | p5 | 0.5 | 1–3 |
+| 2 | Nearcast | p10 | 0.5 | 4–6 |
+| 3 | Forecast | p30 | 0.5 | 7–24 |
 
-**Note:** All thresholds currently 0.5 (default probability cutoff). Can be tuned independently per tier.
+The cascade cutoffs are all 0.5. **Note this differs from the two-head agreement
+cutoffs** used by the daily-pipeline risk tier (`probability_risk_tier`):
+`PROB_5_ALERT = 0.5`, `PROB_10_ALERT = 0.5`, `PROB_30_ALERT = 0.25`. The cascade
+is the bellwether trigger; the agreement rubric is the per-row headline classifier.
 
 ---
 

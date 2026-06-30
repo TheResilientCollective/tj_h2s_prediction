@@ -11,6 +11,21 @@ The dispersion model complements empirical H2S regression/classifiers with physi
 
 **Purpose:** Enable source-aware forecasting, identify emission hotspots, and validate empirical predictions against physics.
 
+> **2026-06 revision — geometry-aware calibration loop.** A new
+> `dispersion/geometry.py` + `source_geometry.toml` describe each source as a
+> **point, line, or polygon** and tessellate it into weighted sub-points
+> (`Q_subpoint = Q_source × weight`, weights sum to 1 so total Q is conserved).
+> Both the Gaussian forward model and the NNLS emission inversion now read this
+> single source of truth (`build_sensitivity_matrix_from_geometry`,
+> `run_forward_model_from_geometry`). This fixes the **San Ysidro
+> over-prediction**: the east drain corridor, previously collapsed to point
+> sources 250–600 m from SY, is now a ~1.5 km line, spreading Q over the channel
+> and dropping per-sub-point sensitivity at the sensor. `calibration_metrics.py`
+> adds the Chang & Hanna (2004) evaluation suite (mean bias, FB, NMSE, FAC2),
+> threshold skill (POD/FAR/CSI at 30/100 ppb), and **leave-one-station-out
+> (LOSO)** cross-validation that explicitly tracks the SY bias toward zero. See
+> the "Geometry-Aware Calibration Loop" section below.
+
 ---
 
 ## System 1: Lagrangian Backward Inversion
@@ -253,6 +268,70 @@ Wind-dependent σ implementation currently uses empirical fit (σ ~ U^0.5). Coul
 - Time-of-day (day/night stability classes)
 - Cloud cover (mixing height proxy)
 - Atmospheric pressure (stability indicator)
+
+---
+
+## Geometry-Aware Calibration Loop (2026-06)
+
+The calibration loop — iterate backward inversion ⇄ forward model until emission
+estimates converge — now runs on an explicit **source geometry** rather than the
+flat 16-point candidate list.
+
+### Source geometry (`source_geometry.toml` + `geometry.py`)
+
+Each source is declared as one of three geometry types and tessellated into
+weighted **sub-points**:
+
+| Geometry | Tessellation | Weight per sub-point |
+|----------|--------------|----------------------|
+| point | itself | 1.0 |
+| line | sampled every `discretize_spacing_m` along the polyline | arc-length fraction |
+| polygon | gridded over the area | area fraction |
+
+`Q_subpoint = Q_source × weight`, and weights sum to 1 per source, so total
+emission Q is **conserved** regardless of geometry type. Each source also carries
+a `q_prior` (initial guess, g/s) and a `zone` (east/west/south rollup). Both the
+forward Gaussian model and the NNLS inversion read this one file —
+*"move the vertices in the field"* is the intended tuning workflow.
+
+### Why it matters — the San Ysidro over-prediction fix
+
+The east drain corridor used to collapse to individual point sources 250–600 m
+from San Ysidro, which made the inversion attribute too much Q there and the
+forward model over-predict SY. Declared as a **~1.5 km line** discretized at
+120 m, the same total Q spreads across the concrete channel, dropping the
+per-sub-point sensitivity at SY and removing the bias.
+
+### Dispersion skill metrics (`calibration_metrics.py`)
+
+The loop is now scored with the standard Chang & Hanna (2004) dispersion-model
+evaluation suite plus threshold skill:
+
+| Metric | Meaning |
+|--------|---------|
+| Mean bias, FB (fractional bias) | Systematic over/under-prediction |
+| NMSE | Normalized mean square error (scatter) |
+| FAC2 | Fraction of predictions within 2× of observed |
+| POD / FAR / CSI @ 30, 100 ppb | Threshold hit/false-alarm/critical-success |
+| **LOSO** | Leave-one-station-out CV — quantifies the SY bias explicitly; `loso["SAN YSIDRO"]["mean_bias"] → 0` is the target after the geometry fix |
+
+### Build path
+
+```
+source_geometry.toml ──► load_source_geometry() ──► sub-points (weighted)
+        │                                               │
+        ▼                                               ▼
+build_sensitivity_matrix_from_geometry          run_forward_model_from_geometry
+        │  (NNLS inversion)                              │  (Gaussian forward / gridded twin)
+        ▼                                               ▼
+   per-zone emission rates  ◄────── calibration loop ──────►  predicted ppb at sensors
+        │
+        ▼
+   score_inversion_result() / loso_cross_validate()  (Chang & Hanna + threshold skill)
+```
+
+Status: wired into the Dagster pipeline (Phase 4); HYSPLIT forward bundles now
+expand line/polygon sources to sub-points as well (Phase 5).
 
 ---
 

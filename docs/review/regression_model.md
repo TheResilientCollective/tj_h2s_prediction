@@ -8,98 +8,127 @@ The regression model predicts actual H2S concentration (ppb) for each lead hour 
 
 **Algorithm:** XGBoost or RandomForest, auto-selected per training session.
 
-**Variants:** Evidence (33 features) and Lean (19 features), trained independently.
+**Variants:** Evidence (33 features) and Lean (19 features), trained
+independently. **Lean is the operational primary** (`PRIMARY_VARIANT = "lean"`);
+Evidence runs alongside as a cross-check.
 
 **Stations:** One model per station (SAN_YSIDRO, NESTOR__BES, IB_CIVIC_CTR).
 
 ---
 
-## Input Features
+## Input Features (production 33-feature Evidence set)
 
-### Core Meteorological (8 features)
+The exact production feature list is `CORE_FEATURES` / `MODEL_FEATURES` in
+`constants.py`, promoted from the 2026-06-10 "Berry" feature-trim ablation
+(PR #27/#28). It is built by `prepare_multi_station_features` /
+`ensure_base_features`. **Note there is no raw `Flow (m^3/s)` column,
+`flow_log`/`flow_low`/`flow_high`, or SBIWTP channel in the production set** —
+those live only in `MODEL_FEATURES_LEGACY` (44-feature), retained for legacy
+preprocessing and not used for new training.
 
-| Feature | Source | Units | Notes |
-|---------|--------|-------|-------|
-| temperature_2m | NOAA forecast | °C | 2-meter air temperature |
-| wind_speed_10m | NOAA forecast | m/s | 10-meter wind speed |
-| wind_direction_10m | NOAA forecast | degrees | 10-meter wind direction |
-| relative_humidity_2m | NOAA forecast | % | 2-meter relative humidity |
-| surface_pressure | NOAA forecast | Pa | Sea-level pressure |
-| precipitation | NOAA forecast | mm | Hourly precipitation |
-| cloud_cover | NOAA forecast | % | Total cloud cover |
-| dewpoint_2m | NOAA forecast | °C | 2-meter dewpoint |
+### Weather — raw (10 features)
 
-### Time & Wind Cyclicals (6 features)
+| Feature | Units | Notes |
+|---------|-------|-------|
+| temperature_2m | °C | 2-meter air temperature (top exogenous Spearman ≈ 0.33) |
+| wind_speed_10m | m/s | 10-meter wind speed |
+| wind_gusts_10m | m/s | 10-meter wind gusts |
+| relative_humidity_2m | % | 2-meter relative humidity |
+| surface_pressure | Pa | Surface pressure |
+| precipitation | mm | Hourly precipitation |
+| cloud_cover | % | Total cloud cover |
+| dewpoint_2m | °C | 2-meter dewpoint |
+| wind_direction_sin | — | sin(wind_direction) cyclic encoding |
+| wind_direction_cos | — | cos(wind_direction) cyclic encoding |
 
-| Feature | Formula | Purpose |
-|---------|---------|---------|
-| hour_sin, hour_cos | sin(2πh/24), cos(2πh/24) | Capture diurnal H2S cycle |
-| month_sin, month_cos | sin(2πm/12), cos(2πm/12) | Capture seasonal pattern |
-| wind_direction_sin, wind_direction_cos | sin(2πθ/360), cos(2πθ/360) | Normalize circular wind direction |
+(Wind direction enters **only** through sin/cos; the raw `wind_direction_10m`
+degrees column is not a model feature.)
 
-### Flow Features (3 features)
+### Wind rolling aggregates (4 features)
 
-| Feature | Source | Units | Notes |
-|---------|--------|-------|-------|
-| Flow (m^3/s)--Border | USGS border crossing | m³/s | Tijuana River flow rate |
-| flow_log | log(flow_rate + 1) | log-scale | Log-transformed flow |
-| flow_lag_6h | Lagged flow | m³/s | Flow from 6 hours ago |
+| Feature | Window | Notes |
+|---------|--------|-------|
+| wind_speed_10m_avg_2h | 2-hour mean | (4 h aggregates dropped in PR #27 as tree-redundant) |
+| wind_speed_10m_avg_3h | 3-hour mean | |
+| wind_gusts_10m_max_2h | 2-hour max | |
+| wind_gusts_10m_max_3h | 3-hour max | |
 
-### H2S History (5 features) — Core Autoregressive Lags
+### Tide (2 features)
 
-| Feature | Lag | Purpose |
-|---------|-----|---------|
-| h2s_lag_1h | 1 hour ago | Most recent observation |
-| h2s_lag_3h | 3 hours ago | Short-term trend |
-| h2s_lag_6h | 6 hours ago | Longer-term trend |
-| h2s_rolling_6h | 6-hour mean | Smoothed short-term level |
-| h2s_rolling_24h | 24-hour mean | Baseline/regime indicator |
+| Feature | Notes |
+|---------|-------|
+| tide_height | Predicted tide height (m) |
+| tidal_state_encoded | Flood/ebb state, encoded integer |
 
-**Note:** During recursive forecasting, these lags are updated with predicted H2S values at each lead, creating the "autoregressive" behavior.
+### Time cyclicals & regime (4 features)
 
-### Wind Rolling Features (6 features) — Evidence Only
+| Feature | Notes |
+|---------|-------|
+| hour_sin, hour_cos | Diurnal cycle |
+| month_sin, month_cos | Seasonal cycle |
 
-| Feature | Window | Purpose |
-|---------|--------|---------|
-| wind_speed_10m_avg_2h | 2-hour rolling mean | Short-term wind pattern |
-| wind_speed_10m_avg_3h | 3-hour rolling mean | Mid-term wind pattern |
-| wind_speed_10m_avg_4h | 4-hour rolling mean | Longer wind trend |
-| wind_gusts_10m_max_2h | 2-hour rolling max | Peak gust exposure |
-| wind_gusts_10m_max_3h | 3-hour rolling max | Extended gust pattern |
-| wind_gusts_10m_max_4h | 4-hour rolling max | Gust trend |
+### Derived regime / interactions (5 features)
 
-### Flow Rolling Features (2 features) — Evidence Only
+| Feature | Notes |
+|---------|-------|
+| is_night | Day/night flag (absorbs hour-of-day signal) |
+| source_regime | is_night × wind-direction quadrant — source upwind of sensor |
+| stable_atm | Atmospheric stability proxy (88% recall on >100 ppb hours in calibration) |
+| wind_x_stable_atm | wind_speed × stable_atm interaction |
+| wind_temp_interaction | wind × temperature interaction |
+| humidity_temp_interaction | humidity × temperature interaction |
 
-| Feature | Window | Purpose |
-|---------|--------|---------|
-| flow_rolling_24h | 24-hour rolling mean | Long-term flow regime |
-| flow_low, flow_high | Categorical bins | Flow regime classification |
+(That is 6 rows; `is_night`, `source_regime`, `stable_atm` are the regime core
+and `wind_x_stable_atm`, `wind_temp_interaction`, `humidity_temp_interaction` the
+interactions — together 6 features.)
 
-### Interaction & Derived Features (3 features) — Evidence Only
+### H2S autoregressive lags (5 features)
 
-| Feature | Formula | Purpose |
-|---------|---------|---------|
-| source_regime | Wind-derived | East/West/South source upwind of sensor |
-| stable_atm | Hour + cloud cover | Atmospheric stability proxy |
-| is_night | Hour-based | Day/night flag (0–6 hours = night) |
+| Feature | Notes |
+|---------|-------|
+| h2s_lag_1h | H2S 1 hour ago (autoregressive ceiling ≈ 0.70 Spearman) |
+| h2s_lag_3h | H2S 3 hours ago |
+| h2s_lag_6h | H2S 6 hours ago |
+| h2s_rolling_6h | 6-hour rolling mean (consistently top-3 XGB importance) |
+| h2s_rolling_24h | 24-hour rolling mean (baseline/regime level) |
 
-### Stability & State Features (2 features)
+**Note:** During recursive forecasting these lags are updated with predicted H2S
+at each lead — the "autoregressive" behavior.
 
-| Feature | Source | Values | Notes |
-|---------|--------|--------|-------|
-| tidal_state_encoded | NOAA tide model | {0, 1, 2, 3} | Flood/ebb cycle |
-| sbiwtp_anomaly | SBIWTP discharge | Continuous | South Bay treatment plant anomaly |
+### Flow (2 features)
+
+| Feature | Notes |
+|---------|-------|
+| flow_lag_6h | Tijuana River border flow, 6 h ago |
+| flow_rolling_24h | 24-hour rolling mean flow |
+
+Total: 10 + 4 + 2 + 4 + 6 + 5 + 2 = **33 features**.
 
 ---
 
 ## Feature Counts
 
-| Variant | Count | Details |
-|---------|-------|---------|
-| Evidence | 33 | All features above |
-| Lean | 19 | Meteorology (8) + Time cyclicals (6) + H2S lags (5) |
+| Variant | Count | Definition |
+|---------|-------|------------|
+| Evidence | 33 | `CORE_FEATURES` (all features above) |
+| Lean | 19 | Evidence **minus** the 14 below |
 
-**Note:** Lean explicitly drops wind/flow rolling windows and interactions, focusing on the most economical feature set. Both variants perform similarly; Lean is more interpretable.
+**Lean = Evidence minus** (`MODEL_FEATURES_LEAN` in `constants.py`):
+- Interactions: `wind_temp_interaction`, `humidity_temp_interaction`, `wind_x_stable_atm`
+- Wind rolling: `wind_speed_10m_avg_2h/3h`, `wind_gusts_10m_max_2h/3h`
+- Lower-importance weather: `dewpoint_2m`, `surface_pressure`, `cloud_cover`,
+  `precipitation`, `wind_gusts_10m`
+- Time cyclicals: `hour_sin`, `hour_cos` (is_night carries the hour-of-day signal)
+
+So Lean keeps: temperature_2m, wind_speed_10m, wind_direction_sin/cos,
+relative_humidity_2m, tide_height, tidal_state_encoded, month_sin/cos, is_night,
+source_regime, stable_atm, h2s_lag_1h/3h/6h, h2s_rolling_6h/24h, flow_lag_6h,
+flow_rolling_24h (**19 features**).
+
+Lean did *not* pass the original ablation gate but is now the operational primary
+(2026-06): it carries the headline forecasts and alerts, with Evidence shown
+alongside. Both variants perform similarly; Lean is more interpretable and
+less over-determined.
 
 ---
 

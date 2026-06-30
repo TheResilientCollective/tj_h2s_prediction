@@ -44,7 +44,7 @@ The H2S prediction system is built on three-layer hierarchy:
 │                   TRAINING LAYER                           │
 │  station_model_training_job → station_deployment_job      │
 │  Input: Historical observations (modeldata_h2s_nofill)    │
-│  Output: 24 trained models (Evidence × 3 stations + Lean) │
+│  Output: 24 models = 3 stations × 2 variants × 4 tasks    │
 │  Process: Auto-select RF/XGBoost/Ensemble per task        │
 └────────────────────────────────────────────────────────────┘
 ```
@@ -90,23 +90,44 @@ The H2S prediction system is built on three-layer hierarchy:
 
 **Algorithm:** Binary XGBoost or RandomForest, auto-selected per task/station.
 
-**Input:** Same 33 or 19 features as regression (no explicit H2S lags; instead uses h2s_pred from regression in recursive loops).
+**Input:** The **same** 33/19 feature columns as regression — *including* the H2S
+autoregressive lags (`h2s_lag_1h/3h/6h`, `h2s_rolling_*`). The classifiers do not
+read the regression's `h2s_pred` directly; in the recursive loop those lag columns
+are filled with the regression's predictions, so the two heads share inputs but
+predict independently.
 
 **Output:** 
 - Probability estimates: p5, p10, p30 ∈ [0, 1]
 - Per-lead-hour in 24h forecasts
-- NaN if classifier missing (e.g., clf_30ppb before first post-Phase-1 training)
+- **`p30` is NaN for all stations except NESTOR-BES** (`CLF_30PPB_STATIONS`
+  gating — see below), and NaN for any genuinely missing classifier.
 
 **Metric for Selection:**
 - AUC (area under ROC curve) at default 0.5 threshold
 - Rationale: Backward-compatible ranking metric; not tied to specific operational decision threshold
 
-**Cascade Alert Logic:**
+**Cascade Alert Logic** (off the primary Lean variant, NESTOR-BES):
 - **Tier 1 (Nowcast):** If p5 > 0.5 at any lead 1–3, post alert
 - **Tier 2 (Nearcast):** If p10 > 0.5 at any lead 4–6, post alert
 - **Tier 3 (Forecast):** If p30 > 0.5 at any lead 7–24, post alert
 
-**Known Limitation:** SAN_YSIDRO clf_30ppb recall ≈ 0.43 (below 0.50 target). Sparse >30 ppb events + low calibration. Per-station thresholds would help but deferred to Phase 7.
+**clf_30ppb station gating (2026-06):** `clf_30ppb` is trained + deployed for all
+stations but its `p30` is emitted for **NESTOR-BES only**. IB Civic Center (~51
+orange positives) and San Ysidro (~40, recall collapses to 0.16–0.43) suppress
+`p30` to NaN and fall back to the ≥10 ppb yellow-high tier. See
+[risk_classification.md](./risk_classification.md).
+
+---
+
+### 2b. Two-Head Agreement Layer (2026-06)
+
+Between the model outputs and the operational headline tier sits
+`classify_risk_agreement()`: it cross-checks the regression **magnitude** tier
+against the classifier **probability** tier and reports only the level **both**
+confirm as `risk`. A lone head becomes `risk_possible` (*provisional*), never
+escalating the headline. Because gated stations have `p30 = NaN`, a magnitude-only
+orange there is always provisional — gating and agreement interlock. Full detail in
+[risk_classification.md](./risk_classification.md).
 
 ---
 
@@ -235,7 +256,7 @@ Store to S3
 (tijuana/forecast/products/run_ts={timestamp}/products.parquet)
     ↓
 Optional: Cascade Alert Check
-(Tier 1–3 against Evidence variant, NESTOR-BES)
+(Tier 1–3 against primary Lean variant, NESTOR-BES)
 ```
 
 ---
@@ -274,13 +295,15 @@ Station: NESTOR__BES
 
 ## Key Design Decisions
 
-1. **One Regression Model:** Produces h2s_pred for all classifiers to use in cascade logic
-2. **Three Parallel Classifiers:** Each trained independently; allows flexibility in thresholds and algorithm selection
+1. **One Regression Model (magnitude head):** Produces h2s_pred; feeds the recursive lags and the magnitude side of two-head agreement
+2. **Three Parallel Classifiers (probability head):** Each trained independently; allows flexibility in thresholds and algorithm selection
 3. **Recursive Autoregression:** Simulates "all forecasted H2S as features" for honest forecast-tier skill assessment
-4. **Two Feature Variants:** Evidence (full) and Lean (minimal) deployed in parallel for robustness and interpretability
-5. **Auto-Selection Strategy:** Per-task RF/XGBoost choice; ensemble if within margin (prevents overfitting to a single algorithm)
-6. **Immutable Archive:** Enables audit trail and replay-from-archive for any past forecast
-7. **Dispersion as Complement:** Lagrangian inversion + Gaussian forward provide source-to-sensor physics; H2S regression/classifiers are empirical alert engines
+4. **Two Feature Variants — Lean is primary (2026-06):** Lean (19, operational) and Evidence (33, cross-check) deployed in parallel; one constant (`PRIMARY_VARIANT`) re-points every surface
+5. **Two-Head Agreement:** Headline tier requires both magnitude and probability heads to confirm; lone signals stay provisional (cuts false orange, no silent miss)
+6. **Per-Station clf_30ppb Gating:** Orange probability emitted only where there are enough positives to trust it (NESTOR-BES); sparse stations fall back to ≥10 ppb
+7. **Auto-Selection Strategy:** Per-task RF/XGBoost choice; ensemble if within margin (prevents overfitting to a single algorithm)
+8. **Immutable Archive:** Enables audit trail and replay-from-archive for any past forecast
+9. **Dispersion as Complement:** Lagrangian inversion + Gaussian forward provide source-to-sensor physics; H2S regression/classifiers are empirical alert engines
 
 ---
 
@@ -288,5 +311,6 @@ Station: NESTOR__BES
 
 - **[regression_model.md](./regression_model.md)** — Regression model details and performance
 - **[classifier_models.md](./classifier_models.md)** — Classifier architecture and per-station performance
+- **[risk_classification.md](./risk_classification.md)** — Two-head agreement, clf_30ppb gating, underfitting findings
 - **[dispersion_model.md](./dispersion_model.md)** — Dispersion modeling and source attribution
 - **[calibration.md](./calibration.md)** — Calibration loop and model selection strategy
