@@ -39,6 +39,7 @@ from h2s.constants import (
     STATIONS,
 )
 from h2s.defs.h2s_daily_pipeline import _engineer_forecast_features
+from h2s.forecasting.obs_freshness import load_realtime_h2s, merge_h2s_series, seed_gap_hours
 from h2s.forecasting.recursive import VariantModels, run_products
 
 _KEY = lambda name: dg.AssetKey(["h2s", name])
@@ -159,6 +160,21 @@ def h2s_products(
     obs_df["H2S"] = obs_df["H2S"].clip(lower=0)
     context.log.info(f"✓ Observations: {len(obs_df)} rows")
 
+    # --- Near-real-time seed top-up -----------------------------------------
+    # modeldata only carries complete days (7–36 h stale), which left the
+    # recursion blind to in-progress events (0% red-tier recall — see
+    # docs/RED_TIER_RECALL_DIAGNOSIS.md). The APCD feed closes that gap to
+    # ~1–2 h. Best-effort: a feed failure degrades to the stale seed, never
+    # blocks the run.
+    try:
+        realtime_df = load_realtime_h2s(s3)
+        context.log.info(
+            f"✓ Realtime H2S: {len(realtime_df)} rows, newest {realtime_df['time'].max()}"
+        )
+    except Exception as e:  # noqa: BLE001 — top-up is best-effort
+        realtime_df = None
+        context.log.warning(f"Realtime H2S feed unavailable — seeding from modeldata only: {e}")
+
     # --- Forecast met data (same loading as the daily pipeline) ------------
     try:
         fc_df = pd.read_parquet(s3.publicUrl(path="latest/tijuana/forecast_data/model_forecast.parquet"))
@@ -191,18 +207,33 @@ def h2s_products(
 
     # --- Run products per station × variant ---------------------------------
     all_rows: list[pd.DataFrame] = []
+    seed_info: dict[str, dict] = {}
     for site_name, station in products_model_artifacts.items():
         ss = obs_df[obs_df["site_name"] == site_name].sort_values("time")
-        if len(ss) == 0:
+        h2s_series = merge_h2s_series(ss, realtime_df, site_name)
+        if len(h2s_series) == 0:
             context.log.warning(f"No observations for {site_name} — skipping")
             continue
-        h2s_history = ss["H2S"].tail(24).tolist()
+        gap_h = seed_gap_hours(h2s_series)
+        seed_info[site_name] = {
+            "seed_time": str(h2s_series["time"].iloc[-1]),
+            "seed_gap_hours": round(gap_h, 1),
+            "seed_h2s": float(h2s_series["H2S"].iloc[-1]),
+        }
+        if gap_h > 3:
+            context.log.warning(
+                f"⚠ {site_name}: H2S seed is {gap_h:.1f} h old — nowcast leads will "
+                "not reflect current sensor readings (realtime feed stale or down)"
+            )
+        h2s_history = h2s_series["H2S"].tail(24).tolist()
         last_state = {
-            "h2s": float(ss.iloc[-1]["H2S"]),
-            "h2s_6h": float(ss.tail(6)["H2S"].mean()),
-            "h2s_24h": float(ss.tail(24)["H2S"].mean()),
-            "flow": float(ss.iloc[-1].get(FLOW_COL, 2.0) or 2.0),
-            "flow_24h": float(ss.tail(24).get(FLOW_COL, pd.Series([2.0])).mean()),
+            "h2s": float(h2s_series["H2S"].iloc[-1]),
+            "h2s_6h": float(h2s_series["H2S"].tail(6).mean()),
+            "h2s_24h": float(h2s_series["H2S"].tail(24).mean()),
+            # Flow comes from modeldata only — the realtime feed is H2S-only,
+            # and a day-old flow lag is tolerable where a day-old H2S lag isn't.
+            "flow": float(ss.iloc[-1].get(FLOW_COL, 2.0) or 2.0) if len(ss) else 2.0,
+            "flow_24h": float(ss.tail(24).get(FLOW_COL, pd.Series([2.0])).mean()) if len(ss) else 2.0,
         }
 
         sfc = fc_df.head(forecast_hours).copy().reset_index(drop=True)
@@ -213,8 +244,16 @@ def h2s_products(
             if variant not in station:
                 continue
             feature_cols = station["_features"][variant]
-            for col in feature_cols:
-                if col not in sfc.columns:
+            missing_cols = [col for col in feature_cols if col not in sfc.columns]
+            if missing_cols:
+                # Zero-filling a trained feature silently poisons the model
+                # (a constant-0 wind_x_stable_atm flattened the Evidence
+                # variant's skill) — keep the fallback but make it loud.
+                context.log.warning(
+                    f"  ⚠ {site_name} / {variant}: zero-filling missing feature "
+                    f"columns {missing_cols} — check _engineer_forecast_features"
+                )
+                for col in missing_cols:
                     sfc[col] = 0.0
 
             tasks = station[variant]
@@ -260,6 +299,8 @@ def h2s_products(
         "products": list(out["product"].unique()),
         "s3_path": run_path,
         "max_h2s_pred": float(out["h2s_pred"].max()),
+        "seed_info": dg.MetadataValue.json(seed_info),
+        "realtime_topup": realtime_df is not None,
     })
     return out
 
