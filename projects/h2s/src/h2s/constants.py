@@ -59,6 +59,7 @@ STATION_MODELS_ARCHIVE_BASE = 'tijuana/forecast/models/archive/stations'
 OBS_DATA_PATH = 'latest/tijuana/forecast_data/modeldata_h2s_nofill.parquet'
 FORECAST_DATA_PATH = 'latest/tijuana/forecast_data/model_forecast.parquet'
 FORECAST_DATA_15MIN_PATH = 'latest/tijuana/forecast_data/modeldata_forecast_15min.parquet'
+TIDAL_FORECAST_PATH = 'latest/tijuana/tidal_forecast/latest.csv'
 
 # Canonical class ordering (matches XGBoost LabelEncoder: alphabetical)
 H2S_CLASS_NAMES = ['green', 'orange', 'yellow']
