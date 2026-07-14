@@ -177,6 +177,47 @@ def build_cascade_message(
     return "\n".join(header + body + footer)
 
 
+def build_obs_backstop_message(
+    backstop: dict,
+    evaluated_at: pd.Timestamp,
+    fired_tiers: list[str],
+) -> str:
+    """Plain-text raw-sensor backstop alert (measured exceedance, no model).
+
+    ``backstop`` is the dict from ``evaluate_obs_backstop``; ``fired_tiers``
+    the subset actually being dispatched (post-debounce).
+    """
+    highest = fired_tiers[-1]
+    ev = backstop[highest]
+    lines = [
+        "📟 *H2S Sensor Backstop — NESTOR / Berry Elementary School*",
+        f"Evaluated: {_fmt_time(evaluated_at)}",
+        f"Measured H2S reached *{ev.peak_ppb:.1f} ppb* at {_hhmm(ev.peak_time)} "
+        f"(last {ev.window_h} h window).",
+        "Tiers exceeded by *observation*: "
+        + ", ".join(f"{_TIER_EMOJI[t]} {ALERT_TIERS[t]['label']} (≥{backstop[t].threshold_ppb} ppb)"
+                    for t in fired_tiers),
+        "",
+        f"→ {_SUGGESTED[highest]}",
+        "",
+        "_Raw-sensor trigger — fired directly off measured APCD readings because "
+        "the forecast cascade did not flag this level. Treat as an ongoing event, "
+        "not a forecast._",
+    ]
+    return "\n".join(lines)
+
+
+def build_obs_backstop_blocks(
+    backstop: dict,
+    evaluated_at: pd.Timestamp,
+    fired_tiers: list[str],
+) -> list[dict]:
+    """Block Kit payload for the raw-sensor backstop alert."""
+    return [
+        _mrkdwn_section(build_obs_backstop_message(backstop, evaluated_at, fired_tiers)),
+    ]
+
+
 def _mrkdwn_section(text: str) -> dict:
     """A section block, truncated to Slack's 3000-char text limit."""
     if len(text) > 2990:

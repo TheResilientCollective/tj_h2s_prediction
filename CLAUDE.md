@@ -313,6 +313,14 @@ the same recursion, distinguished by how far it has drifted from observed data:
 - **nowcast** (leads 1–3): recursion seeded at the last actual. Lead 1 is
   entirely observed; by lead 3 the short lags are predictions but the longer
   lags and rolling windows are still mostly actuals.
+
+**Seed freshness (2026-07 fix):** the H2S seed history is the modeldata
+parquet **topped up with the near-real-time APCD feed**
+(`h2s/forecasting/obs_freshness.py`) — modeldata alone only carries complete
+days (7–36 h stale), which made the products blind to in-progress events (0%
+red-tier recall; see `projects/h2s/docs/RED_TIER_RECALL_DIAGNOSIS.md`). A >3 h
+seed gap is logged per station and recorded in the asset's `seed_info`
+metadata. The daily pipeline's `station_forecasts` uses the same top-up.
 - **nearcast** (leads 4–6): the mid-window — lag_3h crosses into predictions
   at lead 4.
 - **forecast** (leads 7–24): by lead 7 every lag ≤6h is a prediction.
@@ -332,7 +340,12 @@ probabilities (`TRIGGER_VARIANT = PRIMARY_VARIANT = "lean"`) — Tier 1 P(>5) in
 nowcast, Tier 2 P(>10) in nearcast, Tier 3 P(>30) in forecast — and posts an
 escalating report to the ops Slack channel when a tier's peak probability clears
 its cutoff (`CASCADE_TRIGGERS`, all 0.5). Tiers fire independently (no nesting),
-and both variants (Lean drives, Evidence shown alongside) appear in the report. A separate observed >10 ppb "Alert Performance" state
+and both variants (Lean drives, Evidence shown alongside) appear in the report.
+Each cascade run also evaluates a **raw-sensor observation backstop**
+(`evaluate_obs_backstop`): a tier fires when *measured* H2S at NESTOR-BES over
+the last 3 h reaches its threshold, independent of the model probabilities,
+debounced via its own `tier_N_obs` state cells — so an in-progress exceedance
+cannot pass a cascade run silently even when the model is blind. A separate observed >10 ppb "Alert Performance" state
 machine (`h2s_alert_performance_sensor`, 5-min poll) opens/closes events and
 posts a forecast-vs-measured close-out. Both replaced the retired met-regime
 gate + sigmoid-score `tiered_alerts` system. The observation tiers

@@ -135,6 +135,79 @@ def _evaluate_tier(tier: str, cfg: dict, sdf: pd.DataFrame) -> TierEvaluation:
     )
 
 
+# ---------------------------------------------------------------------------
+# Observation backstop — raw-sensor exceedance trigger
+# ---------------------------------------------------------------------------
+# The 2026-07 red-tier recall investigation found the cascade silent during
+# ongoing 100+ ppb events because every tier reads the same model
+# probabilities: when the model is blind (e.g. a stale autoregressive seed),
+# the "backup" is blind on exactly the same days. The backstop fires a tier
+# directly off recent *measured* H2S — no model, no smoothing — so an
+# in-progress exceedance can never pass silently through a cascade run.
+
+OBS_BACKSTOP_WINDOW_H = 3  # look-back over recent measured hours
+
+
+@dataclass(frozen=True)
+class ObsBackstopEvaluation:
+    """One tier's raw-sensor verdict: did measured H2S already exceed it?"""
+
+    tier: str
+    threshold_ppb: int
+    window_h: int
+    peak_ppb: float | None       # max observed H2S in the window; None if no data
+    peak_time: pd.Timestamp | None
+    fired: bool
+
+
+def evaluate_obs_backstop(
+    obs_df: pd.DataFrame | None,
+    station: str = NB_SITE,
+    now: pd.Timestamp | None = None,
+    window_h: int = OBS_BACKSTOP_WINDOW_H,
+    triggers: dict | None = None,
+) -> dict[str, ObsBackstopEvaluation]:
+    """Evaluate the raw-sensor backstop for every tier.
+
+    ``obs_df`` is a normalized observation frame with columns
+    [site_name, time (UTC), H2S] (``h2s_ppb`` also accepted). A tier fires
+    when the max measured H2S over the last ``window_h`` hours reaches its
+    exceedance threshold. Missing/empty data degrades to non-firing tiers —
+    the backstop adds sensitivity, never availability risk.
+    """
+    triggers = triggers or CASCADE_TRIGGERS
+    now = now if now is not None else pd.Timestamp.now("UTC")
+
+    recent = pd.DataFrame()
+    value_col = "H2S"
+    if obs_df is not None and len(obs_df):
+        value_col = "H2S" if "H2S" in obs_df.columns else "h2s_ppb"
+        recent = obs_df[
+            (obs_df["site_name"] == station)
+            & (obs_df["time"] >= now - pd.Timedelta(hours=window_h))
+            & (obs_df["time"] <= now)
+        ].dropna(subset=[value_col])
+
+    peak_ppb: float | None = None
+    peak_time: pd.Timestamp | None = None
+    if len(recent):
+        peak_row = recent.loc[recent[value_col].idxmax()]
+        peak_ppb = float(peak_row[value_col])
+        peak_time = peak_row["time"]
+
+    return {
+        tier: ObsBackstopEvaluation(
+            tier=tier,
+            threshold_ppb=triggers[tier]["threshold_ppb"],
+            window_h=window_h,
+            peak_ppb=peak_ppb,
+            peak_time=peak_time,
+            fired=peak_ppb is not None and peak_ppb >= triggers[tier]["threshold_ppb"],
+        )
+        for tier in TIER_ORDER
+    }
+
+
 def _estimate_hours_h2s_6h(sdf: pd.DataFrame, threshold: float = H2S_THRESHOLD_LOW) -> int:
     """Predicted hours of detectable H2S (≥ threshold ppb) over leads 1–6."""
     next6 = sdf[(sdf["lead_hour"] >= 1) & (sdf["lead_hour"] <= 6)]

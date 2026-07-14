@@ -36,6 +36,10 @@ def load_state(s3) -> dict:
     cascade = state.setdefault("cascade", {})
     for tier in TIER_ORDER:
         cascade.setdefault(tier, _empty_cell())
+        # Raw-sensor backstop debounces independently of the model-driven
+        # tier: a model alert suppressed hours ago must not silence an
+        # observed exceedance happening now.
+        cascade.setdefault(f"{tier}_obs", _empty_cell())
     return state
 
 

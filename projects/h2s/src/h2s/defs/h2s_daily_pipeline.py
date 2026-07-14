@@ -40,6 +40,7 @@ from h2s.constants import (
     classify_risk,
     classify_risk_agreement,
 )
+from h2s.forecasting.obs_freshness import load_realtime_h2s, merge_h2s_series, seed_gap_hours
 from h2s.forecasting.recursive import VariantModels, run_products
 
 ENV_LABEL = os.environ.get("ENV_LABEL", "add_ENV_LABEL").upper()
@@ -159,6 +160,10 @@ def _engineer_forecast_features(fc_site: pd.DataFrame, last_state: dict) -> pd.D
 
     # Atmospheric stability
     df['stable_atm'] = ((df[SPEED_COL] < 5) & (df['is_night'] == 1)).astype(int)
+    # Trained interaction feature (feature_builder.py) — was missing here, so
+    # the Evidence variant scored with a constant 0.0 at inference.
+    if 'wind_x_stable_atm' not in df.columns:
+        df['wind_x_stable_atm'] = df[SPEED_COL] * df['stable_atm']
 
     # Interaction features
     if 'wind_temp_interaction' not in df.columns:
@@ -400,6 +405,19 @@ def station_forecasts(
     obs_df = obs_df[(obs_df['h2s_measured'] == True) & (obs_df['H2S'] <= 500)].copy()
     obs_df['H2S'] = obs_df['H2S'].clip(lower=0)
 
+    # Near-real-time seed top-up — modeldata only carries complete days, which
+    # left the recursion blind to in-progress events (see
+    # docs/RED_TIER_RECALL_DIAGNOSIS.md). Best-effort: failure degrades to the
+    # stale seed rather than blocking the forecast.
+    try:
+        realtime_df = load_realtime_h2s(s3)
+        context.log.info(
+            f"✓ Realtime H2S: {len(realtime_df)} rows, newest {realtime_df['time'].max()}"
+        )
+    except Exception as e:  # noqa: BLE001 — top-up is best-effort
+        realtime_df = None
+        context.log.warning(f"Realtime H2S feed unavailable — seeding from modeldata only: {e}")
+
     # Load model forecast from S3 (try parquet first, then CSV)
     try:
         fc_url = s3.publicUrl(path="latest/tijuana/forecast_data/model_forecast.parquet")
@@ -451,15 +469,23 @@ def station_forecasts(
         # Use stored feature list if available, otherwise fall back to MODEL_FEATURES
         feature_cols = station_models.get('_feature_cols', MODEL_FEATURES)
 
-        # Get last known state for lag initialization
+        # Get last known state for lag initialization (historical modeldata
+        # topped up with near-real-time APCD rows; flow stays modeldata-only)
         ss = obs_df[obs_df['site_name'] == site].sort_values('time')
-        if len(ss) > 0:
+        h2s_series = merge_h2s_series(ss, realtime_df, site)
+        if len(h2s_series) > 0:
+            gap_h = seed_gap_hours(h2s_series)
+            if gap_h > 3:
+                context.log.warning(
+                    f"⚠ {site}: H2S seed is {gap_h:.1f} h old — forecast will not "
+                    "reflect current sensor readings (realtime feed stale or down)"
+                )
             last_state = {
-                'h2s': float(ss.iloc[-1]['H2S']),
-                'h2s_6h': float(ss.tail(6)['H2S'].mean()),
-                'h2s_24h': float(ss.tail(24)['H2S'].mean()),
-                'flow': float(ss.iloc[-1].get(FLOW_COL, 2.0) or 2.0),
-                'flow_24h': float(ss.tail(24).get(FLOW_COL, pd.Series([2.0])).mean()),
+                'h2s': float(h2s_series['H2S'].iloc[-1]),
+                'h2s_6h': float(h2s_series['H2S'].tail(6).mean()),
+                'h2s_24h': float(h2s_series['H2S'].tail(24).mean()),
+                'flow': float(ss.iloc[-1].get(FLOW_COL, 2.0) or 2.0) if len(ss) else 2.0,
+                'flow_24h': float(ss.tail(24).get(FLOW_COL, pd.Series([2.0])).mean()) if len(ss) else 2.0,
             }
         else:
             last_state = {'h2s': 0, 'h2s_6h': 0, 'h2s_24h': 0, 'flow': 2.0, 'flow_24h': 2.0}
@@ -484,7 +510,9 @@ def station_forecasts(
         # exogenous features (wind rolls, cyclicals, flow, interactions). This
         # replaces the previous decay-heuristic single-shot predict, so the daily
         # forecast now matches the cascade/products and the Phase-5 store.
-        h2s_history = ss['H2S'].tail(24).tolist() if len(ss) > 0 else [last_state['h2s']]
+        h2s_history = (
+            h2s_series['H2S'].tail(24).tolist() if len(h2s_series) > 0 else [last_state['h2s']]
+        )
         # Emit P(>30) only for trusted stations; elsewhere clf_30ppb=None → p30
         # is NaN (see CLF_30PPB_STATIONS in constants).
         models = VariantModels(
