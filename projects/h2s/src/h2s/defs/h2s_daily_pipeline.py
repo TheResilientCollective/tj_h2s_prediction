@@ -184,11 +184,16 @@ def _engineer_forecast_features(fc_site: pd.DataFrame, last_state: dict) -> pd.D
     df['h2s_rolling_6h'] = lh6 * decay_fast
     df['h2s_rolling_24h'] = lh24 * decay_slow
 
-    # SBIWTP defaults for forecast mode (persistence)
+    # SBIWTP defaults for forecast mode (persistence). The effluent feed is
+    # unreliable — when a column exists but has null gaps, carry the last good
+    # value forward instead of letting NaN reach the model as fillna(0).
     for col in ['sbiwtp_flow_mgd', 'sbiwtp_anomaly', 'sbiwtp_deficit',
                 'sbiwtp_flow_x_temp', 'sbiwtp_hourly_mgd', 'sbiwtp_sli']:
+        fallback = last_state.get(f'sbiwtp_{col.split("_", 1)[1]}', 0.0)
         if col not in df.columns:
-            df[col] = last_state.get(f'sbiwtp_{col.split("_", 1)[1]}', 0.0)
+            df[col] = fallback
+        elif bool(df[col].isna().any()):
+            df[col] = df[col].ffill().fillna(fallback)
 
     # Tidal state encoding
     tidal_map = {'flood': 0, 'ebb': 1, 'slack high': 2, 'slack low': 3}

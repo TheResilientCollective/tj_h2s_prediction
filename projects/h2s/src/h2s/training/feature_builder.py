@@ -169,6 +169,15 @@ def ensure_base_features(df: pd.DataFrame, flow_col: str = FLOW_COL) -> pd.DataF
     for col, default in sbiwtp_defaults.items():
         if col not in df.columns:
             df[col] = default
+        elif bool(df[col].isna().any()):
+            # Effluent feed drops out intermittently — persist the last good
+            # reading rather than letting NaN fall through to a downstream
+            # fillna(0), which would read as a fake full-plant outage.
+            if 'site_name' in df.columns:
+                df[col] = df.groupby('site_name')[col].ffill()
+            else:
+                df[col] = df[col].ffill()
+            df[col] = df[col].fillna(default)
 
     return df
 
