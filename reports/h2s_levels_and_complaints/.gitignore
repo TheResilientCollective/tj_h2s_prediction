@@ -1,0 +1,5 @@
+# Cached raw pulls. Every file here is re-fetchable from a public URL by
+# common.py; see SOURCES in that module. Nothing here is authoritative.
+data/
+.venv/
+__pycache__/

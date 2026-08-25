@@ -1,0 +1,12 @@
+quantity,value
+complaints matched to a measured hour,2746.0
+median H2S at complaint time (ppb),9.2
+75th percentile (ppb),46.9
+95th percentile (ppb),200.3
+% of complaints in tier 'green',37.4
+% of complaints in tier 'orange',30.2
+% of complaints in tier 'yellow-high',18.0
+% of complaints in tier 'yellow',14.3
+km from filing point to NESTOR - BES,1.89
+km from filing point to SAN YSIDRO,3.19
+km from filing point to IB CIVIC CTR,4.17
