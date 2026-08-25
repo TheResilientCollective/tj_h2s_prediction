@@ -16,8 +16,8 @@ the mechanism — does not survive. Three tests are run:
   (c) **Do the local dispersion drivers explain it?** If cool nights trapped
       more, then calm and stable nights should be the dirty ones and the
       seasonal cycle should follow the seasonal cycle in calm/stable nights.
-      It runs the other way: August has the calmest and most stable nights of
-      the year and the cleanest air.
+      It runs the other way: late summer has the calmest and most stable
+      nights of the year and the cleanest air.
 
 Everything is computed on night hours (20:00–08:00 local), which is where
 essentially the whole hazard lives — see Figure 4.
@@ -153,7 +153,7 @@ def main() -> None:
     dax.tick_params(axis="y", colors=C.TIER_COLORS["orange"])
     dax.grid(False)
     ax.set_ylim(2.6, 8.6)
-    ax.set_title("(d) August has the calmest, most stable\nnights — and the cleanest air")
+    ax.set_title("(d) Late summer has the calmest, most\nstable nights — and the cleanest air")
     ax.legend(fontsize=7, loc="upper left")
 
     # --- (e) the cycle survives conditioning on wind direction --------------

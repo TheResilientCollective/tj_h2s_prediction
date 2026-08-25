@@ -32,9 +32,10 @@ River Valley. Four results:
    calendar months, mean night temperature correlates with the exceedance rate
    at ρ = −0.54. Within a month, night-to-night temperature deviations carry
    ρ = +0.03 — nothing. The local dispersion drivers run the wrong way
-   entirely: August has the calmest (3.4 m/s) and most stable (75% of hours
-   flagged stable) nights of the year and the cleanest air. The seasonality is
-   in the source, not in the weather at the monitor.
+   entirely: late summer has the year's calmest nights (August 3.4 m/s,
+   September 3.1, against 5.5 in March) and the highest stable-atmosphere
+   fraction (0.75–0.76 against 0.58), and also its cleanest air. The
+   seasonality is in the source, not in the weather at the monitor.
 
 A fifth result is operational rather than scientific: over the current
 validation window the deployed models' **P(>30 ppb) call fired on none of the
@@ -273,8 +274,12 @@ on a held-out slice of the training frame where the H₂S lag features hold
 | IB Civic Ctr | P(>10) | 0.997 | 0.939 | 0.525 | 33 |
 | IB Civic Ctr | P(>30) | 0.997 | 0.375 | 0.333 | 8 |
 
-(Lean variant; Evidence is within ±0.03 on every cell — the 14 extra features
-buy nothing. Full table: [`tables/tbl07_holdout_metrics.csv`](tables/tbl07_holdout_metrics.csv).)
+(Lean variant. The two variants are within 0.005 AUC of each other everywhere,
+and within ±0.03 recall at 5 and 10 ppb — the 14 extra Evidence features buy
+nothing there. They diverge only at 30 ppb where the positive counts are small:
+IB Civic Ctr scores 0.625 recall on Evidence against 0.375 on Lean, but that is
+five positives against three out of eight, which is noise. Full table:
+[`tables/tbl07_holdout_metrics.csv`](tables/tbl07_holdout_metrics.csv).)
 
 Read the right-hand column before the AUCs. IB Civic Center's P(>30) AUC of
 0.997 rests on **eight** positive hours. This is the number behind the
@@ -317,13 +322,16 @@ Figure 7d shows why: the P(>30) distribution on hours that reached 30 ppb is
 barely distinguishable from the distribution on hours that did not. The
 magnitude head fails on the same hours (Figure 7e) — median predicted 2 ppb
 against a median measured 43.6 ppb. This is the same failure mode as
-`docs/RED_TIER_RECALL_DIAGNOSIS.md`, and the window spans the 2026-07 seed
-freshness fix, so at least part of it is not the stale-seed problem.
+`docs/RED_TIER_RECALL_DIAGNOSIS.md`.
 
-Caveats that keep this honest: the window is 2.3 months, its last six weeks are
-the seasonal minimum, and 114 of the 129 forecast-product ≥30 hours fall before
-15 July. But 316 positives is not a small sample, and a recall of zero at *every*
-lead from 1 to 24 hours is not a sampling artifact. **The orange forecast tier
+Caveats that keep this honest. The window is 2.3 months and its last six weeks
+are the seasonal minimum. It spans the 2026-07 seed-freshness fix, but almost
+all the ≥30 ppb positives fall on the wrong side of it — 114 of the 129
+forecast-product ≥30 hours are before 15 July — so **this window cannot yet
+tell a stale-seed cause apart from a model one**, and re-checking after a full
+spring under the fixed seed is the first thing to do. That said, 316 positives
+is not a small sample, and a recall of zero at *every* lead from 1 to 24 hours
+is not a sampling artifact. **The orange forecast tier
 should be treated as non-functional until this is resolved.** The observation
 backstop in `cascade_alerts` (which fires on measured H₂S, independent of the
 model) is at present the only thing standing behind the orange tier.
@@ -389,9 +397,10 @@ Two nights in the same month at 10 °C and 16 °C are not meaningfully different
 If cool-night trapping drove the cycle, the calm and stable months would be the
 dirty ones. They are the clean ones:
 
-* **August has the year's calmest nights** (3.4 m/s vs 5.5 in March) **and the
-  highest stable-atmosphere fraction** (0.75 vs 0.58) — and 9.7% of night hours
-  over 5 ppb against March's 50.1%.
+* **Late summer has the year's calmest nights** (August 3.4 m/s, September 3.1,
+  against 5.5 in March) **and its highest stable-atmosphere fraction**
+  (0.75–0.76 against 0.58) — and 9.7% of August night hours over 5 ppb against
+  March's 50.1%.
 * **Down-valley (NE–SE) drainage wind is most frequent in Dec–Jan** (85% of
   January night hours, 83% of December's) — not in spring (41% in April). Yet
   December runs at 39% >5 ppb and April at 61%.
