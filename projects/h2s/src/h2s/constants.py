@@ -659,12 +659,18 @@ DISPERSION_DEFAULT_EMISSION_RATES_GS: dict[str, float] = {
 # Why < 1: every rate set above is calibrated against acute events (the March
 # 13 2026 394 ppb peak and the ≥30 ppb event windows of the inversions), so the
 # forecast reproduces event-level ppb under ordinary meteorology and reads high
-# day to day. 0.5 halves the forecast ppb (the plume is linear in Q). Override
-# per deployment with DISPERSION_EMISSION_SCALE, or per run via
-# ForwardForecastConfig.emission_scale; 1.0 restores the raw calibrated rates.
+# day to day. Verified against 779 stored runs (Apr–Oct 2026, 57.6k forecast
+# hours joined to measured H2S): raw forecast mean 20.6 ppb vs measured 3.6,
+# p95 78 vs 10, and 14.4% of hours ≥30 ppb vs 1.7% measured. 0.15 matches the
+# observed ≥30 ppb exceedance frequency (0.144), the p95 ratio (0.133) and
+# brings mean bias to ≈ −0.5 ppb. The plume is linear in Q, so the scale moves
+# every forecast ppb by the same factor. Override per deployment with
+# DISPERSION_EMISSION_SCALE, or per run via ForwardForecastConfig.emission_scale;
+# 1.0 restores the raw calibrated rates. Re-derive with
+# scripts/calibrate_emission_scale.py; see docs/DISPERSION_EMISSION_SCALE.md.
 # The scale used is recorded in every forecast payload (`emission_scale`,
 # `emission_rates_raw_g_s`) so outputs stay traceable to the unscaled rates.
-DISPERSION_EMISSION_SCALE: float = float(os.getenv("DISPERSION_EMISSION_SCALE", "0.5"))
+DISPERSION_EMISSION_SCALE: float = float(os.getenv("DISPERSION_EMISSION_SCALE", "0.15"))
 
 # GeoDemic-compatible grid outputs (Phase 1 integration)
 # Versioned paths use .format(run_tag=run_tag)

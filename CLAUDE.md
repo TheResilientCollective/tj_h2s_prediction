@@ -403,11 +403,14 @@ If `forecast_analysis_job` fails partway through, use **"Re-execute all"** in th
 
 **Forward forecast** (`dispersion_forecast_job`, runs every 6h):
 - Loads latest emission rates from S3 (or uses calibrated defaults: east=20, west=10, south=137 g/s)
-- Multiplies those rates by `DISPERSION_EMISSION_SCALE` (default 0.5; env var or
+- Multiplies those rates by `DISPERSION_EMISSION_SCALE` (default 0.15; env var or
   `ForwardForecastConfig.emission_scale`). The rates are calibrated on acute
-  events and read high under ordinary conditions; the plume is linear in Q, so
-  0.5 halves every forecast ppb. Payloads carry `emission_scale` +
-  `emission_rates_raw_g_s`. Set 1.0 for the raw calibrated rates.
+  events and over-predict ordinary conditions ~6–7× (Apr–Oct 2026 forecast vs
+  measured); 0.15 matches the observed ≥30 ppb exceedance rate. The plume is
+  linear in Q, so the scale moves every forecast ppb by the same factor.
+  Payloads carry `emission_scale` + `emission_rates_raw_g_s`. Set 1.0 for the
+  raw calibrated rates. Re-fit with `scripts/calibrate_emission_scale.py`; see
+  `projects/h2s/docs/DISPERSION_EMISSION_SCALE.md`.
 - Runs 72h Gaussian plume model using FORECAST meteorology
 - Checks next 6h for threshold crossings (30 ppb watch, 100 ppb critical)
 - Sends Slack alert if thresholds exceeded
