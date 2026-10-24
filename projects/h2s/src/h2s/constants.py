@@ -4,6 +4,8 @@
 S3 paths, station/source geography, hazard classification,
 and model feature lists — single source of truth.
 """
+import os
+
 # forecast schedule constant. When a forecast is updated (aka for when noaa hysplit files updated.
 SCHEDULE_6HR="20 5,11,17,23 * * *"
 SCHEDULE_1HR="20 * * * *"
@@ -649,6 +651,20 @@ DISPERSION_DEFAULT_EMISSION_RATES_GS: dict[str, float] = {
     "west":  10.0,   # Oneonta Slough / pump station
     "south": 137.0,  # Goat Canyon / cross-border (dominant nocturnal source)
 }
+
+# Uniform multiplier applied to whichever emission rates the Gaussian forward
+# forecast loads (calibrated defaults, inverted zone/per-source rates, geometry
+# NNLS Q, or the channel Q field) BEFORE the plume is evaluated.
+#
+# Why < 1: every rate set above is calibrated against acute events (the March
+# 13 2026 394 ppb peak and the ≥30 ppb event windows of the inversions), so the
+# forecast reproduces event-level ppb under ordinary meteorology and reads high
+# day to day. 0.5 halves the forecast ppb (the plume is linear in Q). Override
+# per deployment with DISPERSION_EMISSION_SCALE, or per run via
+# ForwardForecastConfig.emission_scale; 1.0 restores the raw calibrated rates.
+# The scale used is recorded in every forecast payload (`emission_scale`,
+# `emission_rates_raw_g_s`) so outputs stay traceable to the unscaled rates.
+DISPERSION_EMISSION_SCALE: float = float(os.getenv("DISPERSION_EMISSION_SCALE", "0.5"))
 
 # GeoDemic-compatible grid outputs (Phase 1 integration)
 # Versioned paths use .format(run_tag=run_tag)
