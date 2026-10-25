@@ -29,6 +29,7 @@ import pandas as pd
 from h2s.constants import (
     ALERT_TIERS,
     DISPERSION_DEFAULT_EMISSION_RATES_GS,
+    DISPERSION_EMISSION_SCALE,
     DISPERSION_FORECAST_LATEST_PATH,
     DISPERSION_FORECAST_PATH,
     DISPERSION_FORECAST_DETAILED_PATH,
@@ -76,6 +77,7 @@ from h2s.dispersion import (
 )
 from h2s.dispersion.gaussian import (
     run_forward_model_from_Q_field,
+    apply_emission_scale,
     run_forward_model_gridded_from_Q_field,
 )
 from h2s.dispersion.visualizations import (
@@ -147,6 +149,11 @@ class ForwardForecastConfig(dg.Config):
     # cadence_minutes to disable aggregation.
     animation_cadence_minutes: int = 60
     obs_bucket: str = "resilentpublic"
+    # Uniform multiplier on the loaded emission rates (see
+    # DISPERSION_EMISSION_SCALE in constants.py). The calibrated rates are
+    # event-level and read high under ordinary conditions; <1 lowers every
+    # forecast ppb proportionally. 1.0 = raw calibrated rates.
+    emission_scale: float = DISPERSION_EMISSION_SCALE
 
 
 class DispersionAlertConfig(dg.Config):
@@ -896,6 +903,21 @@ def gaussian_forward_forecast(
         emission_rates = dict(DISPERSION_DEFAULT_EMISSION_RATES_GS)
         log.warning(f"Could not load emission rates ({e}) — using calibrated defaults: {emission_rates} g/s")
 
+    # Scale the event-calibrated rates down to the configured operating level.
+    # Applied once here so the sensor timeseries, grid frames, alert check and
+    # visualizations all see the same rates.
+    emission_scale = float(config.emission_scale)
+    if use_geometry:
+        raw_rates = dict(source_q_g_s)
+        source_q_g_s = apply_emission_scale(source_q_g_s, emission_scale)
+    else:
+        raw_rates = {k: float(v) for k, v in emission_rates.items()}
+        emission_rates = apply_emission_scale(emission_rates, emission_scale)
+    log.info(
+        f"Emission scale {emission_scale:g}: Q_total {sum(raw_rates.values()):.1f} → "
+        f"{sum(raw_rates.values()) * emission_scale:.1f} g/s"
+    )
+
     start_time = fc_df["time"].min()
     log.info(
         f"Running Gaussian forward: start={start_time}, hours={config.forecast_hours}, "
@@ -911,6 +933,10 @@ def gaussian_forward_forecast(
             fc_df, emission_rates, start_time, config.forecast_hours,
             cadence_minutes=config.cadence_minutes,
         )
+
+    result.metadata["emission_scale"] = emission_scale
+    result.metadata["emission_rates_raw_g_s"] = raw_rates
+    result.metadata["rates_method"] = rates_method
 
     # Compute per-sensor peaks (ignoring NaN)
     peaks = {}
@@ -969,6 +995,8 @@ def gaussian_forward_forecast(
         "aggregation": "max",
         "forecast_hours": config.forecast_hours,
         "emission_rates_g_s": payload_rates,
+        "emission_scale": emission_scale,
+        "emission_rates_raw_g_s": raw_rates,
         "frames": animation_frames,
     }
     frames_json = json.dumps(animation_payload)
@@ -1036,6 +1064,8 @@ def gaussian_forward_forecast(
         "grid_shape":        dg.MetadataValue.text(f"{GRID_NROWS}x{GRID_NCOLS}"),
         "grid_n_frames":     dg.MetadataValue.int(len(animation_frames)),
         "emission_rates_g_s": dg.MetadataValue.json(payload_rates),
+        "emission_scale":     dg.MetadataValue.float(emission_scale),
+        "emission_rates_raw_g_s": dg.MetadataValue.json(raw_rates),
         "s3_path":           dg.MetadataValue.text(versioned_path),
         "s3_grid_latest":    dg.MetadataValue.text(DISPERSION_FORWARD_GRID_LATEST_PATH),
         "viz_heatmap":       dg.MetadataValue.text(heatmap_path),
@@ -1137,12 +1167,29 @@ def gaussian_forward_forecast_detailed(
             log.info(f"Top 5 sources: {top_5}")
         except Exception as e:
             log.warning(f"Could not load emission rates ({e}) — distributing defaults across 16 sources")
+            rates_method = "calibrated_default"
             emission_rates_per_source = {}
             for zone, sources in _ZONE_MAP.items():
                 zone_q = DISPERSION_DEFAULT_EMISSION_RATES_GS[zone]
                 per_source = zone_q / len(sources) if len(sources) > 0 else 0.0
                 for src in sources:
                     emission_rates_per_source[src] = round(per_source, 2)
+
+    # Scale the event-calibrated rates down to the configured operating level
+    # (same knob as the coarse forecast; see DISPERSION_EMISSION_SCALE).
+    emission_scale = float(config.emission_scale)
+    if q_field_rows:
+        raw_q_total = sum(float(r.get("Q_g_s", 0.0)) for r in q_field_rows)
+        q_field_rows = apply_emission_scale(q_field_rows, emission_scale)
+        raw_rates = {"channel_Q_field_total": raw_q_total}
+    else:
+        raw_rates = {k: float(v) for k, v in emission_rates_per_source.items()}
+        raw_q_total = sum(raw_rates.values())
+        emission_rates_per_source = apply_emission_scale(emission_rates_per_source, emission_scale)
+    log.info(
+        f"Emission scale {emission_scale:g}: Q_total {raw_q_total:.1f} → "
+        f"{raw_q_total * emission_scale:.1f} g/s"
+    )
 
     start_time = fc_df["time"].min()
     log.info(
@@ -1159,6 +1206,10 @@ def gaussian_forward_forecast_detailed(
             fc_df, emission_rates_per_source, start_time, config.forecast_hours,
             cadence_minutes=config.cadence_minutes,
         )
+
+    result.metadata["emission_scale"] = emission_scale
+    result.metadata["emission_rates_raw_g_s"] = raw_rates
+    result.metadata["rates_method"] = rates_method
 
     # Compute per-sensor peaks (ignoring NaN)
     peaks = {}
@@ -1233,6 +1284,8 @@ def gaussian_forward_forecast_detailed(
         "aggregation":            "max",
         "forecast_hours":         config.forecast_hours,
         "source_summary":         source_summary,
+        "emission_scale":         emission_scale,
+        "emission_rates_raw_g_s": raw_rates,
         "frames":                 animation_frames,
     }
     frames_json = json.dumps(animation_payload)
@@ -1301,6 +1354,8 @@ def gaussian_forward_forecast_detailed(
     return dg.MaterializeResult(metadata={
         "source_mode":       dg.MetadataValue.text(source_mode),
         "rates_method":      dg.MetadataValue.text(rates_method),
+        "emission_scale":    dg.MetadataValue.float(emission_scale),
+        "raw_Q_total_g_s":   dg.MetadataValue.float(float(raw_q_total)),
         "forecast_start":    dg.MetadataValue.text(str(start_time)),
         "forecast_hours":    dg.MetadataValue.int(config.forecast_hours),
         "n_sources":         dg.MetadataValue.int(int(n_sources_used)),

@@ -174,6 +174,35 @@ def gaussian_plume_concentration(
     return max(conc, 0.0)
 
 
+def apply_emission_scale(rates, scale: float):
+    """Return ``rates`` with every emission rate multiplied by ``scale``.
+
+    Accepts the three rate containers the forward forecasts use:
+
+    - ``{zone_or_source: Q g/s}`` dict → new dict with scaled values;
+    - a Q-field ``list[dict]`` (rows carrying ``Q_g_s``) → new list of shallow
+      row copies with ``Q_g_s`` scaled, other keys untouched;
+    - ``None`` → ``None``.
+
+    The plume is linear in Q, so scaling the rates by ``s`` scales every
+    forecast ppb by exactly ``s``. ``scale`` must be positive; 1.0 returns an
+    equal copy. The input is never mutated.
+    """
+    if scale <= 0 or not np.isfinite(scale):
+        raise ValueError(f"emission scale must be a positive finite number, got {scale!r}")
+    if rates is None:
+        return None
+    if isinstance(rates, dict):
+        return {k: float(v) * scale for k, v in rates.items()}
+    scaled = []
+    for row in rates:
+        new_row = dict(row)
+        if "Q_g_s" in new_row and new_row["Q_g_s"] is not None:
+            new_row["Q_g_s"] = float(new_row["Q_g_s"]) * scale
+        scaled.append(new_row)
+    return scaled
+
+
 @dataclass
 class ForwardModelResult:
     times: list
