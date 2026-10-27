@@ -30,6 +30,7 @@ from h2s.constants import (
     ALERT_TIERS,
     DISPERSION_DEFAULT_EMISSION_RATES_GS,
     DISPERSION_EMISSION_SCALE,
+    DISPERSION_ZONE_SCALE,
     DISPERSION_FORECAST_LATEST_PATH,
     DISPERSION_FORECAST_PATH,
     DISPERSION_FORECAST_DETAILED_PATH,
@@ -78,6 +79,7 @@ from h2s.dispersion import (
 from h2s.dispersion.gaussian import (
     run_forward_model_from_Q_field,
     apply_emission_scale,
+    apply_zone_scale,
     run_forward_model_gridded_from_Q_field,
 )
 from h2s.dispersion.visualizations import (
@@ -154,6 +156,10 @@ class ForwardForecastConfig(dg.Config):
     # event-level and read high under ordinary conditions; <1 lowers every
     # forecast ppb proportionally. 1.0 = raw calibrated rates.
     emission_scale: float = DISPERSION_EMISSION_SCALE
+    # Per-zone multipliers composed on top of emission_scale (see
+    # DISPERSION_ZONE_SCALE). Applied to zone-based rate sets only; the
+    # channel Q field is its own calibration and is left alone.
+    zone_scale: dict[str, float] = dict(DISPERSION_ZONE_SCALE)
 
 
 class DispersionAlertConfig(dg.Config):
@@ -907,15 +913,22 @@ def gaussian_forward_forecast(
     # Applied once here so the sensor timeseries, grid frames, alert check and
     # visualizations all see the same rates.
     emission_scale = float(config.emission_scale)
+    zone_scale = {k: float(v) for k, v in config.zone_scale.items()}
     if use_geometry:
         raw_rates = dict(source_q_g_s)
         source_q_g_s = apply_emission_scale(source_q_g_s, emission_scale)
+        source_q_g_s = apply_zone_scale(
+            source_q_g_s, zone_scale, zone_of={sid: spec.zone for sid, spec in geom_specs.items()}
+        )
+        scaled_total = sum(source_q_g_s.values())
     else:
         raw_rates = {k: float(v) for k, v in emission_rates.items()}
         emission_rates = apply_emission_scale(emission_rates, emission_scale)
+        emission_rates = apply_zone_scale(emission_rates, zone_scale)
+        scaled_total = sum(emission_rates.values())
     log.info(
-        f"Emission scale {emission_scale:g}: Q_total {sum(raw_rates.values()):.1f} → "
-        f"{sum(raw_rates.values()) * emission_scale:.1f} g/s"
+        f"Emission scale {emission_scale:g} × zone {zone_scale}: Q_total "
+        f"{sum(raw_rates.values()):.1f} → {scaled_total:.1f} g/s"
     )
 
     start_time = fc_df["time"].min()
@@ -935,6 +948,7 @@ def gaussian_forward_forecast(
         )
 
     result.metadata["emission_scale"] = emission_scale
+    result.metadata["zone_scale"] = zone_scale
     result.metadata["emission_rates_raw_g_s"] = raw_rates
     result.metadata["rates_method"] = rates_method
 
@@ -996,6 +1010,7 @@ def gaussian_forward_forecast(
         "forecast_hours": config.forecast_hours,
         "emission_rates_g_s": payload_rates,
         "emission_scale": emission_scale,
+        "zone_scale": zone_scale,
         "emission_rates_raw_g_s": raw_rates,
         "frames": animation_frames,
     }
@@ -1065,6 +1080,7 @@ def gaussian_forward_forecast(
         "grid_n_frames":     dg.MetadataValue.int(len(animation_frames)),
         "emission_rates_g_s": dg.MetadataValue.json(payload_rates),
         "emission_scale":     dg.MetadataValue.float(emission_scale),
+        "zone_scale":         dg.MetadataValue.json(zone_scale),
         "emission_rates_raw_g_s": dg.MetadataValue.json(raw_rates),
         "s3_path":           dg.MetadataValue.text(versioned_path),
         "s3_grid_latest":    dg.MetadataValue.text(DISPERSION_FORWARD_GRID_LATEST_PATH),
@@ -1178,17 +1194,26 @@ def gaussian_forward_forecast_detailed(
     # Scale the event-calibrated rates down to the configured operating level
     # (same knob as the coarse forecast; see DISPERSION_EMISSION_SCALE).
     emission_scale = float(config.emission_scale)
+    zone_scale = {k: float(v) for k, v in config.zone_scale.items()}
     if q_field_rows:
+        # The channel Q field is its own data-fitted calibration: global scale
+        # only, no per-zone adjustment.
         raw_q_total = sum(float(r.get("Q_g_s", 0.0)) for r in q_field_rows)
         q_field_rows = apply_emission_scale(q_field_rows, emission_scale)
         raw_rates = {"channel_Q_field_total": raw_q_total}
+        scaled_total = raw_q_total * emission_scale
     else:
         raw_rates = {k: float(v) for k, v in emission_rates_per_source.items()}
         raw_q_total = sum(raw_rates.values())
         emission_rates_per_source = apply_emission_scale(emission_rates_per_source, emission_scale)
+        emission_rates_per_source = apply_zone_scale(
+            emission_rates_per_source, zone_scale,
+            zone_of={src: zone for zone, srcs in _ZONE_MAP.items() for src in srcs},
+        )
+        scaled_total = sum(emission_rates_per_source.values())
     log.info(
-        f"Emission scale {emission_scale:g}: Q_total {raw_q_total:.1f} → "
-        f"{raw_q_total * emission_scale:.1f} g/s"
+        f"Emission scale {emission_scale:g} × zone {zone_scale if not q_field_rows else '(n/a: Q field)'}: "
+        f"Q_total {raw_q_total:.1f} → {scaled_total:.1f} g/s"
     )
 
     start_time = fc_df["time"].min()
@@ -1208,6 +1233,7 @@ def gaussian_forward_forecast_detailed(
         )
 
     result.metadata["emission_scale"] = emission_scale
+    result.metadata["zone_scale"] = None if q_field_rows else zone_scale
     result.metadata["emission_rates_raw_g_s"] = raw_rates
     result.metadata["rates_method"] = rates_method
 
@@ -1285,6 +1311,7 @@ def gaussian_forward_forecast_detailed(
         "forecast_hours":         config.forecast_hours,
         "source_summary":         source_summary,
         "emission_scale":         emission_scale,
+        "zone_scale":             None if q_field_rows else zone_scale,
         "emission_rates_raw_g_s": raw_rates,
         "frames":                 animation_frames,
     }
@@ -1355,6 +1382,7 @@ def gaussian_forward_forecast_detailed(
         "source_mode":       dg.MetadataValue.text(source_mode),
         "rates_method":      dg.MetadataValue.text(rates_method),
         "emission_scale":    dg.MetadataValue.float(emission_scale),
+        "zone_scale":        dg.MetadataValue.json({} if q_field_rows else zone_scale),
         "raw_Q_total_g_s":   dg.MetadataValue.float(float(raw_q_total)),
         "forecast_start":    dg.MetadataValue.text(str(start_time)),
         "forecast_hours":    dg.MetadataValue.int(config.forecast_hours),

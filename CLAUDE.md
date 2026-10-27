@@ -411,6 +411,13 @@ If `forecast_analysis_job` fails partway through, use **"Re-execute all"** in th
   Payloads carry `emission_scale` + `emission_rates_raw_g_s`. Set 1.0 for the
   raw calibrated rates. Re-fit with `scripts/calibrate_emission_scale.py`; see
   `projects/h2s/docs/DISPERSION_EMISSION_SCALE.md`.
+- Then applies `DISPERSION_ZONE_SCALE` per zone (default east 0.5, west 1.0,
+  south 1.0; env `DISPERSION_ZONE_SCALE_{EAST,WEST,SOUTH}` or
+  `ForwardForecastConfig.zone_scale`). The east emitter drives ~3/4 of the
+  SAN YSIDRO forecast and almost none of the other sensors, so halving it
+  removes the SAN YSIDRO over-prediction surgically. Zone-based rate sets only;
+  the channel Q field (detailed model) is its own calibration and is not
+  zone-scaled.
 - Runs 72h Gaussian plume model using FORECAST meteorology
 - Checks next 6h for threshold crossings (30 ppb watch, 100 ppb critical)
 - Sends Slack alert if thresholds exceeded

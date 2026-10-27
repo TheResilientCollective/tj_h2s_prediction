@@ -203,6 +203,28 @@ def apply_emission_scale(rates, scale: float):
     return scaled
 
 
+def apply_zone_scale(rates: dict, zone_scale: dict, zone_of=None) -> dict:
+    """Return ``rates`` with each entry multiplied by its zone's factor.
+
+    - ``rates``: ``{key: Q g/s}``; keys are zone names (coarse model) or source
+      ids (16-source / geometry models).
+    - ``zone_scale``: ``{zone: factor}``; zones missing from it keep 1.0.
+    - ``zone_of``: optional ``{key: zone}``. When omitted the key itself is the
+      zone. A key with no zone mapping is left unscaled.
+
+    Factors must be non-negative and finite (0 switches a zone off). The input
+    is never mutated.
+    """
+    for z, f in zone_scale.items():
+        if f < 0 or not np.isfinite(f):
+            raise ValueError(f"zone scale for {z!r} must be a non-negative finite number, got {f!r}")
+    out = {}
+    for k, v in rates.items():
+        zone = zone_of.get(k) if zone_of is not None else k
+        out[k] = float(v) * float(zone_scale.get(zone, 1.0)) if zone is not None else float(v)
+    return out
+
+
 @dataclass
 class ForwardModelResult:
     times: list

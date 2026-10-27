@@ -672,6 +672,26 @@ DISPERSION_DEFAULT_EMISSION_RATES_GS: dict[str, float] = {
 # `emission_rates_raw_g_s`) so outputs stay traceable to the unscaled rates.
 DISPERSION_EMISSION_SCALE: float = float(os.getenv("DISPERSION_EMISSION_SCALE", "0.15"))
 
+# Per-zone multipliers composed ON TOP of DISPERSION_EMISSION_SCALE, applied to
+# the zone-based rate sets (3-zone coarse rates, the 16 per-source rates via
+# their zone, and the geometry model via SourceSpec.zone). Not applied to the
+# channel Q field, which is its own data-fitted calibration.
+#
+# east = 0.5: the east emitter (Stewart's Drain / Dairy Mart, ~1.6 km from
+# SAN YSIDRO) supplies ~71% of the SAN YSIDRO forecast mean and ~76% of its
+# peak hours but only ~12% at NESTOR-BES and ~3% at IB CIVIC CTR (Apr–Oct 2026
+# met, current inverted rates). With the global 0.15 alone SAN YSIDRO still
+# ran ~1.7× high at p95; east × 0.5 makes it unbiased at p95 and matches its
+# ≥10 ppb exceedance frequency (0.050 vs 0.052 measured) while moving the
+# other two sensors by < 3%. Override with DISPERSION_ZONE_SCALE_EAST /
+# _WEST / _SOUTH or per run via ForwardForecastConfig.zone_scale. See
+# docs/DISPERSION_EMISSION_SCALE.md.
+DISPERSION_ZONE_SCALE: dict[str, float] = {
+    "east":  float(os.getenv("DISPERSION_ZONE_SCALE_EAST", "0.5")),
+    "west":  float(os.getenv("DISPERSION_ZONE_SCALE_WEST", "1.0")),
+    "south": float(os.getenv("DISPERSION_ZONE_SCALE_SOUTH", "1.0")),
+}
+
 # GeoDemic-compatible grid outputs (Phase 1 integration)
 # Versioned paths use .format(run_tag=run_tag)
 DISPERSION_FORWARD_GRID_PATH = 'tijuana/dispersion/grids/forward_grid_{run_tag}.json'
